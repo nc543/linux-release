@@ -38,16 +38,21 @@
 #define _COMPONENT		ACPI_PCI_COMPONENT
 ACPI_MODULE_NAME("pci_root");
 #define ACPI_PCI_ROOT_CLASS		"pci_bridge"
-#define ACPI_PCI_ROOT_HID		"PNP0A03"
 #define ACPI_PCI_ROOT_DEVICE_NAME	"PCI Root Bridge"
 static int acpi_pci_root_add(struct acpi_device *device);
 static int acpi_pci_root_remove(struct acpi_device *device, int type);
 static int acpi_pci_root_start(struct acpi_device *device);
 
+static struct acpi_device_id root_device_ids[] = {
+	{"PNP0A03", 0},
+	{"", 0},
+};
+MODULE_DEVICE_TABLE(acpi, root_device_ids);
+
 static struct acpi_driver acpi_pci_root_driver = {
 	.name = "pci_root",
 	.class = ACPI_PCI_ROOT_CLASS,
-	.ids = ACPI_PCI_ROOT_HID,
+	.ids = root_device_ids,
 	.ops = {
 		.add = acpi_pci_root_add,
 		.remove = acpi_pci_root_remove,
@@ -179,13 +184,13 @@ static void acpi_pci_bridge_scan(struct acpi_device *device)
 		}
 }
 
-static int acpi_pci_root_add(struct acpi_device *device)
+static int __devinit acpi_pci_root_add(struct acpi_device *device)
 {
 	int result = 0;
 	struct acpi_pci_root *root = NULL;
 	struct acpi_pci_root *tmp;
 	acpi_status status = AE_OK;
-	unsigned long value = 0;
+	unsigned long long value = 0;
 	acpi_handle handle = NULL;
 	struct acpi_device *child;
 
@@ -201,7 +206,7 @@ static int acpi_pci_root_add(struct acpi_device *device)
 	root->device = device;
 	strcpy(acpi_device_name(device), ACPI_PCI_ROOT_DEVICE_NAME);
 	strcpy(acpi_device_class(device), ACPI_PCI_ROOT_CLASS);
-	acpi_driver_data(device) = root;
+	device->driver_data = root;
 
 	device->ops.bind = acpi_pci_bind;
 
@@ -371,14 +376,8 @@ static int acpi_pci_root_remove(struct acpi_device *device, int type)
 
 static int __init acpi_pci_root_init(void)
 {
-
 	if (acpi_pci_disabled)
 		return 0;
-
-	/* DEBUG:
-	   acpi_dbg_layer = ACPI_PCI_COMPONENT;
-	   acpi_dbg_level = 0xFFFFFFFF;
-	 */
 
 	if (acpi_bus_register_driver(&acpi_pci_root_driver) < 0)
 		return -ENODEV;

@@ -28,8 +28,8 @@
 #include <linux/mii.h>
 #include <linux/phy.h>
 #include <linux/workqueue.h>
+#include <linux/of_platform.h>
 
-#include <asm/of_platform.h>
 #include <asm/uaccess.h>
 #include <asm/irq.h>
 #include <asm/io.h>
@@ -42,10 +42,6 @@
 #include "ucc_geth_mii.h"
 
 #undef DEBUG
-
-#define DRV_DESC "QE UCC Gigabit Ethernet Controller"
-#define DRV_NAME "ucc_geth"
-#define DRV_VERSION "1.1"
 
 #define ugeth_printk(level, format, arg...)  \
         printk(level format "\n", ## arg)
@@ -64,8 +60,17 @@
 #else
 #define ugeth_vdbg(fmt, args...) do { } while (0)
 #endif				/* UGETH_VERBOSE_DEBUG */
+#define UGETH_MSG_DEFAULT	(NETIF_MSG_IFUP << 1 ) - 1
+
 
 static DEFINE_SPINLOCK(ugeth_lock);
+
+static struct {
+	u32 msg_enable;
+} debug = { -1 };
+
+module_param_named(debug, debug.msg_enable, int, 0);
+MODULE_PARM_DESC(debug, "Debug verbosity level (0=none, ..., 0xffff=all)");
 
 static struct ucc_geth_info ugeth_primary_info = {
 	.uf_info = {
@@ -104,6 +109,7 @@ static struct ucc_geth_info ugeth_primary_info = {
 	.maxRetransmission = 0xf,
 	.collisionWindow = 0x37,
 	.receiveFlowControl = 1,
+	.transmitFlowControl = 1,
 	.maxGroupAddrInHash = 4,
 	.maxIndAddrInHash = 4,
 	.prel = 7,
@@ -139,14 +145,16 @@ static struct ucc_geth_info ugeth_primary_info = {
 	.numStationAddresses = UCC_GETH_NUM_OF_STATION_ADDRESSES_1,
 	.largestexternallookupkeysize =
 	    QE_FLTR_LARGEST_EXTERNAL_TABLE_LOOKUP_KEY_SIZE_NONE,
-	.statisticsMode = UCC_GETH_STATISTICS_GATHERING_MODE_NONE,
+	.statisticsMode = UCC_GETH_STATISTICS_GATHERING_MODE_HARDWARE |
+		UCC_GETH_STATISTICS_GATHERING_MODE_FIRMWARE_TX |
+		UCC_GETH_STATISTICS_GATHERING_MODE_FIRMWARE_RX,
 	.vlanOperationTagged = UCC_GETH_VLAN_OPERATION_TAGGED_NOP,
 	.vlanOperationNonTagged = UCC_GETH_VLAN_OPERATION_NON_TAGGED_NOP,
 	.rxQoSMode = UCC_GETH_QOS_MODE_DEFAULT,
 	.aufc = UPSMR_AUTOMATIC_FLOW_CONTROL_MODE_NONE,
 	.padAndCrc = MACCFG2_PAD_AND_CRC_MODE_PAD_AND_CRC,
-	.numThreadsTx = UCC_GETH_NUM_OF_THREADS_4,
-	.numThreadsRx = UCC_GETH_NUM_OF_THREADS_4,
+	.numThreadsTx = UCC_GETH_NUM_OF_THREADS_1,
+	.numThreadsRx = UCC_GETH_NUM_OF_THREADS_1,
 	.riscTx = QE_RISC_ALLOCATION_RISC1_AND_RISC2,
 	.riscRx = QE_RISC_ALLOCATION_RISC1_AND_RISC2,
 };
@@ -207,7 +215,8 @@ static struct list_head *dequeue(struct list_head *lh)
 	}
 }
 
-static struct sk_buff *get_new_skb(struct ucc_geth_private *ugeth, u8 *bd)
+static struct sk_buff *get_new_skb(struct ucc_geth_private *ugeth,
+		u8 __iomem *bd)
 {
 	struct sk_buff *skb = NULL;
 
@@ -227,21 +236,22 @@ static struct sk_buff *get_new_skb(struct ucc_geth_private *ugeth, u8 *bd)
 
 	skb->dev = ugeth->dev;
 
-	out_be32(&((struct qe_bd *)bd)->buf,
-		      dma_map_single(NULL,
+	out_be32(&((struct qe_bd __iomem *)bd)->buf,
+		      dma_map_single(&ugeth->dev->dev,
 				     skb->data,
 				     ugeth->ug_info->uf_info.max_rx_buf_length +
 				     UCC_GETH_RX_DATA_BUF_ALIGNMENT,
 				     DMA_FROM_DEVICE));
 
-	out_be32((u32 *)bd, (R_E | R_I | (in_be32((u32 *)bd) & R_W)));
+	out_be32((u32 __iomem *)bd,
+			(R_E | R_I | (in_be32((u32 __iomem*)bd) & R_W)));
 
 	return skb;
 }
 
 static int rx_bd_buffer_set(struct ucc_geth_private *ugeth, u8 rxQ)
 {
-	u8 *bd;
+	u8 __iomem *bd;
 	u32 bd_status;
 	struct sk_buff *skb;
 	int i;
@@ -250,7 +260,7 @@ static int rx_bd_buffer_set(struct ucc_geth_private *ugeth, u8 rxQ)
 	i = 0;
 
 	do {
-		bd_status = in_be32((u32*)bd);
+		bd_status = in_be32((u32 __iomem *)bd);
 		skb = get_new_skb(ugeth, bd);
 
 		if (!skb)	/* If can not allocate data buffer,
@@ -268,7 +278,7 @@ static int rx_bd_buffer_set(struct ucc_geth_private *ugeth, u8 rxQ)
 }
 
 static int fill_init_enet_entries(struct ucc_geth_private *ugeth,
-				  volatile u32 *p_start,
+				  u32 *p_start,
 				  u8 num_entries,
 				  u32 thread_size,
 				  u32 thread_alignment,
@@ -281,7 +291,8 @@ static int fill_init_enet_entries(struct ucc_geth_private *ugeth,
 
 	for (i = 0; i < num_entries; i++) {
 		if ((snum = qe_get_snum()) < 0) {
-			ugeth_err("fill_init_enet_entries: Can not get SNUM.");
+			if (netif_msg_ifup(ugeth))
+				ugeth_err("fill_init_enet_entries: Can not get SNUM.");
 			return snum;
 		}
 		if ((i == 0) && skip_page_for_first_entry)
@@ -291,8 +302,8 @@ static int fill_init_enet_entries(struct ucc_geth_private *ugeth,
 			init_enet_offset =
 			    qe_muram_alloc(thread_size, thread_alignment);
 			if (IS_ERR_VALUE(init_enet_offset)) {
-				ugeth_err
-		("fill_init_enet_entries: Can not allocate DPRAM memory.");
+				if (netif_msg_ifup(ugeth))
+					ugeth_err("fill_init_enet_entries: Can not allocate DPRAM memory.");
 				qe_put_snum((u8) snum);
 				return -ENOMEM;
 			}
@@ -306,7 +317,7 @@ static int fill_init_enet_entries(struct ucc_geth_private *ugeth,
 }
 
 static int return_init_enet_entries(struct ucc_geth_private *ugeth,
-				    volatile u32 *p_start,
+				    u32 *p_start,
 				    u8 num_entries,
 				    enum qe_risc_allocation risc,
 				    int skip_page_for_first_entry)
@@ -316,21 +327,22 @@ static int return_init_enet_entries(struct ucc_geth_private *ugeth,
 	int snum;
 
 	for (i = 0; i < num_entries; i++) {
+		u32 val = *p_start;
+
 		/* Check that this entry was actually valid --
 		needed in case failed in allocations */
-		if ((*p_start & ENET_INIT_PARAM_RISC_MASK) == risc) {
+		if ((val & ENET_INIT_PARAM_RISC_MASK) == risc) {
 			snum =
-			    (u32) (*p_start & ENET_INIT_PARAM_SNUM_MASK) >>
+			    (u32) (val & ENET_INIT_PARAM_SNUM_MASK) >>
 			    ENET_INIT_PARAM_SNUM_SHIFT;
 			qe_put_snum((u8) snum);
 			if (!((i == 0) && skip_page_for_first_entry)) {
 			/* First entry of Rx does not have page */
 				init_enet_offset =
-				    (in_be32(p_start) &
-				     ENET_INIT_PARAM_PTR_MASK);
+				    (val & ENET_INIT_PARAM_PTR_MASK);
 				qe_muram_free(init_enet_offset);
 			}
-			*(p_start++) = 0;	/* Just for cosmetics */
+			*p_start++ = 0;
 		}
 	}
 
@@ -339,7 +351,7 @@ static int return_init_enet_entries(struct ucc_geth_private *ugeth,
 
 #ifdef DEBUG
 static int dump_init_enet_entries(struct ucc_geth_private *ugeth,
-				  volatile u32 *p_start,
+				  u32 __iomem *p_start,
 				  u8 num_entries,
 				  u32 thread_size,
 				  enum qe_risc_allocation risc,
@@ -350,11 +362,13 @@ static int dump_init_enet_entries(struct ucc_geth_private *ugeth,
 	int snum;
 
 	for (i = 0; i < num_entries; i++) {
+		u32 val = in_be32(p_start);
+
 		/* Check that this entry was actually valid --
 		needed in case failed in allocations */
-		if ((*p_start & ENET_INIT_PARAM_RISC_MASK) == risc) {
+		if ((val & ENET_INIT_PARAM_RISC_MASK) == risc) {
 			snum =
-			    (u32) (*p_start & ENET_INIT_PARAM_SNUM_MASK) >>
+			    (u32) (val & ENET_INIT_PARAM_SNUM_MASK) >>
 			    ENET_INIT_PARAM_SNUM_SHIFT;
 			qe_put_snum((u8) snum);
 			if (!((i == 0) && skip_page_for_first_entry)) {
@@ -386,7 +400,7 @@ static struct enet_addr_container *get_enet_addr_container(void)
 	enet_addr_cont = kmalloc(sizeof(struct enet_addr_container), GFP_KERNEL);
 	if (!enet_addr_cont) {
 		ugeth_err("%s: No memory for enet_addr_container object.",
-			  __FUNCTION__);
+			  __func__);
 		return NULL;
 	}
 
@@ -413,7 +427,7 @@ static int hw_add_addr_in_paddr(struct ucc_geth_private *ugeth,
 	struct ucc_geth_82xx_address_filtering_pram *p_82xx_addr_filt;
 
 	if (!(paddr_num < NUM_OF_PADDRS)) {
-		ugeth_warn("%s: Illegal paddr_num.", __FUNCTION__);
+		ugeth_warn("%s: Illegal paddr_num.", __func__);
 		return -EINVAL;
 	}
 
@@ -430,15 +444,15 @@ static int hw_add_addr_in_paddr(struct ucc_geth_private *ugeth,
 
 static int hw_clear_addr_in_paddr(struct ucc_geth_private *ugeth, u8 paddr_num)
 {
-	struct ucc_geth_82xx_address_filtering_pram *p_82xx_addr_filt;
+	struct ucc_geth_82xx_address_filtering_pram __iomem *p_82xx_addr_filt;
 
 	if (!(paddr_num < NUM_OF_PADDRS)) {
-		ugeth_warn("%s: Illagel paddr_num.", __FUNCTION__);
+		ugeth_warn("%s: Illagel paddr_num.", __func__);
 		return -EINVAL;
 	}
 
 	p_82xx_addr_filt =
-	    (struct ucc_geth_82xx_address_filtering_pram *) ugeth->p_rx_glbl_pram->
+	    (struct ucc_geth_82xx_address_filtering_pram __iomem *) ugeth->p_rx_glbl_pram->
 	    addressfiltering;
 
 	/* Writing address ff.ff.ff.ff.ff.ff disables address
@@ -453,11 +467,11 @@ static int hw_clear_addr_in_paddr(struct ucc_geth_private *ugeth, u8 paddr_num)
 static void hw_add_addr_in_hash(struct ucc_geth_private *ugeth,
                                 u8 *p_enet_addr)
 {
-	struct ucc_geth_82xx_address_filtering_pram *p_82xx_addr_filt;
+	struct ucc_geth_82xx_address_filtering_pram __iomem *p_82xx_addr_filt;
 	u32 cecr_subblock;
 
 	p_82xx_addr_filt =
-	    (struct ucc_geth_82xx_address_filtering_pram *) ugeth->p_rx_glbl_pram->
+	    (struct ucc_geth_82xx_address_filtering_pram __iomem *) ugeth->p_rx_glbl_pram->
 	    addressfiltering;
 
 	cecr_subblock =
@@ -477,7 +491,7 @@ static void hw_add_addr_in_hash(struct ucc_geth_private *ugeth,
 static void magic_packet_detection_enable(struct ucc_geth_private *ugeth)
 {
 	struct ucc_fast_private *uccf;
-	struct ucc_geth *ug_regs;
+	struct ucc_geth __iomem *ug_regs;
 	u32 maccfg2, uccm;
 
 	uccf = ugeth->uccf;
@@ -497,7 +511,7 @@ static void magic_packet_detection_enable(struct ucc_geth_private *ugeth)
 static void magic_packet_detection_disable(struct ucc_geth_private *ugeth)
 {
 	struct ucc_fast_private *uccf;
-	struct ucc_geth *ug_regs;
+	struct ucc_geth __iomem *ug_regs;
 	u32 maccfg2, uccm;
 
 	uccf = ugeth->uccf;
@@ -528,13 +542,13 @@ static void get_statistics(struct ucc_geth_private *ugeth,
 			   rx_firmware_statistics,
 			   struct ucc_geth_hardware_statistics *hardware_statistics)
 {
-	struct ucc_fast *uf_regs;
-	struct ucc_geth *ug_regs;
+	struct ucc_fast __iomem *uf_regs;
+	struct ucc_geth __iomem *ug_regs;
 	struct ucc_geth_tx_firmware_statistics_pram *p_tx_fw_statistics_pram;
 	struct ucc_geth_rx_firmware_statistics_pram *p_rx_fw_statistics_pram;
 
 	ug_regs = ugeth->ug_regs;
-	uf_regs = (struct ucc_fast *) ug_regs;
+	uf_regs = (struct ucc_fast __iomem *) ug_regs;
 	p_tx_fw_statistics_pram = ugeth->p_tx_fw_statistics_pram;
 	p_rx_fw_statistics_pram = ugeth->p_rx_fw_statistics_pram;
 
@@ -1122,9 +1136,9 @@ static void dump_regs(struct ucc_geth_private *ugeth)
 }
 #endif /* DEBUG */
 
-static void init_default_reg_vals(volatile u32 *upsmr_register,
-				  volatile u32 *maccfg1_register,
-				  volatile u32 *maccfg2_register)
+static void init_default_reg_vals(u32 __iomem *upsmr_register,
+				  u32 __iomem *maccfg1_register,
+				  u32 __iomem *maccfg2_register)
 {
 	out_be32(upsmr_register, UCC_GETH_UPSMR_INIT);
 	out_be32(maccfg1_register, UCC_GETH_MACCFG1_INIT);
@@ -1138,7 +1152,7 @@ static int init_half_duplex_params(int alt_beb,
 				   u8 alt_beb_truncation,
 				   u8 max_retransmissions,
 				   u8 collision_window,
-				   volatile u32 *hafdup_register)
+				   u32 __iomem *hafdup_register)
 {
 	u32 value = 0;
 
@@ -1170,7 +1184,7 @@ static int init_inter_frame_gap_params(u8 non_btb_cs_ipg,
 				       u8 non_btb_ipg,
 				       u8 min_ifg,
 				       u8 btb_ipg,
-				       volatile u32 *ipgifg_register)
+				       u32 __iomem *ipgifg_register)
 {
 	u32 value = 0;
 
@@ -1200,14 +1214,14 @@ static int init_inter_frame_gap_params(u8 non_btb_cs_ipg,
 	return 0;
 }
 
-static int init_flow_control_params(u32 automatic_flow_control_mode,
+int init_flow_control_params(u32 automatic_flow_control_mode,
 				    int rx_flow_control_enable,
 				    int tx_flow_control_enable,
 				    u16 pause_period,
 				    u16 extension_field,
-				    volatile u32 *upsmr_register,
-				    volatile u32 *uempr_register,
-				    volatile u32 *maccfg1_register)
+				    u32 __iomem *upsmr_register,
+				    u32 __iomem *uempr_register,
+				    u32 __iomem *maccfg1_register)
 {
 	u32 value = 0;
 
@@ -1233,8 +1247,8 @@ static int init_flow_control_params(u32 automatic_flow_control_mode,
 
 static int init_hw_statistics_gathering_mode(int enable_hardware_statistics,
 					     int auto_zero_hardware_statistics,
-					     volatile u32 *upsmr_register,
-					     volatile u16 *uescr_register)
+					     u32 __iomem *upsmr_register,
+					     u16 __iomem *uescr_register)
 {
 	u32 upsmr_value = 0;
 	u16 uescr_value = 0;
@@ -1260,12 +1274,12 @@ static int init_hw_statistics_gathering_mode(int enable_hardware_statistics,
 static int init_firmware_statistics_gathering_mode(int
 		enable_tx_firmware_statistics,
 		int enable_rx_firmware_statistics,
-		volatile u32 *tx_rmon_base_ptr,
+		u32 __iomem *tx_rmon_base_ptr,
 		u32 tx_firmware_statistics_structure_address,
-		volatile u32 *rx_rmon_base_ptr,
+		u32 __iomem *rx_rmon_base_ptr,
 		u32 rx_firmware_statistics_structure_address,
-		volatile u16 *temoder_register,
-		volatile u32 *remoder_register)
+		u16 __iomem *temoder_register,
+		u32 __iomem *remoder_register)
 {
 	/* Note: this function does not check if */
 	/* the parameters it receives are NULL   */
@@ -1297,8 +1311,8 @@ static int init_mac_station_addr_regs(u8 address_byte_0,
 				      u8 address_byte_3,
 				      u8 address_byte_4,
 				      u8 address_byte_5,
-				      volatile u32 *macstnaddr1_register,
-				      volatile u32 *macstnaddr2_register)
+				      u32 __iomem *macstnaddr1_register,
+				      u32 __iomem *macstnaddr2_register)
 {
 	u32 value = 0;
 
@@ -1334,7 +1348,7 @@ static int init_mac_station_addr_regs(u8 address_byte_0,
 }
 
 static int init_check_frame_length_mode(int length_check,
-					volatile u32 *maccfg2_register)
+					u32 __iomem *maccfg2_register)
 {
 	u32 value = 0;
 
@@ -1350,7 +1364,7 @@ static int init_check_frame_length_mode(int length_check,
 }
 
 static int init_preamble_length(u8 preamble_length,
-				volatile u32 *maccfg2_register)
+				u32 __iomem *maccfg2_register)
 {
 	u32 value = 0;
 
@@ -1366,7 +1380,7 @@ static int init_preamble_length(u8 preamble_length,
 
 static int init_rx_parameters(int reject_broadcast,
 			      int receive_short_frames,
-			      int promiscuous, volatile u32 *upsmr_register)
+			      int promiscuous, u32 __iomem *upsmr_register)
 {
 	u32 value = 0;
 
@@ -1393,7 +1407,7 @@ static int init_rx_parameters(int reject_broadcast,
 }
 
 static int init_max_rx_buff_len(u16 max_rx_buf_len,
-				volatile u16 *mrblr_register)
+				u16 __iomem *mrblr_register)
 {
 	/* max_rx_buf_len value must be a multiple of 128 */
 	if ((max_rx_buf_len == 0)
@@ -1405,8 +1419,8 @@ static int init_max_rx_buff_len(u16 max_rx_buf_len,
 }
 
 static int init_min_frame_len(u16 min_frame_length,
-			      volatile u16 *minflr_register,
-			      volatile u16 *mrblr_register)
+			      u16 __iomem *minflr_register,
+			      u16 __iomem *mrblr_register)
 {
 	u16 mrblr_value = 0;
 
@@ -1421,13 +1435,13 @@ static int init_min_frame_len(u16 min_frame_length,
 static int adjust_enet_interface(struct ucc_geth_private *ugeth)
 {
 	struct ucc_geth_info *ug_info;
-	struct ucc_geth *ug_regs;
-	struct ucc_fast *uf_regs;
+	struct ucc_geth __iomem *ug_regs;
+	struct ucc_fast __iomem *uf_regs;
 	int ret_val;
 	u32 upsmr, maccfg2, tbiBaseAddress;
 	u16 value;
 
-	ugeth_vdbg("%s: IN", __FUNCTION__);
+	ugeth_vdbg("%s: IN", __func__);
 
 	ug_info = ugeth->ug_info;
 	ug_regs = ugeth->ug_regs;
@@ -1450,6 +1464,8 @@ static int adjust_enet_interface(struct ucc_geth_private *ugeth)
 	if ((ugeth->phy_interface == PHY_INTERFACE_MODE_RMII) ||
 	    (ugeth->phy_interface == PHY_INTERFACE_MODE_RGMII) ||
 	    (ugeth->phy_interface == PHY_INTERFACE_MODE_RGMII_ID) ||
+	    (ugeth->phy_interface == PHY_INTERFACE_MODE_RGMII_RXID) ||
+	    (ugeth->phy_interface == PHY_INTERFACE_MODE_RGMII_TXID) ||
 	    (ugeth->phy_interface == PHY_INTERFACE_MODE_RTBI)) {
 		upsmr |= UPSMR_RPM;
 		switch (ugeth->max_speed) {
@@ -1486,9 +1502,9 @@ static int adjust_enet_interface(struct ucc_geth_private *ugeth)
 
 	ret_val = init_preamble_length(ug_info->prel, &ug_regs->maccfg2);
 	if (ret_val != 0) {
-		ugeth_err
-		    ("%s: Preamble length must be between 3 and 7 inclusive.",
-		     __FUNCTION__);
+		if (netif_msg_probe(ugeth))
+			ugeth_err("%s: Preamble length must be between 3 and 7 inclusive.",
+			     __func__);
 		return ret_val;
 	}
 
@@ -1505,8 +1521,8 @@ static int adjust_enet_interface(struct ucc_geth_private *ugeth)
 static void adjust_link(struct net_device *dev)
 {
 	struct ucc_geth_private *ugeth = netdev_priv(dev);
-	struct ucc_geth *ug_regs;
-	struct ucc_fast *uf_regs;
+	struct ucc_geth __iomem *ug_regs;
+	struct ucc_fast __iomem *uf_regs;
 	struct phy_device *phydev = ugeth->phydev;
 	unsigned long flags;
 	int new_state = 0;
@@ -1547,6 +1563,8 @@ static void adjust_link(struct net_device *dev)
 				if ((ugeth->phy_interface == PHY_INTERFACE_MODE_RMII) ||
 				    (ugeth->phy_interface == PHY_INTERFACE_MODE_RGMII) ||
 				    (ugeth->phy_interface == PHY_INTERFACE_MODE_RGMII_ID) ||
+				    (ugeth->phy_interface == PHY_INTERFACE_MODE_RGMII_RXID) ||
+				    (ugeth->phy_interface == PHY_INTERFACE_MODE_RGMII_TXID) ||
 				    (ugeth->phy_interface == PHY_INTERFACE_MODE_RTBI)) {
 					if (phydev->speed == SPEED_10)
 						upsmr |= UPSMR_R10M;
@@ -1570,7 +1588,6 @@ static void adjust_link(struct net_device *dev)
 		if (!ugeth->oldlink) {
 			new_state = 1;
 			ugeth->oldlink = 1;
-			netif_schedule(dev);
 		}
 	} else if (ugeth->oldlink) {
 			new_state = 1;
@@ -1664,9 +1681,9 @@ static int ugeth_graceful_stop_rx(struct ucc_geth_private * ugeth)
 	uccf = ugeth->uccf;
 
 	/* Clear acknowledge bit */
-	temp = ugeth->p_rx_glbl_pram->rxgstpack;
+	temp = in_8(&ugeth->p_rx_glbl_pram->rxgstpack);
 	temp &= ~GRACEFUL_STOP_ACKNOWLEDGE_RX;
-	ugeth->p_rx_glbl_pram->rxgstpack = temp;
+	out_8(&ugeth->p_rx_glbl_pram->rxgstpack, temp);
 
 	/* Keep issuing command and checking acknowledge bit until
 	it is asserted, according to spec */
@@ -1678,7 +1695,7 @@ static int ugeth_graceful_stop_rx(struct ucc_geth_private * ugeth)
 		qe_issue_cmd(QE_GRACEFUL_STOP_RX, cecr_subblock,
 			     QE_CR_PROTOCOL_ETHERNET, 0);
 
-		temp = ugeth->p_rx_glbl_pram->rxgstpack;
+		temp = in_8(&ugeth->p_rx_glbl_pram->rxgstpack);
 	} while (!(temp & GRACEFUL_STOP_ACKNOWLEDGE_RX));
 
 	uccf->stopped_rx = 1;
@@ -1726,7 +1743,8 @@ static int ugeth_enable(struct ucc_geth_private *ugeth, enum comm_dir mode)
 
 	/* check if the UCC number is in range. */
 	if (ugeth->ug_info->uf_info.ucc_num >= UCC_MAX_NUM) {
-		ugeth_err("%s: ucc_num out of range.", __FUNCTION__);
+		if (netif_msg_probe(ugeth))
+			ugeth_err("%s: ucc_num out of range.", __func__);
 		return -EINVAL;
 	}
 
@@ -1754,7 +1772,8 @@ static int ugeth_disable(struct ucc_geth_private * ugeth, enum comm_dir mode)
 
 	/* check if the UCC number is in range. */
 	if (ugeth->ug_info->uf_info.ucc_num >= UCC_MAX_NUM) {
-		ugeth_err("%s: ucc_num out of range.", __FUNCTION__);
+		if (netif_msg_probe(ugeth))
+			ugeth_err("%s: ucc_num out of range.", __func__);
 		return -EINVAL;
 	}
 
@@ -1975,19 +1994,20 @@ static int ugeth_82xx_filtering_clear_all_addr_in_hash(struct ucc_geth_private *
 						       enum enet_addr_type
 						       enet_addr_type)
 {
-	struct ucc_geth_82xx_address_filtering_pram *p_82xx_addr_filt;
+	struct ucc_geth_82xx_address_filtering_pram __iomem *p_82xx_addr_filt;
 	struct ucc_fast_private *uccf;
 	enum comm_dir comm_dir;
 	struct list_head *p_lh;
 	u16 i, num;
-	u32 *addr_h, *addr_l;
+	u32 __iomem *addr_h;
+	u32 __iomem *addr_l;
 	u8 *p_counter;
 
 	uccf = ugeth->uccf;
 
 	p_82xx_addr_filt =
-	    (struct ucc_geth_82xx_address_filtering_pram *) ugeth->p_rx_glbl_pram->
-	    addressfiltering;
+	    (struct ucc_geth_82xx_address_filtering_pram __iomem *)
+	    ugeth->p_rx_glbl_pram->addressfiltering;
 
 	if (enet_addr_type == ENET_ADDR_TYPE_GROUP) {
 		addr_h = &(p_82xx_addr_filt->gaddr_h);
@@ -2042,7 +2062,7 @@ static int ugeth_82xx_filtering_add_addr_in_paddr(struct ucc_geth_private *ugeth
 		ugeth_warn
 		    ("%s: multicast address added to paddr will have no "
 		     "effect - is this what you wanted?",
-		     __FUNCTION__);
+		     __func__);
 
 	ugeth->indAddrRegUsed[paddr_num] = 1;	/* mark this paddr as used */
 	/* store address in our database */
@@ -2063,13 +2083,15 @@ static int ugeth_82xx_filtering_clear_addr_in_paddr(struct ucc_geth_private *uge
 static void ucc_geth_memclean(struct ucc_geth_private *ugeth)
 {
 	u16 i, j;
-	u8 *bd;
+	u8 __iomem *bd;
 
 	if (!ugeth)
 		return;
 
-	if (ugeth->uccf)
+	if (ugeth->uccf) {
 		ucc_fast_free(ugeth->uccf);
+		ugeth->uccf = NULL;
+	}
 
 	if (ugeth->p_thread_data_tx) {
 		qe_muram_free(ugeth->thread_dat_tx_offset);
@@ -2135,9 +2157,9 @@ static void ucc_geth_memclean(struct ucc_geth_private *ugeth)
 			continue;
 		for (j = 0; j < ugeth->ug_info->bdRingLenTx[i]; j++) {
 			if (ugeth->tx_skbuff[i][j]) {
-				dma_unmap_single(NULL,
-						 ((qe_bd_t *)bd)->buf,
-						 (in_be32((u32 *)bd) &
+				dma_unmap_single(&ugeth->dev->dev,
+						 in_be32(&((struct qe_bd __iomem *)bd)->buf),
+						 (in_be32((u32 __iomem *)bd) &
 						  BD_LENGTH_MASK),
 						 DMA_TO_DEVICE);
 				dev_kfree_skb_any(ugeth->tx_skbuff[i][j]);
@@ -2163,8 +2185,8 @@ static void ucc_geth_memclean(struct ucc_geth_private *ugeth)
 			bd = ugeth->p_rx_bd_ring[i];
 			for (j = 0; j < ugeth->ug_info->bdRingLenRx[i]; j++) {
 				if (ugeth->rx_skbuff[i][j]) {
-					dma_unmap_single(NULL,
-						((struct qe_bd *)bd)->buf,
+					dma_unmap_single(&ugeth->dev->dev,
+						in_be32(&((struct qe_bd __iomem *)bd)->buf),
 						ugeth->ug_info->
 						uf_info.max_rx_buf_length +
 						UCC_GETH_RX_DATA_BUF_ALIGNMENT,
@@ -2200,11 +2222,9 @@ static void ucc_geth_set_multi(struct net_device *dev)
 {
 	struct ucc_geth_private *ugeth;
 	struct dev_mc_list *dmi;
-	struct ucc_fast *uf_regs;
-	struct ucc_geth_82xx_address_filtering_pram *p_82xx_addr_filt;
-	u8 tempaddr[6];
-	u8 *mcptr, *tdptr;
-	int i, j;
+	struct ucc_fast __iomem *uf_regs;
+	struct ucc_geth_82xx_address_filtering_pram __iomem *p_82xx_addr_filt;
+	int i;
 
 	ugeth = netdev_priv(dev);
 
@@ -2212,14 +2232,14 @@ static void ucc_geth_set_multi(struct net_device *dev)
 
 	if (dev->flags & IFF_PROMISC) {
 
-		uf_regs->upsmr |= UPSMR_PRO;
+		out_be32(&uf_regs->upsmr, in_be32(&uf_regs->upsmr) | UPSMR_PRO);
 
 	} else {
 
-		uf_regs->upsmr &= ~UPSMR_PRO;
+		out_be32(&uf_regs->upsmr, in_be32(&uf_regs->upsmr)&~UPSMR_PRO);
 
 		p_82xx_addr_filt =
-		    (struct ucc_geth_82xx_address_filtering_pram *) ugeth->
+		    (struct ucc_geth_82xx_address_filtering_pram __iomem *) ugeth->
 		    p_rx_glbl_pram->addressfiltering;
 
 		if (dev->flags & IFF_ALLMULTI) {
@@ -2243,19 +2263,10 @@ static void ucc_geth_set_multi(struct net_device *dev)
 				if (!(dmi->dmi_addr[0] & 1))
 					continue;
 
-				/* The address in dmi_addr is LSB first,
-				 * and taddr is MSB first.  We have to
-				 * copy bytes MSB first from dmi_addr.
-				 */
-				mcptr = (u8 *) dmi->dmi_addr + 5;
-				tdptr = (u8 *) tempaddr;
-				for (j = 0; j < 6; j++)
-					*tdptr++ = *mcptr--;
-
 				/* Ask CPM to run CRC and set bit in
 				 * filter mask.
 				 */
-				hw_add_addr_in_hash(ugeth, tempaddr);
+				hw_add_addr_in_hash(ugeth, dmi->dmi_addr);
 			}
 		}
 	}
@@ -2263,11 +2274,11 @@ static void ucc_geth_set_multi(struct net_device *dev)
 
 static void ucc_geth_stop(struct ucc_geth_private *ugeth)
 {
-	struct ucc_geth *ug_regs = ugeth->ug_regs;
+	struct ucc_geth __iomem *ug_regs = ugeth->ug_regs;
 	struct phy_device *phydev = ugeth->phydev;
 	u32 tempval;
 
-	ugeth_vdbg("%s: IN", __FUNCTION__);
+	ugeth_vdbg("%s: IN", __func__);
 
 	/* Disable the controller */
 	ugeth_disable(ugeth, COMM_DIR_RX_AND_TX);
@@ -2276,7 +2287,7 @@ static void ucc_geth_stop(struct ucc_geth_private *ugeth)
 	phy_stop(phydev);
 
 	/* Mask all interrupts */
-	out_be32(ugeth->uccf->p_ucce, 0x00000000);
+	out_be32(ugeth->uccf->p_uccm, 0x00000000);
 
 	/* Clear all interrupts */
 	out_be32(ugeth->uccf->p_ucce, 0xffffffff);
@@ -2300,13 +2311,11 @@ static int ucc_struct_init(struct ucc_geth_private *ugeth)
 	ug_info = ugeth->ug_info;
 	uf_info = &ug_info->uf_info;
 
-	/* Create CQs for hash tables */
-	INIT_LIST_HEAD(&ugeth->group_hash_q);
-	INIT_LIST_HEAD(&ugeth->ind_hash_q);
-
 	if (!((uf_info->bd_mem_part == MEM_PART_SYSTEM) ||
 	      (uf_info->bd_mem_part == MEM_PART_MURAM))) {
-		ugeth_err("%s: Bad memory partition value.", __FUNCTION__);
+		if (netif_msg_probe(ugeth))
+			ugeth_err("%s: Bad memory partition value.",
+					__func__);
 		return -EINVAL;
 	}
 
@@ -2315,9 +2324,10 @@ static int ucc_struct_init(struct ucc_geth_private *ugeth)
 		if ((ug_info->bdRingLenRx[i] < UCC_GETH_RX_BD_RING_SIZE_MIN) ||
 		    (ug_info->bdRingLenRx[i] %
 		     UCC_GETH_RX_BD_RING_SIZE_ALIGNMENT)) {
-			ugeth_err
-			    ("%s: Rx BD ring length must be multiple of 4,"
-				" no smaller than 8.", __FUNCTION__);
+			if (netif_msg_probe(ugeth))
+				ugeth_err
+				    ("%s: Rx BD ring length must be multiple of 4, no smaller than 8.",
+					__func__);
 			return -EINVAL;
 		}
 	}
@@ -2325,9 +2335,10 @@ static int ucc_struct_init(struct ucc_geth_private *ugeth)
 	/* Tx BD lengths */
 	for (i = 0; i < ug_info->numQueuesTx; i++) {
 		if (ug_info->bdRingLenTx[i] < UCC_GETH_TX_BD_RING_SIZE_MIN) {
-			ugeth_err
-			    ("%s: Tx BD ring length must be no smaller than 2.",
-			     __FUNCTION__);
+			if (netif_msg_probe(ugeth))
+				ugeth_err
+				    ("%s: Tx BD ring length must be no smaller than 2.",
+				     __func__);
 			return -EINVAL;
 		}
 	}
@@ -2335,31 +2346,35 @@ static int ucc_struct_init(struct ucc_geth_private *ugeth)
 	/* mrblr */
 	if ((uf_info->max_rx_buf_length == 0) ||
 	    (uf_info->max_rx_buf_length % UCC_GETH_MRBLR_ALIGNMENT)) {
-		ugeth_err
-		    ("%s: max_rx_buf_length must be non-zero multiple of 128.",
-		     __FUNCTION__);
+		if (netif_msg_probe(ugeth))
+			ugeth_err
+			    ("%s: max_rx_buf_length must be non-zero multiple of 128.",
+			     __func__);
 		return -EINVAL;
 	}
 
 	/* num Tx queues */
 	if (ug_info->numQueuesTx > NUM_TX_QUEUES) {
-		ugeth_err("%s: number of tx queues too large.", __FUNCTION__);
+		if (netif_msg_probe(ugeth))
+			ugeth_err("%s: number of tx queues too large.", __func__);
 		return -EINVAL;
 	}
 
 	/* num Rx queues */
 	if (ug_info->numQueuesRx > NUM_RX_QUEUES) {
-		ugeth_err("%s: number of rx queues too large.", __FUNCTION__);
+		if (netif_msg_probe(ugeth))
+			ugeth_err("%s: number of rx queues too large.", __func__);
 		return -EINVAL;
 	}
 
 	/* l2qt */
 	for (i = 0; i < UCC_GETH_VLAN_PRIORITY_MAX; i++) {
 		if (ug_info->l2qt[i] >= ug_info->numQueuesRx) {
-			ugeth_err
-			    ("%s: VLAN priority table entry must not be"
-				" larger than number of Rx queues.",
-			     __FUNCTION__);
+			if (netif_msg_probe(ugeth))
+				ugeth_err
+				    ("%s: VLAN priority table entry must not be"
+					" larger than number of Rx queues.",
+				     __func__);
 			return -EINVAL;
 		}
 	}
@@ -2367,26 +2382,29 @@ static int ucc_struct_init(struct ucc_geth_private *ugeth)
 	/* l3qt */
 	for (i = 0; i < UCC_GETH_IP_PRIORITY_MAX; i++) {
 		if (ug_info->l3qt[i] >= ug_info->numQueuesRx) {
-			ugeth_err
-			    ("%s: IP priority table entry must not be"
-				" larger than number of Rx queues.",
-			     __FUNCTION__);
+			if (netif_msg_probe(ugeth))
+				ugeth_err
+				    ("%s: IP priority table entry must not be"
+					" larger than number of Rx queues.",
+				     __func__);
 			return -EINVAL;
 		}
 	}
 
 	if (ug_info->cam && !ug_info->ecamptr) {
-		ugeth_err("%s: If cam mode is chosen, must supply cam ptr.",
-			  __FUNCTION__);
+		if (netif_msg_probe(ugeth))
+			ugeth_err("%s: If cam mode is chosen, must supply cam ptr.",
+				  __func__);
 		return -EINVAL;
 	}
 
 	if ((ug_info->numStationAddresses !=
 	     UCC_GETH_NUM_OF_STATION_ADDRESSES_1)
 	    && ug_info->rxExtendedFiltering) {
-		ugeth_err("%s: Number of station addresses greater than 1 "
-			  "not allowed in extended parsing mode.",
-			  __FUNCTION__);
+		if (netif_msg_probe(ugeth))
+			ugeth_err("%s: Number of station addresses greater than 1 "
+				  "not allowed in extended parsing mode.",
+				  __func__);
 		return -EINVAL;
 	}
 
@@ -2399,25 +2417,26 @@ static int ucc_struct_init(struct ucc_geth_private *ugeth)
 		uf_info->uccm_mask |= (UCCE_TXBF_SINGLE_MASK << i);
 	/* Initialize the general fast UCC block. */
 	if (ucc_fast_init(uf_info, &ugeth->uccf)) {
-		ugeth_err("%s: Failed to init uccf.", __FUNCTION__);
+		if (netif_msg_probe(ugeth))
+			ugeth_err("%s: Failed to init uccf.", __func__);
 		ucc_geth_memclean(ugeth);
 		return -ENOMEM;
 	}
 
-	ugeth->ug_regs = (struct ucc_geth *) ioremap(uf_info->regs, sizeof(struct ucc_geth));
+	ugeth->ug_regs = (struct ucc_geth __iomem *) ioremap(uf_info->regs, sizeof(struct ucc_geth));
 
 	return 0;
 }
 
 static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 {
-	struct ucc_geth_82xx_address_filtering_pram *p_82xx_addr_filt;
-	struct ucc_geth_init_pram *p_init_enet_pram;
+	struct ucc_geth_82xx_address_filtering_pram __iomem *p_82xx_addr_filt;
+	struct ucc_geth_init_pram __iomem *p_init_enet_pram;
 	struct ucc_fast_private *uccf;
 	struct ucc_geth_info *ug_info;
 	struct ucc_fast_info *uf_info;
-	struct ucc_fast *uf_regs;
-	struct ucc_geth *ug_regs;
+	struct ucc_fast __iomem *uf_regs;
+	struct ucc_geth __iomem *ug_regs;
 	int ret_val = -EINVAL;
 	u32 remoder = UCC_GETH_REMODER_INIT;
 	u32 init_enet_pram_offset, cecr_subblock, command, maccfg1;
@@ -2425,10 +2444,11 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 	u16 temoder = UCC_GETH_TEMODER_INIT;
 	u16 test;
 	u8 function_code = 0;
-	u8 *bd, *endOfRing;
+	u8 __iomem *bd;
+	u8 __iomem *endOfRing;
 	u8 numThreadsRxNumerical, numThreadsTxNumerical;
 
-	ugeth_vdbg("%s: IN", __FUNCTION__);
+	ugeth_vdbg("%s: IN", __func__);
 	uccf = ugeth->uccf;
 	ug_info = ugeth->ug_info;
 	uf_info = &ug_info->uf_info;
@@ -2452,7 +2472,9 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 		numThreadsRxNumerical = 8;
 		break;
 	default:
-		ugeth_err("%s: Bad number of Rx threads value.", __FUNCTION__);
+		if (netif_msg_ifup(ugeth))
+			ugeth_err("%s: Bad number of Rx threads value.",
+				       	__func__);
 		ucc_geth_memclean(ugeth);
 		return -EINVAL;
 		break;
@@ -2475,7 +2497,9 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 		numThreadsTxNumerical = 8;
 		break;
 	default:
-		ugeth_err("%s: Bad number of Tx threads value.", __FUNCTION__);
+		if (netif_msg_ifup(ugeth))
+			ugeth_err("%s: Bad number of Tx threads value.",
+				       	__func__);
 		ucc_geth_memclean(ugeth);
 		return -EINVAL;
 		break;
@@ -2507,7 +2531,7 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 	/* For more details see the hardware spec.           */
 	init_flow_control_params(ug_info->aufc,
 				 ug_info->receiveFlowControl,
-				 1,
+				 ug_info->transmitFlowControl,
 				 ug_info->pausePeriod,
 				 ug_info->extensionField,
 				 &uf_regs->upsmr,
@@ -2527,8 +2551,9 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 					      ug_info->backToBackInterFrameGap,
 					      &ug_regs->ipgifg);
 	if (ret_val != 0) {
-		ugeth_err("%s: IPGIFG initialization parameter too large.",
-			  __FUNCTION__);
+		if (netif_msg_ifup(ugeth))
+			ugeth_err("%s: IPGIFG initialization parameter too large.",
+				  __func__);
 		ucc_geth_memclean(ugeth);
 		return ret_val;
 	}
@@ -2544,8 +2569,9 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 					  ug_info->collisionWindow,
 					  &ug_regs->hafdup);
 	if (ret_val != 0) {
-		ugeth_err("%s: Half Duplex initialization parameter too large.",
-			  __FUNCTION__);
+		if (netif_msg_ifup(ugeth))
+			ugeth_err("%s: Half Duplex initialization parameter too large.",
+			  __func__);
 		ucc_geth_memclean(ugeth);
 		return ret_val;
 	}
@@ -2581,11 +2607,11 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 			if (UCC_GETH_TX_BD_RING_ALIGNMENT > 4)
 				align = UCC_GETH_TX_BD_RING_ALIGNMENT;
 			ugeth->tx_bd_ring_offset[j] =
-				kmalloc((u32) (length + align), GFP_KERNEL);
+				(u32) kmalloc((u32) (length + align), GFP_KERNEL);
 
 			if (ugeth->tx_bd_ring_offset[j] != 0)
 				ugeth->p_tx_bd_ring[j] =
-					(void*)((ugeth->tx_bd_ring_offset[j] +
+					(u8 __iomem *)((ugeth->tx_bd_ring_offset[j] +
 					align) & ~(align - 1));
 		} else if (uf_info->bd_mem_part == MEM_PART_MURAM) {
 			ugeth->tx_bd_ring_offset[j] =
@@ -2593,19 +2619,20 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 					   UCC_GETH_TX_BD_RING_ALIGNMENT);
 			if (!IS_ERR_VALUE(ugeth->tx_bd_ring_offset[j]))
 				ugeth->p_tx_bd_ring[j] =
-				    (u8 *) qe_muram_addr(ugeth->
+				    (u8 __iomem *) qe_muram_addr(ugeth->
 							 tx_bd_ring_offset[j]);
 		}
 		if (!ugeth->p_tx_bd_ring[j]) {
-			ugeth_err
-			    ("%s: Can not allocate memory for Tx bd rings.",
-			     __FUNCTION__);
+			if (netif_msg_ifup(ugeth))
+				ugeth_err
+				    ("%s: Can not allocate memory for Tx bd rings.",
+				     __func__);
 			ucc_geth_memclean(ugeth);
 			return -ENOMEM;
 		}
 		/* Zero unused end of bd ring, according to spec */
-		memset(ugeth->p_tx_bd_ring[j] +
-		       ug_info->bdRingLenTx[j] * sizeof(struct qe_bd), 0,
+		memset_io((void __iomem *)(ugeth->p_tx_bd_ring[j] +
+		       ug_info->bdRingLenTx[j] * sizeof(struct qe_bd)), 0,
 		       length - ug_info->bdRingLenTx[j] * sizeof(struct qe_bd));
 	}
 
@@ -2617,10 +2644,10 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 			if (UCC_GETH_RX_BD_RING_ALIGNMENT > 4)
 				align = UCC_GETH_RX_BD_RING_ALIGNMENT;
 			ugeth->rx_bd_ring_offset[j] =
-				kmalloc((u32) (length + align), GFP_KERNEL);
+				(u32) kmalloc((u32) (length + align), GFP_KERNEL);
 			if (ugeth->rx_bd_ring_offset[j] != 0)
 				ugeth->p_rx_bd_ring[j] =
-					(void*)((ugeth->rx_bd_ring_offset[j] +
+					(u8 __iomem *)((ugeth->rx_bd_ring_offset[j] +
 					align) & ~(align - 1));
 		} else if (uf_info->bd_mem_part == MEM_PART_MURAM) {
 			ugeth->rx_bd_ring_offset[j] =
@@ -2628,13 +2655,14 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 					   UCC_GETH_RX_BD_RING_ALIGNMENT);
 			if (!IS_ERR_VALUE(ugeth->rx_bd_ring_offset[j]))
 				ugeth->p_rx_bd_ring[j] =
-				    (u8 *) qe_muram_addr(ugeth->
+				    (u8 __iomem *) qe_muram_addr(ugeth->
 							 rx_bd_ring_offset[j]);
 		}
 		if (!ugeth->p_rx_bd_ring[j]) {
-			ugeth_err
-			    ("%s: Can not allocate memory for Rx bd rings.",
-			     __FUNCTION__);
+			if (netif_msg_ifup(ugeth))
+				ugeth_err
+				    ("%s: Can not allocate memory for Rx bd rings.",
+				     __func__);
 			ucc_geth_memclean(ugeth);
 			return -ENOMEM;
 		}
@@ -2648,8 +2676,9 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 					      GFP_KERNEL);
 
 		if (ugeth->tx_skbuff[j] == NULL) {
-			ugeth_err("%s: Could not allocate tx_skbuff",
-				  __FUNCTION__);
+			if (netif_msg_ifup(ugeth))
+				ugeth_err("%s: Could not allocate tx_skbuff",
+					  __func__);
 			ucc_geth_memclean(ugeth);
 			return -ENOMEM;
 		}
@@ -2661,14 +2690,14 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 		bd = ugeth->confBd[j] = ugeth->txBd[j] = ugeth->p_tx_bd_ring[j];
 		for (i = 0; i < ug_info->bdRingLenTx[j]; i++) {
 			/* clear bd buffer */
-			out_be32(&((struct qe_bd *)bd)->buf, 0);
+			out_be32(&((struct qe_bd __iomem *)bd)->buf, 0);
 			/* set bd status and length */
-			out_be32((u32 *)bd, 0);
+			out_be32((u32 __iomem *)bd, 0);
 			bd += sizeof(struct qe_bd);
 		}
 		bd -= sizeof(struct qe_bd);
 		/* set bd status and length */
-		out_be32((u32 *)bd, T_W);	/* for last BD set Wrap bit */
+		out_be32((u32 __iomem *)bd, T_W); /* for last BD set Wrap bit */
 	}
 
 	/* Init Rx bds */
@@ -2679,8 +2708,9 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 					      GFP_KERNEL);
 
 		if (ugeth->rx_skbuff[j] == NULL) {
-			ugeth_err("%s: Could not allocate rx_skbuff",
-				  __FUNCTION__);
+			if (netif_msg_ifup(ugeth))
+				ugeth_err("%s: Could not allocate rx_skbuff",
+					  __func__);
 			ucc_geth_memclean(ugeth);
 			return -ENOMEM;
 		}
@@ -2692,14 +2722,14 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 		bd = ugeth->rxBd[j] = ugeth->p_rx_bd_ring[j];
 		for (i = 0; i < ug_info->bdRingLenRx[j]; i++) {
 			/* set bd status and length */
-			out_be32((u32 *)bd, R_I);
+			out_be32((u32 __iomem *)bd, R_I);
 			/* clear bd buffer */
-			out_be32(&((struct qe_bd *)bd)->buf, 0);
+			out_be32(&((struct qe_bd __iomem *)bd)->buf, 0);
 			bd += sizeof(struct qe_bd);
 		}
 		bd -= sizeof(struct qe_bd);
 		/* set bd status and length */
-		out_be32((u32 *)bd, R_W); /* for last BD set Wrap bit */
+		out_be32((u32 __iomem *)bd, R_W); /* for last BD set Wrap bit */
 	}
 
 	/*
@@ -2711,17 +2741,18 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 	    qe_muram_alloc(sizeof(struct ucc_geth_tx_global_pram),
 			   UCC_GETH_TX_GLOBAL_PRAM_ALIGNMENT);
 	if (IS_ERR_VALUE(ugeth->tx_glbl_pram_offset)) {
-		ugeth_err
-		    ("%s: Can not allocate DPRAM memory for p_tx_glbl_pram.",
-		     __FUNCTION__);
+		if (netif_msg_ifup(ugeth))
+			ugeth_err
+			    ("%s: Can not allocate DPRAM memory for p_tx_glbl_pram.",
+			     __func__);
 		ucc_geth_memclean(ugeth);
 		return -ENOMEM;
 	}
 	ugeth->p_tx_glbl_pram =
-	    (struct ucc_geth_tx_global_pram *) qe_muram_addr(ugeth->
+	    (struct ucc_geth_tx_global_pram __iomem *) qe_muram_addr(ugeth->
 							tx_glbl_pram_offset);
 	/* Zero out p_tx_glbl_pram */
-	memset(ugeth->p_tx_glbl_pram, 0, sizeof(struct ucc_geth_tx_global_pram));
+	memset_io((void __iomem *)ugeth->p_tx_glbl_pram, 0, sizeof(struct ucc_geth_tx_global_pram));
 
 	/* Fill global PRAM */
 
@@ -2733,15 +2764,16 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 			   32 * (numThreadsTxNumerical == 1),
 			   UCC_GETH_THREAD_DATA_ALIGNMENT);
 	if (IS_ERR_VALUE(ugeth->thread_dat_tx_offset)) {
-		ugeth_err
-		    ("%s: Can not allocate DPRAM memory for p_thread_data_tx.",
-		     __FUNCTION__);
+		if (netif_msg_ifup(ugeth))
+			ugeth_err
+			    ("%s: Can not allocate DPRAM memory for p_thread_data_tx.",
+			     __func__);
 		ucc_geth_memclean(ugeth);
 		return -ENOMEM;
 	}
 
 	ugeth->p_thread_data_tx =
-	    (struct ucc_geth_thread_data_tx *) qe_muram_addr(ugeth->
+	    (struct ucc_geth_thread_data_tx __iomem *) qe_muram_addr(ugeth->
 							thread_dat_tx_offset);
 	out_be32(&ugeth->p_tx_glbl_pram->tqptr, ugeth->thread_dat_tx_offset);
 
@@ -2752,7 +2784,8 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 
 	/* iphoffset */
 	for (i = 0; i < TX_IP_OFFSET_ENTRY_MAX; i++)
-		ugeth->p_tx_glbl_pram->iphoffset[i] = ug_info->iphoffset[i];
+		out_8(&ugeth->p_tx_glbl_pram->iphoffset[i],
+				ug_info->iphoffset[i]);
 
 	/* SQPTR */
 	/* Size varies with number of Tx queues */
@@ -2761,15 +2794,16 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 			   sizeof(struct ucc_geth_send_queue_qd),
 			   UCC_GETH_SEND_QUEUE_QUEUE_DESCRIPTOR_ALIGNMENT);
 	if (IS_ERR_VALUE(ugeth->send_q_mem_reg_offset)) {
-		ugeth_err
-		    ("%s: Can not allocate DPRAM memory for p_send_q_mem_reg.",
-		     __FUNCTION__);
+		if (netif_msg_ifup(ugeth))
+			ugeth_err
+			    ("%s: Can not allocate DPRAM memory for p_send_q_mem_reg.",
+			     __func__);
 		ucc_geth_memclean(ugeth);
 		return -ENOMEM;
 	}
 
 	ugeth->p_send_q_mem_reg =
-	    (struct ucc_geth_send_queue_mem_region *) qe_muram_addr(ugeth->
+	    (struct ucc_geth_send_queue_mem_region __iomem *) qe_muram_addr(ugeth->
 			send_q_mem_reg_offset);
 	out_be32(&ugeth->p_tx_glbl_pram->sqptr, ugeth->send_q_mem_reg_offset);
 
@@ -2804,33 +2838,35 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 		    qe_muram_alloc(sizeof(struct ucc_geth_scheduler),
 				   UCC_GETH_SCHEDULER_ALIGNMENT);
 		if (IS_ERR_VALUE(ugeth->scheduler_offset)) {
-			ugeth_err
-			 ("%s: Can not allocate DPRAM memory for p_scheduler.",
-			     __FUNCTION__);
+			if (netif_msg_ifup(ugeth))
+				ugeth_err
+				 ("%s: Can not allocate DPRAM memory for p_scheduler.",
+				     __func__);
 			ucc_geth_memclean(ugeth);
 			return -ENOMEM;
 		}
 
 		ugeth->p_scheduler =
-		    (struct ucc_geth_scheduler *) qe_muram_addr(ugeth->
+		    (struct ucc_geth_scheduler __iomem *) qe_muram_addr(ugeth->
 							   scheduler_offset);
 		out_be32(&ugeth->p_tx_glbl_pram->schedulerbasepointer,
 			 ugeth->scheduler_offset);
 		/* Zero out p_scheduler */
-		memset(ugeth->p_scheduler, 0, sizeof(struct ucc_geth_scheduler));
+		memset_io((void __iomem *)ugeth->p_scheduler, 0, sizeof(struct ucc_geth_scheduler));
 
 		/* Set values in scheduler */
 		out_be32(&ugeth->p_scheduler->mblinterval,
 			 ug_info->mblinterval);
 		out_be16(&ugeth->p_scheduler->nortsrbytetime,
 			 ug_info->nortsrbytetime);
-		ugeth->p_scheduler->fracsiz = ug_info->fracsiz;
-		ugeth->p_scheduler->strictpriorityq = ug_info->strictpriorityq;
-		ugeth->p_scheduler->txasap = ug_info->txasap;
-		ugeth->p_scheduler->extrabw = ug_info->extrabw;
+		out_8(&ugeth->p_scheduler->fracsiz, ug_info->fracsiz);
+		out_8(&ugeth->p_scheduler->strictpriorityq,
+				ug_info->strictpriorityq);
+		out_8(&ugeth->p_scheduler->txasap, ug_info->txasap);
+		out_8(&ugeth->p_scheduler->extrabw, ug_info->extrabw);
 		for (i = 0; i < NUM_TX_QUEUES; i++)
-			ugeth->p_scheduler->weightfactor[i] =
-			    ug_info->weightfactor[i];
+			out_8(&ugeth->p_scheduler->weightfactor[i],
+			    ug_info->weightfactor[i]);
 
 		/* Set pointers to cpucount registers in scheduler */
 		ugeth->p_cpucount[0] = &(ugeth->p_scheduler->cpucount0);
@@ -2852,17 +2888,19 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 				   (struct ucc_geth_tx_firmware_statistics_pram),
 				   UCC_GETH_TX_STATISTICS_ALIGNMENT);
 		if (IS_ERR_VALUE(ugeth->tx_fw_statistics_pram_offset)) {
-			ugeth_err
-			    ("%s: Can not allocate DPRAM memory for"
-				" p_tx_fw_statistics_pram.", __FUNCTION__);
+			if (netif_msg_ifup(ugeth))
+				ugeth_err
+				    ("%s: Can not allocate DPRAM memory for"
+					" p_tx_fw_statistics_pram.",
+				       	__func__);
 			ucc_geth_memclean(ugeth);
 			return -ENOMEM;
 		}
 		ugeth->p_tx_fw_statistics_pram =
-		    (struct ucc_geth_tx_firmware_statistics_pram *)
+		    (struct ucc_geth_tx_firmware_statistics_pram __iomem *)
 		    qe_muram_addr(ugeth->tx_fw_statistics_pram_offset);
 		/* Zero out p_tx_fw_statistics_pram */
-		memset(ugeth->p_tx_fw_statistics_pram,
+		memset_io((void __iomem *)ugeth->p_tx_fw_statistics_pram,
 		       0, sizeof(struct ucc_geth_tx_firmware_statistics_pram));
 	}
 
@@ -2879,7 +2917,7 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 	test = in_be16(&ugeth->p_tx_glbl_pram->temoder);
 
 	/* Function code register value to be used later */
-	function_code = QE_BMR_BYTE_ORDER_BO_MOT | UCC_FAST_FUNCTION_CODE_GBL;
+	function_code = UCC_BMR_BO_BE | UCC_BMR_GBL;
 	/* Required for QE */
 
 	/* function code register */
@@ -2891,17 +2929,18 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 	    qe_muram_alloc(sizeof(struct ucc_geth_rx_global_pram),
 			   UCC_GETH_RX_GLOBAL_PRAM_ALIGNMENT);
 	if (IS_ERR_VALUE(ugeth->rx_glbl_pram_offset)) {
-		ugeth_err
-		    ("%s: Can not allocate DPRAM memory for p_rx_glbl_pram.",
-		     __FUNCTION__);
+		if (netif_msg_ifup(ugeth))
+			ugeth_err
+			    ("%s: Can not allocate DPRAM memory for p_rx_glbl_pram.",
+			     __func__);
 		ucc_geth_memclean(ugeth);
 		return -ENOMEM;
 	}
 	ugeth->p_rx_glbl_pram =
-	    (struct ucc_geth_rx_global_pram *) qe_muram_addr(ugeth->
+	    (struct ucc_geth_rx_global_pram __iomem *) qe_muram_addr(ugeth->
 							rx_glbl_pram_offset);
 	/* Zero out p_rx_glbl_pram */
-	memset(ugeth->p_rx_glbl_pram, 0, sizeof(struct ucc_geth_rx_global_pram));
+	memset_io((void __iomem *)ugeth->p_rx_glbl_pram, 0, sizeof(struct ucc_geth_rx_global_pram));
 
 	/* Fill global PRAM */
 
@@ -2912,15 +2951,16 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 			   sizeof(struct ucc_geth_thread_data_rx),
 			   UCC_GETH_THREAD_DATA_ALIGNMENT);
 	if (IS_ERR_VALUE(ugeth->thread_dat_rx_offset)) {
-		ugeth_err
-		    ("%s: Can not allocate DPRAM memory for p_thread_data_rx.",
-		     __FUNCTION__);
+		if (netif_msg_ifup(ugeth))
+			ugeth_err
+			    ("%s: Can not allocate DPRAM memory for p_thread_data_rx.",
+			     __func__);
 		ucc_geth_memclean(ugeth);
 		return -ENOMEM;
 	}
 
 	ugeth->p_thread_data_rx =
-	    (struct ucc_geth_thread_data_rx *) qe_muram_addr(ugeth->
+	    (struct ucc_geth_thread_data_rx __iomem *) qe_muram_addr(ugeth->
 							thread_dat_rx_offset);
 	out_be32(&ugeth->p_rx_glbl_pram->rqptr, ugeth->thread_dat_rx_offset);
 
@@ -2935,17 +2975,18 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 				   (struct ucc_geth_rx_firmware_statistics_pram),
 				   UCC_GETH_RX_STATISTICS_ALIGNMENT);
 		if (IS_ERR_VALUE(ugeth->rx_fw_statistics_pram_offset)) {
-			ugeth_err
-				("%s: Can not allocate DPRAM memory for"
-				" p_rx_fw_statistics_pram.", __FUNCTION__);
+			if (netif_msg_ifup(ugeth))
+				ugeth_err
+					("%s: Can not allocate DPRAM memory for"
+					" p_rx_fw_statistics_pram.", __func__);
 			ucc_geth_memclean(ugeth);
 			return -ENOMEM;
 		}
 		ugeth->p_rx_fw_statistics_pram =
-		    (struct ucc_geth_rx_firmware_statistics_pram *)
+		    (struct ucc_geth_rx_firmware_statistics_pram __iomem *)
 		    qe_muram_addr(ugeth->rx_fw_statistics_pram_offset);
 		/* Zero out p_rx_fw_statistics_pram */
-		memset(ugeth->p_rx_fw_statistics_pram, 0,
+		memset_io((void __iomem *)ugeth->p_rx_fw_statistics_pram, 0,
 		       sizeof(struct ucc_geth_rx_firmware_statistics_pram));
 	}
 
@@ -2957,15 +2998,16 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 			   sizeof(struct ucc_geth_rx_interrupt_coalescing_entry)
 			   + 4, UCC_GETH_RX_INTERRUPT_COALESCING_ALIGNMENT);
 	if (IS_ERR_VALUE(ugeth->rx_irq_coalescing_tbl_offset)) {
-		ugeth_err
-		    ("%s: Can not allocate DPRAM memory for"
-			" p_rx_irq_coalescing_tbl.", __FUNCTION__);
+		if (netif_msg_ifup(ugeth))
+			ugeth_err
+			    ("%s: Can not allocate DPRAM memory for"
+				" p_rx_irq_coalescing_tbl.", __func__);
 		ucc_geth_memclean(ugeth);
 		return -ENOMEM;
 	}
 
 	ugeth->p_rx_irq_coalescing_tbl =
-	    (struct ucc_geth_rx_interrupt_coalescing_table *)
+	    (struct ucc_geth_rx_interrupt_coalescing_table __iomem *)
 	    qe_muram_addr(ugeth->rx_irq_coalescing_tbl_offset);
 	out_be32(&ugeth->p_rx_glbl_pram->intcoalescingptr,
 		 ugeth->rx_irq_coalescing_tbl_offset);
@@ -3025,19 +3067,20 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 			    sizeof(struct ucc_geth_rx_prefetched_bds)),
 			   UCC_GETH_RX_BD_QUEUES_ALIGNMENT);
 	if (IS_ERR_VALUE(ugeth->rx_bd_qs_tbl_offset)) {
-		ugeth_err
-		    ("%s: Can not allocate DPRAM memory for p_rx_bd_qs_tbl.",
-		     __FUNCTION__);
+		if (netif_msg_ifup(ugeth))
+			ugeth_err
+			    ("%s: Can not allocate DPRAM memory for p_rx_bd_qs_tbl.",
+			     __func__);
 		ucc_geth_memclean(ugeth);
 		return -ENOMEM;
 	}
 
 	ugeth->p_rx_bd_qs_tbl =
-	    (struct ucc_geth_rx_bd_queues_entry *) qe_muram_addr(ugeth->
+	    (struct ucc_geth_rx_bd_queues_entry __iomem *) qe_muram_addr(ugeth->
 				    rx_bd_qs_tbl_offset);
 	out_be32(&ugeth->p_rx_glbl_pram->rbdqptr, ugeth->rx_bd_qs_tbl_offset);
 	/* Zero out p_rx_bd_qs_tbl */
-	memset(ugeth->p_rx_bd_qs_tbl,
+	memset_io((void __iomem *)ugeth->p_rx_bd_qs_tbl,
 	       0,
 	       ug_info->numQueuesRx * (sizeof(struct ucc_geth_rx_bd_queues_entry) +
 				       sizeof(struct ucc_geth_rx_prefetched_bds)));
@@ -3097,13 +3140,14 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 		&ugeth->p_rx_glbl_pram->remoder);
 
 	/* function code register */
-	ugeth->p_rx_glbl_pram->rstate = function_code;
+	out_8(&ugeth->p_rx_glbl_pram->rstate, function_code);
 
 	/* initialize extended filtering */
 	if (ug_info->rxExtendedFiltering) {
 		if (!ug_info->extendedFilteringChainPointer) {
-			ugeth_err("%s: Null Extended Filtering Chain Pointer.",
-				  __FUNCTION__);
+			if (netif_msg_ifup(ugeth))
+				ugeth_err("%s: Null Extended Filtering Chain Pointer.",
+					  __func__);
 			ucc_geth_memclean(ugeth);
 			return -EINVAL;
 		}
@@ -3114,15 +3158,16 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 		    qe_muram_alloc(sizeof(struct ucc_geth_exf_global_pram),
 		UCC_GETH_RX_EXTENDED_FILTERING_GLOBAL_PARAMETERS_ALIGNMENT);
 		if (IS_ERR_VALUE(ugeth->exf_glbl_param_offset)) {
-			ugeth_err
-				("%s: Can not allocate DPRAM memory for"
-				" p_exf_glbl_param.", __FUNCTION__);
+			if (netif_msg_ifup(ugeth))
+				ugeth_err
+					("%s: Can not allocate DPRAM memory for"
+					" p_exf_glbl_param.", __func__);
 			ucc_geth_memclean(ugeth);
 			return -ENOMEM;
 		}
 
 		ugeth->p_exf_glbl_param =
-		    (struct ucc_geth_exf_global_pram *) qe_muram_addr(ugeth->
+		    (struct ucc_geth_exf_global_pram __iomem *) qe_muram_addr(ugeth->
 				 exf_glbl_param_offset);
 		out_be32(&ugeth->p_rx_glbl_pram->exfGlobalParam,
 			 ugeth->exf_glbl_param_offset);
@@ -3137,7 +3182,7 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 			ugeth_82xx_filtering_clear_addr_in_paddr(ugeth, (u8) j);
 
 		p_82xx_addr_filt =
-		    (struct ucc_geth_82xx_address_filtering_pram *) ugeth->
+		    (struct ucc_geth_82xx_address_filtering_pram __iomem *) ugeth->
 		    p_rx_glbl_pram->addressfiltering;
 
 		ugeth_82xx_filtering_clear_all_addr_in_hash(ugeth,
@@ -3161,9 +3206,10 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 	 */
 	if (!(ugeth->p_init_enet_param_shadow =
 	      kmalloc(sizeof(struct ucc_geth_init_pram), GFP_KERNEL))) {
-		ugeth_err
-		    ("%s: Can not allocate memory for"
-			" p_UccInitEnetParamShadows.", __FUNCTION__);
+		if (netif_msg_ifup(ugeth))
+			ugeth_err
+			    ("%s: Can not allocate memory for"
+				" p_UccInitEnetParamShadows.", __func__);
 		ucc_geth_memclean(ugeth);
 		return -ENOMEM;
 	}
@@ -3196,8 +3242,9 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 		QE_FLTR_LARGEST_EXTERNAL_TABLE_LOOKUP_KEY_SIZE_8_BYTES)
 	    && (ug_info->largestexternallookupkeysize !=
 		QE_FLTR_LARGEST_EXTERNAL_TABLE_LOOKUP_KEY_SIZE_16_BYTES)) {
-		ugeth_err("%s: Invalid largest External Lookup Key Size.",
-			  __FUNCTION__);
+		if (netif_msg_ifup(ugeth))
+			ugeth_err("%s: Invalid largest External Lookup Key Size.",
+				  __func__);
 		ucc_geth_memclean(ugeth);
 		return -EINVAL;
 	}
@@ -3222,8 +3269,9 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 		/* Rx needs one extra for terminator */
 		, size, UCC_GETH_THREAD_RX_PRAM_ALIGNMENT,
 		ug_info->riscRx, 1)) != 0) {
-			ugeth_err("%s: Can not fill p_init_enet_param_shadow.",
-				__FUNCTION__);
+		if (netif_msg_ifup(ugeth))
+				ugeth_err("%s: Can not fill p_init_enet_param_shadow.",
+					__func__);
 		ucc_geth_memclean(ugeth);
 		return ret_val;
 	}
@@ -3237,8 +3285,9 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 				    sizeof(struct ucc_geth_thread_tx_pram),
 				    UCC_GETH_THREAD_TX_PRAM_ALIGNMENT,
 				    ug_info->riscTx, 0)) != 0) {
-		ugeth_err("%s: Can not fill p_init_enet_param_shadow.",
-			  __FUNCTION__);
+		if (netif_msg_ifup(ugeth))
+			ugeth_err("%s: Can not fill p_init_enet_param_shadow.",
+				  __func__);
 		ucc_geth_memclean(ugeth);
 		return ret_val;
 	}
@@ -3246,8 +3295,9 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 	/* Load Rx bds with buffers */
 	for (i = 0; i < ug_info->numQueuesRx; i++) {
 		if ((ret_val = rx_bd_buffer_set(ugeth, (u8) i)) != 0) {
-			ugeth_err("%s: Can not fill Rx bds with buffers.",
-				  __FUNCTION__);
+			if (netif_msg_ifup(ugeth))
+				ugeth_err("%s: Can not fill Rx bds with buffers.",
+					  __func__);
 			ucc_geth_memclean(ugeth);
 			return ret_val;
 		}
@@ -3256,24 +3306,29 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 	/* Allocate InitEnet command parameter structure */
 	init_enet_pram_offset = qe_muram_alloc(sizeof(struct ucc_geth_init_pram), 4);
 	if (IS_ERR_VALUE(init_enet_pram_offset)) {
-		ugeth_err
-		    ("%s: Can not allocate DPRAM memory for p_init_enet_pram.",
-		     __FUNCTION__);
+		if (netif_msg_ifup(ugeth))
+			ugeth_err
+			    ("%s: Can not allocate DPRAM memory for p_init_enet_pram.",
+			     __func__);
 		ucc_geth_memclean(ugeth);
 		return -ENOMEM;
 	}
 	p_init_enet_pram =
-	    (struct ucc_geth_init_pram *) qe_muram_addr(init_enet_pram_offset);
+	    (struct ucc_geth_init_pram __iomem *) qe_muram_addr(init_enet_pram_offset);
 
 	/* Copy shadow InitEnet command parameter structure into PRAM */
-	p_init_enet_pram->resinit1 = ugeth->p_init_enet_param_shadow->resinit1;
-	p_init_enet_pram->resinit2 = ugeth->p_init_enet_param_shadow->resinit2;
-	p_init_enet_pram->resinit3 = ugeth->p_init_enet_param_shadow->resinit3;
-	p_init_enet_pram->resinit4 = ugeth->p_init_enet_param_shadow->resinit4;
+	out_8(&p_init_enet_pram->resinit1,
+			ugeth->p_init_enet_param_shadow->resinit1);
+	out_8(&p_init_enet_pram->resinit2,
+			ugeth->p_init_enet_param_shadow->resinit2);
+	out_8(&p_init_enet_pram->resinit3,
+			ugeth->p_init_enet_param_shadow->resinit3);
+	out_8(&p_init_enet_pram->resinit4,
+			ugeth->p_init_enet_param_shadow->resinit4);
 	out_be16(&p_init_enet_pram->resinit5,
 		 ugeth->p_init_enet_param_shadow->resinit5);
-	p_init_enet_pram->largestexternallookupkeysize =
-	    ugeth->p_init_enet_param_shadow->largestexternallookupkeysize;
+	out_8(&p_init_enet_pram->largestexternallookupkeysize,
+	    ugeth->p_init_enet_param_shadow->largestexternallookupkeysize);
 	out_be32(&p_init_enet_pram->rgftgfrxglobal,
 		 ugeth->p_init_enet_param_shadow->rgftgfrxglobal);
 	for (i = 0; i < ENET_INIT_PARAM_MAX_ENTRIES_RX; i++)
@@ -3297,14 +3352,6 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 	return 0;
 }
 
-/* returns a net_device_stats structure pointer */
-static struct net_device_stats *ucc_geth_get_stats(struct net_device *dev)
-{
-	struct ucc_geth_private *ugeth = netdev_priv(dev);
-
-	return &(ugeth->stats);
-}
-
 /* ucc_geth_timeout gets called when a packet has not been
  * transmitted after a set amount of time.
  * For now, assume that clearing out all the structures, and
@@ -3313,9 +3360,9 @@ static void ucc_geth_timeout(struct net_device *dev)
 {
 	struct ucc_geth_private *ugeth = netdev_priv(dev);
 
-	ugeth_vdbg("%s: IN", __FUNCTION__);
+	ugeth_vdbg("%s: IN", __func__);
 
-	ugeth->stats.tx_errors++;
+	dev->stats.tx_errors++;
 
 	ugeth_dump_regs(ugeth);
 
@@ -3324,7 +3371,7 @@ static void ucc_geth_timeout(struct net_device *dev)
 		ucc_geth_startup(ugeth);
 	}
 
-	netif_schedule(dev);
+	netif_tx_schedule_all(dev);
 }
 
 /* This is called by the kernel when a frame is ready for transmission. */
@@ -3335,19 +3382,19 @@ static int ucc_geth_start_xmit(struct sk_buff *skb, struct net_device *dev)
 #ifdef CONFIG_UGETH_TX_ON_DEMAND
 	struct ucc_fast_private *uccf;
 #endif
-	u8 *bd;			/* BD pointer */
+	u8 __iomem *bd;			/* BD pointer */
 	u32 bd_status;
 	u8 txQ = 0;
 
-	ugeth_vdbg("%s: IN", __FUNCTION__);
+	ugeth_vdbg("%s: IN", __func__);
 
 	spin_lock_irq(&ugeth->lock);
 
-	ugeth->stats.tx_bytes += skb->len;
+	dev->stats.tx_bytes += skb->len;
 
 	/* Start from the next BD that should be filled */
 	bd = ugeth->txBd[txQ];
-	bd_status = in_be32((u32 *)bd);
+	bd_status = in_be32((u32 __iomem *)bd);
 	/* Save the skb pointer so we can free it later */
 	ugeth->tx_skbuff[txQ][ugeth->skb_curtx[txQ]] = skb;
 
@@ -3357,15 +3404,16 @@ static int ucc_geth_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	     1) & TX_RING_MOD_MASK(ugeth->ug_info->bdRingLenTx[txQ]);
 
 	/* set up the buffer descriptor */
-	out_be32(&((struct qe_bd *)bd)->buf,
-		      dma_map_single(NULL, skb->data, skb->len, DMA_TO_DEVICE));
+	out_be32(&((struct qe_bd __iomem *)bd)->buf,
+		      dma_map_single(&ugeth->dev->dev, skb->data,
+			      skb->len, DMA_TO_DEVICE));
 
 	/* printk(KERN_DEBUG"skb->data is 0x%x\n",skb->data); */
 
 	bd_status = (bd_status & T_W) | T_R | T_I | T_L | skb->len;
 
 	/* set bd status and length */
-	out_be32((u32 *)bd, bd_status);
+	out_be32((u32 __iomem *)bd, bd_status);
 
 	dev->trans_start = jiffies;
 
@@ -3405,21 +3453,24 @@ static int ucc_geth_start_xmit(struct sk_buff *skb, struct net_device *dev)
 static int ucc_geth_rx(struct ucc_geth_private *ugeth, u8 rxQ, int rx_work_limit)
 {
 	struct sk_buff *skb;
-	u8 *bd;
+	u8 __iomem *bd;
 	u16 length, howmany = 0;
 	u32 bd_status;
 	u8 *bdBuffer;
+	struct net_device *dev;
 
-	ugeth_vdbg("%s: IN", __FUNCTION__);
+	ugeth_vdbg("%s: IN", __func__);
+
+	dev = ugeth->dev;
 
 	/* collect received buffers */
 	bd = ugeth->rxBd[rxQ];
 
-	bd_status = in_be32((u32 *)bd);
+	bd_status = in_be32((u32 __iomem *)bd);
 
 	/* while there are received buffers and BD is full (~R_E) */
 	while (!((bd_status & (R_E)) || (--rx_work_limit < 0))) {
-		bdBuffer = (u8 *) in_be32(&((struct qe_bd *)bd)->buf);
+		bdBuffer = (u8 *) in_be32(&((struct qe_bd __iomem *)bd)->buf);
 		length = (u16) ((bd_status & BD_LENGTH_MASK) - 4);
 		skb = ugeth->rx_skbuff[rxQ][ugeth->skb_currx[rxQ]];
 
@@ -3428,15 +3479,16 @@ static int ucc_geth_rx(struct ucc_geth_private *ugeth, u8 rxQ, int rx_work_limit
 		if (!skb ||
 		    (!(bd_status & (R_F | R_L))) ||
 		    (bd_status & R_ERRORS_FATAL)) {
-			ugeth_vdbg("%s, %d: ERROR!!! skb - 0x%08x",
-				   __FUNCTION__, __LINE__, (u32) skb);
+			if (netif_msg_rx_err(ugeth))
+				ugeth_err("%s, %d: ERROR!!! skb - 0x%08x",
+					   __func__, __LINE__, (u32) skb);
 			if (skb)
 				dev_kfree_skb_any(skb);
 
 			ugeth->rx_skbuff[rxQ][ugeth->skb_currx[rxQ]] = NULL;
-			ugeth->stats.rx_dropped++;
+			dev->stats.rx_dropped++;
 		} else {
-			ugeth->stats.rx_packets++;
+			dev->stats.rx_packets++;
 			howmany++;
 
 			/* Prep the skb for the packet */
@@ -3445,21 +3497,18 @@ static int ucc_geth_rx(struct ucc_geth_private *ugeth, u8 rxQ, int rx_work_limit
 			/* Tell the skb what kind of packet this is */
 			skb->protocol = eth_type_trans(skb, ugeth->dev);
 
-			ugeth->stats.rx_bytes += length;
+			dev->stats.rx_bytes += length;
 			/* Send the packet up the stack */
-#ifdef CONFIG_UGETH_NAPI
 			netif_receive_skb(skb);
-#else
-			netif_rx(skb);
-#endif				/* CONFIG_UGETH_NAPI */
 		}
 
 		ugeth->dev->last_rx = jiffies;
 
 		skb = get_new_skb(ugeth, bd);
 		if (!skb) {
-			ugeth_warn("%s: No Rx Data Buffer", __FUNCTION__);
-			ugeth->stats.rx_dropped++;
+			if (netif_msg_rx_err(ugeth))
+				ugeth_warn("%s: No Rx Data Buffer", __func__);
+			dev->stats.rx_dropped++;
 			break;
 		}
 
@@ -3475,7 +3524,7 @@ static int ucc_geth_rx(struct ucc_geth_private *ugeth, u8 rxQ, int rx_work_limit
 		else
 			bd += sizeof(struct qe_bd);
 
-		bd_status = in_be32((u32 *)bd);
+		bd_status = in_be32((u32 __iomem *)bd);
 	}
 
 	ugeth->rxBd[rxQ] = bd;
@@ -3486,11 +3535,11 @@ static int ucc_geth_tx(struct net_device *dev, u8 txQ)
 {
 	/* Start from the next BD that should be filled */
 	struct ucc_geth_private *ugeth = netdev_priv(dev);
-	u8 *bd;			/* BD pointer */
+	u8 __iomem *bd;		/* BD pointer */
 	u32 bd_status;
 
 	bd = ugeth->confBd[txQ];
-	bd_status = in_be32((u32 *)bd);
+	bd_status = in_be32((u32 __iomem *)bd);
 
 	/* Normal processing. */
 	while ((bd_status & T_R) == 0) {
@@ -3501,7 +3550,7 @@ static int ucc_geth_tx(struct net_device *dev, u8 txQ)
 		if ((bd == ugeth->txBd[txQ]) && (netif_queue_stopped(dev) == 0))
 			break;
 
-		ugeth->stats.tx_packets++;
+		dev->stats.tx_packets++;
 
 		/* Free the sk buffer associated with this TxBD */
 		dev_kfree_skb_irq(ugeth->
@@ -3520,69 +3569,51 @@ static int ucc_geth_tx(struct net_device *dev, u8 txQ)
 			bd += sizeof(struct qe_bd);
 		else
 			bd = ugeth->p_tx_bd_ring[txQ];
-		bd_status = in_be32((u32 *)bd);
+		bd_status = in_be32((u32 __iomem *)bd);
 	}
 	ugeth->confBd[txQ] = bd;
 	return 0;
 }
 
-#ifdef CONFIG_UGETH_NAPI
-static int ucc_geth_poll(struct net_device *dev, int *budget)
+static int ucc_geth_poll(struct napi_struct *napi, int budget)
 {
-	struct ucc_geth_private *ugeth = netdev_priv(dev);
+	struct ucc_geth_private *ugeth = container_of(napi, struct ucc_geth_private, napi);
+	struct net_device *dev = ugeth->dev;
 	struct ucc_geth_info *ug_info;
-	struct ucc_fast_private *uccf;
-	int howmany;
-	u8 i;
-	int rx_work_limit;
-	register u32 uccm;
+	int howmany, i;
 
 	ug_info = ugeth->ug_info;
 
-	rx_work_limit = *budget;
-	if (rx_work_limit > dev->quota)
-		rx_work_limit = dev->quota;
-
 	howmany = 0;
+	for (i = 0; i < ug_info->numQueuesRx; i++)
+		howmany += ucc_geth_rx(ugeth, i, budget - howmany);
 
-	for (i = 0; i < ug_info->numQueuesRx; i++) {
-		howmany += ucc_geth_rx(ugeth, i, rx_work_limit);
-	}
+	if (howmany < budget) {
+		struct ucc_fast_private *uccf;
+		u32 uccm;
 
-	dev->quota -= howmany;
-	rx_work_limit -= howmany;
-	*budget -= howmany;
-
-	if (rx_work_limit > 0) {
-		netif_rx_complete(dev);
+		netif_rx_complete(dev, napi);
 		uccf = ugeth->uccf;
 		uccm = in_be32(uccf->p_uccm);
 		uccm |= UCCE_RX_EVENTS;
 		out_be32(uccf->p_uccm, uccm);
 	}
 
-	return (rx_work_limit > 0) ? 0 : 1;
+	return howmany;
 }
-#endif				/* CONFIG_UGETH_NAPI */
 
 static irqreturn_t ucc_geth_irq_handler(int irq, void *info)
 {
-	struct net_device *dev = (struct net_device *)info;
+	struct net_device *dev = info;
 	struct ucc_geth_private *ugeth = netdev_priv(dev);
 	struct ucc_fast_private *uccf;
 	struct ucc_geth_info *ug_info;
 	register u32 ucce;
 	register u32 uccm;
-#ifndef CONFIG_UGETH_NAPI
-	register u32 rx_mask;
-#endif
 	register u32 tx_mask;
 	u8 i;
 
-	ugeth_vdbg("%s: IN", __FUNCTION__);
-
-	if (!ugeth)
-		return IRQ_NONE;
+	ugeth_vdbg("%s: IN", __func__);
 
 	uccf = ugeth->uccf;
 	ug_info = ugeth->ug_info;
@@ -3595,21 +3626,11 @@ static irqreturn_t ucc_geth_irq_handler(int irq, void *info)
 
 	/* check for receive events that require processing */
 	if (ucce & UCCE_RX_EVENTS) {
-#ifdef CONFIG_UGETH_NAPI
-		if (netif_rx_schedule_prep(dev)) {
-		uccm &= ~UCCE_RX_EVENTS;
+		if (netif_rx_schedule_prep(dev, &ugeth->napi)) {
+			uccm &= ~UCCE_RX_EVENTS;
 			out_be32(uccf->p_uccm, uccm);
-			__netif_rx_schedule(dev);
+			__netif_rx_schedule(dev, &ugeth->napi);
 		}
-#else
-		rx_mask = UCCE_RXBF_SINGLE_MASK;
-		for (i = 0; i < ug_info->numQueuesRx; i++) {
-			if (ucce & rx_mask)
-				ucc_geth_rx(ugeth, i, (int)ugeth->ug_info->bdRingLenRx[i]);
-			ucce &= ~rx_mask;
-			rx_mask <<= 1;
-		}
-#endif /* CONFIG_UGETH_NAPI */
 	}
 
 	/* Tx event processing */
@@ -3628,15 +3649,32 @@ static irqreturn_t ucc_geth_irq_handler(int irq, void *info)
 	/* Errors and other events */
 	if (ucce & UCCE_OTHER) {
 		if (ucce & UCCE_BSY) {
-			ugeth->stats.rx_errors++;
+			dev->stats.rx_errors++;
 		}
 		if (ucce & UCCE_TXE) {
-			ugeth->stats.tx_errors++;
+			dev->stats.tx_errors++;
 		}
 	}
 
 	return IRQ_HANDLED;
 }
+
+#ifdef CONFIG_NET_POLL_CONTROLLER
+/*
+ * Polling 'interrupt' - used by things like netconsole to send skbs
+ * without having to re-enable interrupts. It's not called while
+ * the interrupt routine is executing.
+ */
+static void ucc_netpoll(struct net_device *dev)
+{
+	struct ucc_geth_private *ugeth = netdev_priv(dev);
+	int irq = ugeth->ug_info->uf_info.irq;
+
+	disable_irq(irq);
+	ucc_geth_irq_handler(irq, dev);
+	enable_irq(irq);
+}
+#endif /* CONFIG_NET_POLL_CONTROLLER */
 
 /* Called when something needs to use the ethernet device */
 /* Returns 0 for success. */
@@ -3645,33 +3683,39 @@ static int ucc_geth_open(struct net_device *dev)
 	struct ucc_geth_private *ugeth = netdev_priv(dev);
 	int err;
 
-	ugeth_vdbg("%s: IN", __FUNCTION__);
+	ugeth_vdbg("%s: IN", __func__);
 
 	/* Test station address */
 	if (dev->dev_addr[0] & ENET_GROUP_ADDR) {
-		ugeth_err("%s: Multicast address used for station address"
-			  " - is this what you wanted?", __FUNCTION__);
+		if (netif_msg_ifup(ugeth))
+			ugeth_err("%s: Multicast address used for station address"
+				  " - is this what you wanted?", __func__);
 		return -EINVAL;
 	}
 
 	err = ucc_struct_init(ugeth);
 	if (err) {
-		ugeth_err("%s: Cannot configure internal struct, aborting.", dev->name);
+		if (netif_msg_ifup(ugeth))
+			ugeth_err("%s: Cannot configure internal struct, aborting.", dev->name);
 		return err;
 	}
 
+	napi_enable(&ugeth->napi);
+
 	err = ucc_geth_startup(ugeth);
 	if (err) {
-		ugeth_err("%s: Cannot configure net device, aborting.",
-			  dev->name);
-		return err;
+		if (netif_msg_ifup(ugeth))
+			ugeth_err("%s: Cannot configure net device, aborting.",
+				  dev->name);
+		goto out_err;
 	}
 
 	err = adjust_enet_interface(ugeth);
 	if (err) {
-		ugeth_err("%s: Cannot configure net device, aborting.",
-			  dev->name);
-		return err;
+		if (netif_msg_ifup(ugeth))
+			ugeth_err("%s: Cannot configure net device, aborting.",
+				  dev->name);
+		goto out_err;
 	}
 
 	/*       Set MACSTNADDR1, MACSTNADDR2                */
@@ -3687,8 +3731,9 @@ static int ucc_geth_open(struct net_device *dev)
 
 	err = init_phy(dev);
 	if (err) {
-		ugeth_err("%s: Cannot initialize PHY, aborting.", dev->name);
-		return err;
+		if (netif_msg_ifup(ugeth))
+			ugeth_err("%s: Cannot initialize PHY, aborting.", dev->name);
+		goto out_err;
 	}
 
 	phy_start(ugeth->phydev);
@@ -3697,20 +3742,27 @@ static int ucc_geth_open(struct net_device *dev)
 	    request_irq(ugeth->ug_info->uf_info.irq, ucc_geth_irq_handler, 0,
 			"UCC Geth", dev);
 	if (err) {
-		ugeth_err("%s: Cannot get IRQ for net device, aborting.",
-			  dev->name);
+		if (netif_msg_ifup(ugeth))
+			ugeth_err("%s: Cannot get IRQ for net device, aborting.",
+				  dev->name);
 		ucc_geth_stop(ugeth);
-		return err;
+		goto out_err;
 	}
 
 	err = ugeth_enable(ugeth, COMM_DIR_RX_AND_TX);
 	if (err) {
-		ugeth_err("%s: Cannot enable net device, aborting.", dev->name);
+		if (netif_msg_ifup(ugeth))
+			ugeth_err("%s: Cannot enable net device, aborting.", dev->name);
 		ucc_geth_stop(ugeth);
-		return err;
+		goto out_err;
 	}
 
 	netif_start_queue(dev);
+
+	return err;
+
+out_err:
+	napi_disable(&ugeth->napi);
 
 	return err;
 }
@@ -3720,7 +3772,9 @@ static int ucc_geth_close(struct net_device *dev)
 {
 	struct ucc_geth_private *ugeth = netdev_priv(dev);
 
-	ugeth_vdbg("%s: IN", __FUNCTION__);
+	ugeth_vdbg("%s: IN", __func__);
+
+	napi_disable(&ugeth->napi);
 
 	ucc_geth_stop(ugeth);
 
@@ -3731,8 +3785,6 @@ static int ucc_geth_close(struct net_device *dev)
 
 	return 0;
 }
-
-const struct ethtool_ops ucc_geth_ethtool_ops = { };
 
 static phy_interface_t to_phy_interface(const char *phy_connection_type)
 {
@@ -3748,6 +3800,10 @@ static phy_interface_t to_phy_interface(const char *phy_connection_type)
 		return PHY_INTERFACE_MODE_RGMII;
 	if (strcasecmp(phy_connection_type, "rgmii-id") == 0)
 		return PHY_INTERFACE_MODE_RGMII_ID;
+	if (strcasecmp(phy_connection_type, "rgmii-txid") == 0)
+		return PHY_INTERFACE_MODE_RGMII_TXID;
+	if (strcasecmp(phy_connection_type, "rgmii-rxid") == 0)
+		return PHY_INTERFACE_MODE_RGMII_RXID;
 	if (strcasecmp(phy_connection_type, "rtbi") == 0)
 		return PHY_INTERFACE_MODE_RTBI;
 
@@ -3766,7 +3822,9 @@ static int ucc_geth_probe(struct of_device* ofdev, const struct of_device_id *ma
 	struct device_node *phy;
 	int err, ucc_num, max_speed = 0;
 	const phandle *ph;
+	const u32 *fixed_link;
 	const unsigned int *prop;
+	const char *sprop;
 	const void *mac_addr;
 	phy_interface_t phy_interface;
 	static const int enet_to_speed[] = {
@@ -3782,38 +3840,117 @@ static int ucc_geth_probe(struct of_device* ofdev, const struct of_device_id *ma
 		PHY_INTERFACE_MODE_TBI, PHY_INTERFACE_MODE_RTBI,
 	};
 
-	ugeth_vdbg("%s: IN", __FUNCTION__);
+	ugeth_vdbg("%s: IN", __func__);
 
-	prop = of_get_property(np, "device-id", NULL);
+	prop = of_get_property(np, "cell-index", NULL);
+	if (!prop) {
+		prop = of_get_property(np, "device-id", NULL);
+		if (!prop)
+			return -ENODEV;
+	}
+
 	ucc_num = *prop - 1;
 	if ((ucc_num < 0) || (ucc_num > 7))
 		return -ENODEV;
 
 	ug_info = &ugeth_info[ucc_num];
+	if (ug_info == NULL) {
+		if (netif_msg_probe(&debug))
+			ugeth_err("%s: [%d] Missing additional data!",
+				       	__func__, ucc_num);
+		return -ENODEV;
+	}
+
 	ug_info->uf_info.ucc_num = ucc_num;
 
-	prop = of_get_property(np, "rx-clock", NULL);
-	ug_info->uf_info.rx_clock = *prop;
-	prop = of_get_property(np, "tx-clock", NULL);
-	ug_info->uf_info.tx_clock = *prop;
+	sprop = of_get_property(np, "rx-clock-name", NULL);
+	if (sprop) {
+		ug_info->uf_info.rx_clock = qe_clock_source(sprop);
+		if ((ug_info->uf_info.rx_clock < QE_CLK_NONE) ||
+		    (ug_info->uf_info.rx_clock > QE_CLK24)) {
+			printk(KERN_ERR
+				"ucc_geth: invalid rx-clock-name property\n");
+			return -EINVAL;
+		}
+	} else {
+		prop = of_get_property(np, "rx-clock", NULL);
+		if (!prop) {
+			/* If both rx-clock-name and rx-clock are missing,
+			   we want to tell people to use rx-clock-name. */
+			printk(KERN_ERR
+				"ucc_geth: missing rx-clock-name property\n");
+			return -EINVAL;
+		}
+		if ((*prop < QE_CLK_NONE) || (*prop > QE_CLK24)) {
+			printk(KERN_ERR
+				"ucc_geth: invalid rx-clock propperty\n");
+			return -EINVAL;
+		}
+		ug_info->uf_info.rx_clock = *prop;
+	}
+
+	sprop = of_get_property(np, "tx-clock-name", NULL);
+	if (sprop) {
+		ug_info->uf_info.tx_clock = qe_clock_source(sprop);
+		if ((ug_info->uf_info.tx_clock < QE_CLK_NONE) ||
+		    (ug_info->uf_info.tx_clock > QE_CLK24)) {
+			printk(KERN_ERR
+				"ucc_geth: invalid tx-clock-name property\n");
+			return -EINVAL;
+		}
+	} else {
+		prop = of_get_property(np, "tx-clock", NULL);
+		if (!prop) {
+			printk(KERN_ERR
+				"ucc_geth: mising tx-clock-name property\n");
+			return -EINVAL;
+		}
+		if ((*prop < QE_CLK_NONE) || (*prop > QE_CLK24)) {
+			printk(KERN_ERR
+				"ucc_geth: invalid tx-clock property\n");
+			return -EINVAL;
+		}
+		ug_info->uf_info.tx_clock = *prop;
+	}
+
 	err = of_address_to_resource(np, 0, &res);
 	if (err)
 		return -EINVAL;
 
 	ug_info->uf_info.regs = res.start;
 	ug_info->uf_info.irq = irq_of_parse_and_map(np, 0);
+	fixed_link = of_get_property(np, "fixed-link", NULL);
+	if (fixed_link) {
+		snprintf(ug_info->mdio_bus, MII_BUS_ID_SIZE, "0");
+		ug_info->phy_address = fixed_link[0];
+		phy = NULL;
+	} else {
+		ph = of_get_property(np, "phy-handle", NULL);
+		phy = of_find_node_by_phandle(*ph);
 
-	ph = of_get_property(np, "phy-handle", NULL);
-	phy = of_find_node_by_phandle(*ph);
+		if (phy == NULL)
+			return -ENODEV;
 
-	if (phy == NULL)
-		return -ENODEV;
+		/* set the PHY address */
+		prop = of_get_property(phy, "reg", NULL);
+		if (prop == NULL)
+			return -1;
+		ug_info->phy_address = *prop;
 
-	/* set the PHY address */
-	prop = of_get_property(phy, "reg", NULL);
-	if (prop == NULL)
-		return -1;
-	ug_info->phy_address = *prop;
+		/* Set the bus id */
+		mdio = of_get_parent(phy);
+
+		if (mdio == NULL)
+			return -1;
+
+		err = of_address_to_resource(mdio, 0, &res);
+		of_node_put(mdio);
+
+		if (err)
+			return -1;
+
+		snprintf(ug_info->mdio_bus, MII_BUS_ID_SIZE, "%x", res.start);
+	}
 
 	/* get the phy interface type, or default to MII */
 	prop = of_get_property(np, "phy-connection-type", NULL);
@@ -3835,6 +3972,8 @@ static int ucc_geth_probe(struct of_device* ofdev, const struct of_device_id *ma
 		case PHY_INTERFACE_MODE_GMII:
 		case PHY_INTERFACE_MODE_RGMII:
 		case PHY_INTERFACE_MODE_RGMII_ID:
+		case PHY_INTERFACE_MODE_RGMII_RXID:
+		case PHY_INTERFACE_MODE_RGMII_TXID:
 		case PHY_INTERFACE_MODE_TBI:
 		case PHY_INTERFACE_MODE_RTBI:
 			max_speed = SPEED_1000;
@@ -3852,31 +3991,14 @@ static int ucc_geth_probe(struct of_device* ofdev, const struct of_device_id *ma
 		ug_info->uf_info.utfs = UCC_GETH_UTFS_GIGA_INIT;
 		ug_info->uf_info.utfet = UCC_GETH_UTFET_GIGA_INIT;
 		ug_info->uf_info.utftt = UCC_GETH_UTFTT_GIGA_INIT;
+		ug_info->numThreadsTx = UCC_GETH_NUM_OF_THREADS_4;
+		ug_info->numThreadsRx = UCC_GETH_NUM_OF_THREADS_4;
 	}
 
-	/* Set the bus id */
-	mdio = of_get_parent(phy);
-
-	if (mdio == NULL)
-		return -1;
-
-	err = of_address_to_resource(mdio, 0, &res);
-	of_node_put(mdio);
-
-	if (err)
-		return -1;
-
-	ug_info->mdio_bus = res.start;
-
-	printk(KERN_INFO "ucc_geth: UCC%1d at 0x%8x (irq = %d) \n",
-		ug_info->uf_info.ucc_num + 1, ug_info->uf_info.regs,
-		ug_info->uf_info.irq);
-
-	if (ug_info == NULL) {
-		ugeth_err("%s: [%d] Missing additional data!", __FUNCTION__,
-			  ucc_num);
-		return -ENODEV;
-	}
+	if (netif_msg_probe(&debug))
+		printk(KERN_INFO "ucc_geth: UCC%1d at 0x%8x (irq = %d) \n",
+			ug_info->uf_info.ucc_num + 1, ug_info->uf_info.regs,
+			ug_info->uf_info.irq);
 
 	/* Create an ethernet device instance */
 	dev = alloc_etherdev(sizeof(*ugeth));
@@ -3887,38 +4009,41 @@ static int ucc_geth_probe(struct of_device* ofdev, const struct of_device_id *ma
 	ugeth = netdev_priv(dev);
 	spin_lock_init(&ugeth->lock);
 
+	/* Create CQs for hash tables */
+	INIT_LIST_HEAD(&ugeth->group_hash_q);
+	INIT_LIST_HEAD(&ugeth->ind_hash_q);
+
 	dev_set_drvdata(device, dev);
 
 	/* Set the dev->base_addr to the gfar reg region */
 	dev->base_addr = (unsigned long)(ug_info->uf_info.regs);
 
-	SET_MODULE_OWNER(dev);
 	SET_NETDEV_DEV(dev, device);
 
 	/* Fill in the dev structure */
+	uec_set_ethtool_ops(dev);
 	dev->open = ucc_geth_open;
 	dev->hard_start_xmit = ucc_geth_start_xmit;
 	dev->tx_timeout = ucc_geth_timeout;
 	dev->watchdog_timeo = TX_TIMEOUT;
-#ifdef CONFIG_UGETH_NAPI
-	dev->poll = ucc_geth_poll;
-	dev->weight = UCC_GETH_DEV_WEIGHT;
-#endif				/* CONFIG_UGETH_NAPI */
+	netif_napi_add(dev, &ugeth->napi, ucc_geth_poll, UCC_GETH_DEV_WEIGHT);
+#ifdef CONFIG_NET_POLL_CONTROLLER
+	dev->poll_controller = ucc_netpoll;
+#endif
 	dev->stop = ucc_geth_close;
-	dev->get_stats = ucc_geth_get_stats;
 //    dev->change_mtu = ucc_geth_change_mtu;
 	dev->mtu = 1500;
 	dev->set_multicast_list = ucc_geth_set_multi;
-	dev->ethtool_ops = &ucc_geth_ethtool_ops;
 
-	ugeth->msg_enable = (NETIF_MSG_IFUP << 1 ) - 1;
+	ugeth->msg_enable = netif_msg_init(debug.msg_enable, UGETH_MSG_DEFAULT);
 	ugeth->phy_interface = phy_interface;
 	ugeth->max_speed = max_speed;
 
 	err = register_netdev(dev);
 	if (err) {
-		ugeth_err("%s: Cannot register net device, aborting.",
-			  dev->name);
+		if (netif_msg_probe(ugeth))
+			ugeth_err("%s: Cannot register net device, aborting.",
+				  dev->name);
 		free_netdev(dev);
 		return err;
 	}
@@ -3939,9 +4064,10 @@ static int ucc_geth_remove(struct of_device* ofdev)
 	struct net_device *dev = dev_get_drvdata(device);
 	struct ucc_geth_private *ugeth = netdev_priv(dev);
 
-	dev_set_drvdata(device, NULL);
-	ucc_geth_memclean(ugeth);
+	unregister_netdev(dev);
 	free_netdev(dev);
+	ucc_geth_memclean(ugeth);
+	dev_set_drvdata(device, NULL);
 
 	return 0;
 }
@@ -3972,7 +4098,8 @@ static int __init ucc_geth_init(void)
 	if (ret)
 		return ret;
 
-	printk(KERN_INFO "ucc_geth: " DRV_DESC "\n");
+	if (netif_msg_drv(&debug))
+		printk(KERN_INFO "ucc_geth: " DRV_DESC "\n");
 	for (i = 0; i < 8; i++)
 		memcpy(&(ugeth_info[i]), &ugeth_primary_info,
 		       sizeof(ugeth_primary_info));

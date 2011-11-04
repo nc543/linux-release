@@ -15,56 +15,49 @@
 #include <linux/netfilter/x_tables.h>
 
 MODULE_AUTHOR("Harald Welte <laforge@netfilter.org>");
-MODULE_DESCRIPTION("IP tables TTL matching module");
+MODULE_DESCRIPTION("Xtables: IPv4 TTL field match");
 MODULE_LICENSE("GPL");
 
-static int match(const struct sk_buff *skb,
-		 const struct net_device *in, const struct net_device *out,
-		 const struct xt_match *match, const void *matchinfo,
-		 int offset, unsigned int protoff, int *hotdrop)
+static bool ttl_mt(const struct sk_buff *skb, const struct xt_match_param *par)
 {
-	const struct ipt_ttl_info *info = matchinfo;
+	const struct ipt_ttl_info *info = par->matchinfo;
 	const u8 ttl = ip_hdr(skb)->ttl;
 
 	switch (info->mode) {
 		case IPT_TTL_EQ:
-			return (ttl == info->ttl);
-			break;
+			return ttl == info->ttl;
 		case IPT_TTL_NE:
-			return (!(ttl == info->ttl));
-			break;
+			return ttl != info->ttl;
 		case IPT_TTL_LT:
-			return (ttl < info->ttl);
-			break;
+			return ttl < info->ttl;
 		case IPT_TTL_GT:
-			return (ttl > info->ttl);
-			break;
+			return ttl > info->ttl;
 		default:
 			printk(KERN_WARNING "ipt_ttl: unknown mode %d\n",
 				info->mode);
-			return 0;
+			return false;
 	}
 
-	return 0;
+	return false;
 }
 
-static struct xt_match ttl_match = {
+static struct xt_match ttl_mt_reg __read_mostly = {
 	.name		= "ttl",
-	.family		= AF_INET,
-	.match		= match,
+	.family		= NFPROTO_IPV4,
+	.match		= ttl_mt,
 	.matchsize	= sizeof(struct ipt_ttl_info),
 	.me		= THIS_MODULE,
 };
 
-static int __init ipt_ttl_init(void)
+static int __init ttl_mt_init(void)
 {
-	return xt_register_match(&ttl_match);
+	return xt_register_match(&ttl_mt_reg);
 }
 
-static void __exit ipt_ttl_fini(void)
+static void __exit ttl_mt_exit(void)
 {
-	xt_unregister_match(&ttl_match);
+	xt_unregister_match(&ttl_mt_reg);
 }
 
-module_init(ipt_ttl_init);
-module_exit(ipt_ttl_fini);
+module_init(ttl_mt_init);
+module_exit(ttl_mt_exit);

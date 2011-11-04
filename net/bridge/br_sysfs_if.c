@@ -29,8 +29,7 @@ struct brport_attribute {
 #define BRPORT_ATTR(_name,_mode,_show,_store)		        \
 struct brport_attribute brport_attr_##_name = { 	        \
 	.attr = {.name = __stringify(_name), 			\
-		 .mode = _mode, 				\
-		 .owner = THIS_MODULE, },			\
+		 .mode = _mode },				\
 	.show	= _show,					\
 	.store	= _store,					\
 };
@@ -230,7 +229,7 @@ int br_sysfs_addif(struct net_bridge_port *p)
 			goto out2;
 	}
 
-	err= sysfs_create_link(&br->ifobj, &p->kobj, p->dev->name);
+	err = sysfs_create_link(br->ifobj, &p->kobj, p->dev->name);
 out2:
 	return err;
 }

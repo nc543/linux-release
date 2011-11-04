@@ -17,8 +17,6 @@
 #include <linux/slab.h>
 #include <linux/jiffies.h>
 
-#include <asm/ebus.h>
-#include <asm/sbus.h> /* for sanity check... */
 #include <asm/swift.h> /* for cache flushing. */
 #include <asm/io.h>
 
@@ -36,6 +34,7 @@
 #include <asm/uaccess.h>
 #include <asm/irq_regs.h>
 
+#include "irq.h"
 
 /*
  * I studied different documents and many live PROMs both from 2.30
@@ -328,7 +327,7 @@ int __init pcic_probe(void)
 	pcic->pcic_res_cfg_addr.name = "pcic_cfg_addr";
 	if ((pcic->pcic_config_space_addr =
 	    ioremap(regs[2].phys_addr, regs[2].reg_size * 2)) == 0) {
-		prom_printf("PCIC: Error, cannot map" 
+		prom_printf("PCIC: Error, cannot map "
 			    "PCI Configuration Space Address.\n");
 		prom_halt();
 	}
@@ -340,7 +339,7 @@ int __init pcic_probe(void)
 	pcic->pcic_res_cfg_data.name = "pcic_cfg_data";
 	if ((pcic->pcic_config_space_data =
 	    ioremap(regs[3].phys_addr, regs[3].reg_size * 2)) == 0) {
-		prom_printf("PCIC: Error, cannot map" 
+		prom_printf("PCIC: Error, cannot map "
 			    "PCI Configuration Space Data.\n");
 		prom_halt();
 	}
@@ -429,7 +428,6 @@ static int __init pcic_init(void)
 
 	pcic_pbm_scan_bus(pcic);
 
-	ebus_init();
 	return 0;
 }
 
@@ -492,10 +490,6 @@ static void pcic_map_pci_device(struct linux_pcic *pcic,
 				 * do ioremap() before accessing PC-style I/O,
 				 * we supply virtual, ready to access address.
 				 *
-				 * Ebus devices do not come here even if
-				 * CheerIO makes a similar conversion.
-				 * See ebus.c for details.
-				 *
 				 * Note that request_region()
 				 * works for these devices.
 				 *
@@ -517,8 +511,8 @@ static void pcic_map_pci_device(struct linux_pcic *pcic,
 				 * board in a PCI slot. We must remap it
 				 * under 64K but it is not done yet. XXX
 				 */
-				printk("PCIC: Skipping I/O space at 0x%lx,"
-				    "this will Oops if a driver attaches;"
+				printk("PCIC: Skipping I/O space at 0x%lx, "
+				    "this will Oops if a driver attaches "
 				    "device '%s' at %02x:%02x)\n", address,
 				    namebuf, dev->bus->number, dev->devfn);
 			}
@@ -676,7 +670,7 @@ void __devinit pcibios_fixup_bus(struct pci_bus *bus)
 }
 
 /*
- * pcic_pin_to_irq() is exported to ebus.c.
+ * pcic_pin_to_irq() is exported to bus probing code
  */
 unsigned int
 pcic_pin_to_irq(unsigned int pin, const char *name)
@@ -712,10 +706,10 @@ static irqreturn_t pcic_timer_handler (int irq, void *h)
 	write_seqlock(&xtime_lock);	/* Dummy, to show that we remember */
 	pcic_clear_clock_irq();
 	do_timer(1);
+	write_sequnlock(&xtime_lock);
 #ifndef CONFIG_SMP
 	update_process_times(user_mode(get_irq_regs()));
 #endif
-	write_sequnlock(&xtime_lock);
 	return IRQ_HANDLED;
 }
 
@@ -752,7 +746,7 @@ void __init pci_time_init(void)
 	local_irq_enable();
 }
 
-static __inline__ unsigned long do_gettimeoffset(void)
+static inline unsigned long do_gettimeoffset(void)
 {
 	/*
 	 * We divide all by 100
@@ -903,11 +897,6 @@ static void pcic_enable_irq(unsigned int irq_nr)
 	local_irq_restore(flags);
 }
 
-static void pcic_clear_profile_irq(int cpu)
-{
-	printk("PCIC: unimplemented code: FILE=%s LINE=%d", __FILE__, __LINE__);
-}
-
 static void pcic_load_profile_irq(int cpu, unsigned int limit)
 {
 	printk("PCIC: unimplemented code: FILE=%s LINE=%d", __FILE__, __LINE__);
@@ -933,7 +922,6 @@ void __init sun4m_pci_init_IRQ(void)
 	BTFIXUPSET_CALL(enable_pil_irq, pcic_enable_pil_irq, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(disable_pil_irq, pcic_disable_pil_irq, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(clear_clock_irq, pcic_clear_clock_irq, BTFIXUPCALL_NORM);
-	BTFIXUPSET_CALL(clear_profile_irq, pcic_clear_profile_irq, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(load_profile_irq, pcic_load_profile_irq, BTFIXUPCALL_NORM);
 }
 

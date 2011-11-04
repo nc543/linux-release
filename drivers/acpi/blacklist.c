@@ -3,6 +3,7 @@
  *
  *  Check to see if the given machine has a known bad ACPI BIOS
  *  or if the BIOS is too old.
+ *  Check given machine against acpi_osi_dmi_table[].
  *
  *  Copyright (C) 2004 Len Brown <len.brown@intel.com>
  *  Copyright (C) 2002 Andy Grover <andrew.grover@intel.com>
@@ -50,6 +51,8 @@ struct acpi_blacklist_item {
 	u32 is_critical_error;
 };
 
+static struct dmi_system_id acpi_osi_dmi_table[] __initdata;
+
 /*
  * POLICY: If *anything* doesn't work, put it on the blacklist.
  *	   If they are critical errors, mark it critical, and abort driver load.
@@ -67,8 +70,6 @@ static struct acpi_blacklist_item acpi_blacklist[] __initdata = {
 	/* IBM 600E - _ADR should return 7, but it returns 1 */
 	{"IBM   ", "TP600E  ", 0x00000105, ACPI_SIG_DSDT, less_than_or_equal,
 	 "Incorrect _ADR", 1},
-	{"ASUS\0\0", "P2B-S   ", 0, ACPI_SIG_DSDT, all_versions,
-	 "Bogus PCI routing", 1},
 
 	{""}
 };
@@ -165,5 +166,76 @@ int __init acpi_blacklisted(void)
 
 	blacklisted += blacklist_by_year();
 
+	dmi_check_system(acpi_osi_dmi_table);
+
 	return blacklisted;
 }
+#ifdef CONFIG_DMI
+static int __init dmi_enable_osi_linux(const struct dmi_system_id *d)
+{
+	acpi_dmi_osi_linux(1, d);	/* enable */
+	return 0;
+}
+static int __init dmi_disable_osi_vista(const struct dmi_system_id *d)
+{
+	printk(KERN_NOTICE PREFIX "DMI detected: %s\n", d->ident);
+	acpi_osi_setup("!Windows 2006");
+	return 0;
+}
+
+static struct dmi_system_id acpi_osi_dmi_table[] __initdata = {
+	{
+	.callback = dmi_disable_osi_vista,
+	.ident = "Fujitsu Siemens",
+	.matches = {
+		     DMI_MATCH(DMI_SYS_VENDOR, "FUJITSU SIEMENS"),
+		     DMI_MATCH(DMI_PRODUCT_NAME, "ESPRIMO Mobile V5505"),
+		},
+	},
+
+	/*
+	 * BIOS invocation of _OSI(Linux) is almost always a BIOS bug.
+	 * Linux ignores it, except for the machines enumerated below.
+	 */
+
+	/*
+	 * Lenovo has a mix of systems OSI(Linux) situations
+	 * and thus we can not wildcard the vendor.
+	 *
+	 * _OSI(Linux) helps sound
+	 * DMI_MATCH(DMI_PRODUCT_VERSION, "ThinkPad R61"),
+	 * DMI_MATCH(DMI_PRODUCT_VERSION, "ThinkPad T61"),
+	 * _OSI(Linux) has Linux specific hooks
+	 * DMI_MATCH(DMI_PRODUCT_VERSION, "ThinkPad X61"),
+	 * _OSI(Linux) is a NOP:
+	 * DMI_MATCH(DMI_PRODUCT_VERSION, "3000 N100"),
+	 * DMI_MATCH(DMI_PRODUCT_VERSION, "LENOVO3000 V100"),
+	 */
+	{
+	.callback = dmi_enable_osi_linux,
+	.ident = "Lenovo ThinkPad R61",
+	.matches = {
+		     DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
+		     DMI_MATCH(DMI_PRODUCT_VERSION, "ThinkPad R61"),
+		},
+	},
+	{
+	.callback = dmi_enable_osi_linux,
+	.ident = "Lenovo ThinkPad T61",
+	.matches = {
+		     DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
+		     DMI_MATCH(DMI_PRODUCT_VERSION, "ThinkPad T61"),
+		},
+	},
+	{
+	.callback = dmi_enable_osi_linux,
+	.ident = "Lenovo ThinkPad X61",
+	.matches = {
+		     DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
+		     DMI_MATCH(DMI_PRODUCT_VERSION, "ThinkPad X61"),
+		},
+	},
+	{}
+};
+
+#endif /* CONFIG_DMI */

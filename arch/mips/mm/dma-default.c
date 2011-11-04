@@ -12,6 +12,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/mm.h>
 #include <linux/module.h>
+#include <linux/scatterlist.h>
 #include <linux/string.h>
 
 #include <asm/cache.h>
@@ -35,8 +36,33 @@ static inline unsigned long dma_addr_to_virt(dma_addr_t dma_addr)
 static inline int cpu_is_noncoherent_r10000(struct device *dev)
 {
 	return !plat_device_is_coherent(dev) &&
-	       (current_cpu_data.cputype == CPU_R10000 &&
-	       current_cpu_data.cputype == CPU_R12000);
+	       (current_cpu_type() == CPU_R10000 ||
+	       current_cpu_type() == CPU_R12000);
+}
+
+static gfp_t massage_gfp_flags(const struct device *dev, gfp_t gfp)
+{
+	/* ignore region specifiers */
+	gfp &= ~(__GFP_DMA | __GFP_DMA32 | __GFP_HIGHMEM);
+
+#ifdef CONFIG_ZONE_DMA
+	if (dev == NULL)
+		gfp |= __GFP_DMA;
+	else if (dev->coherent_dma_mask < DMA_BIT_MASK(24))
+		gfp |= __GFP_DMA;
+	else
+#endif
+#ifdef CONFIG_ZONE_DMA32
+	     if (dev->coherent_dma_mask < DMA_BIT_MASK(32))
+		gfp |= __GFP_DMA32;
+	else
+#endif
+		;
+
+	/* Don't invoke OOM killer */
+	gfp |= __GFP_NORETRY;
+
+	return gfp;
 }
 
 void *dma_alloc_noncoherent(struct device *dev, size_t size,
@@ -44,11 +70,8 @@ void *dma_alloc_noncoherent(struct device *dev, size_t size,
 {
 	void *ret;
 
-	/* ignore region specifiers */
-	gfp &= ~(__GFP_DMA | __GFP_HIGHMEM);
+	gfp = massage_gfp_flags(dev, gfp);
 
-	if (dev == NULL || (dev->coherent_dma_mask < 0xffffffff))
-		gfp |= GFP_DMA;
 	ret = (void *) __get_free_pages(gfp, get_order(size));
 
 	if (ret != NULL) {
@@ -66,11 +89,8 @@ void *dma_alloc_coherent(struct device *dev, size_t size,
 {
 	void *ret;
 
-	/* ignore region specifiers */
-	gfp &= ~(__GFP_DMA | __GFP_HIGHMEM);
+	gfp = massage_gfp_flags(dev, gfp);
 
-	if (dev == NULL || (dev->coherent_dma_mask < 0xffffffff))
-		gfp |= GFP_DMA;
 	ret = (void *) __get_free_pages(gfp, get_order(size));
 
 	if (ret) {
@@ -91,6 +111,7 @@ EXPORT_SYMBOL(dma_alloc_coherent);
 void dma_free_noncoherent(struct device *dev, size_t size, void *vaddr,
 	dma_addr_t dma_handle)
 {
+	plat_unmap_dma_mem(dma_handle);
 	free_pages((unsigned long) vaddr, get_order(size));
 }
 
@@ -100,6 +121,8 @@ void dma_free_coherent(struct device *dev, size_t size, void *vaddr,
 	dma_addr_t dma_handle)
 {
 	unsigned long addr = (unsigned long) vaddr;
+
+	plat_unmap_dma_mem(dma_handle);
 
 	if (!plat_device_is_coherent(dev))
 		addr = CAC_ADDR(addr);
@@ -165,12 +188,11 @@ int dma_map_sg(struct device *dev, struct scatterlist *sg, int nents,
 	for (i = 0; i < nents; i++, sg++) {
 		unsigned long addr;
 
-		addr = (unsigned long) page_address(sg->page);
+		addr = (unsigned long) sg_virt(sg);
 		if (!plat_device_is_coherent(dev) && addr)
-			__dma_sync(addr + sg->offset, sg->length, direction);
+			__dma_sync(addr, sg->length, direction);
 		sg->dma_address = plat_map_dma_mem(dev,
-				                   (void *)(addr + sg->offset),
-						   sg->length);
+				                   (void *)addr, sg->length);
 	}
 
 	return nents;
@@ -223,10 +245,9 @@ void dma_unmap_sg(struct device *dev, struct scatterlist *sg, int nhwentries,
 	for (i = 0; i < nhwentries; i++, sg++) {
 		if (!plat_device_is_coherent(dev) &&
 		    direction != DMA_TO_DEVICE) {
-			addr = (unsigned long) page_address(sg->page);
+			addr = (unsigned long) sg_virt(sg);
 			if (addr)
-				__dma_sync(addr + sg->offset, sg->length,
-				           direction);
+				__dma_sync(addr, sg->length, direction);
 		}
 		plat_unmap_dma_mem(sg->dma_address);
 	}
@@ -304,9 +325,8 @@ void dma_sync_sg_for_cpu(struct device *dev, struct scatterlist *sg, int nelems,
 	/* Make sure that gcc doesn't leave the empty loop body.  */
 	for (i = 0; i < nelems; i++, sg++) {
 		if (cpu_is_noncoherent_r10000(dev))
-			__dma_sync((unsigned long)page_address(sg->page),
+			__dma_sync((unsigned long)page_address(sg_page(sg)),
 			           sg->length, direction);
-		plat_unmap_dma_mem(sg->dma_address);
 	}
 }
 
@@ -322,15 +342,14 @@ void dma_sync_sg_for_device(struct device *dev, struct scatterlist *sg, int nele
 	/* Make sure that gcc doesn't leave the empty loop body.  */
 	for (i = 0; i < nelems; i++, sg++) {
 		if (!plat_device_is_coherent(dev))
-			__dma_sync((unsigned long)page_address(sg->page),
+			__dma_sync((unsigned long)page_address(sg_page(sg)),
 			           sg->length, direction);
-		plat_unmap_dma_mem(sg->dma_address);
 	}
 }
 
 EXPORT_SYMBOL(dma_sync_sg_for_device);
 
-int dma_mapping_error(dma_addr_t dma_addr)
+int dma_mapping_error(struct device *dev, dma_addr_t dma_addr)
 {
 	return 0;
 }
@@ -344,7 +363,7 @@ int dma_supported(struct device *dev, u64 mask)
 	 * so we can't guarantee allocations that must be
 	 * within a tighter range than GFP_DMA..
 	 */
-	if (mask < 0x00ffffff)
+	if (mask < DMA_BIT_MASK(24))
 		return 0;
 
 	return 1;
@@ -365,7 +384,7 @@ void dma_cache_sync(struct device *dev, void *vaddr, size_t size,
 	BUG_ON(direction == DMA_NONE);
 
 	if (!plat_device_is_coherent(dev))
-		dma_cache_wback_inv((unsigned long)vaddr, size);
+		__dma_sync((unsigned long)vaddr, size, direction);
 }
 
 EXPORT_SYMBOL(dma_cache_sync);

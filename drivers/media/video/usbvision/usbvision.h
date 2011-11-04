@@ -34,15 +34,12 @@
 #include <linux/list.h>
 #include <linux/usb.h>
 #include <linux/i2c.h>
+#include <linux/mutex.h>
 #include <media/v4l2-common.h>
 #include <media/tuner.h>
 #include <linux/videodev2.h>
 
 #define USBVISION_DEBUG		/* Turn on debug messages */
-
-#ifndef VID_HARDWARE_USBVISION
-	#define VID_HARDWARE_USBVISION 34   /* USBVision Video Grabber */
-#endif
 
 #define USBVISION_PWR_REG		0x00
 	#define USBVISION_SSPND_EN		(1 << 1)
@@ -221,6 +218,8 @@ enum {
 
 #define I2C_USB_ADAP_MAX	16
 
+#define USBVISION_NORMS (V4L2_STD_PAL | V4L2_STD_NTSC | V4L2_STD_SECAM | V4L2_STD_PAL_M)
+
 /* ----------------------------------------------------------------- */
 /* usbvision video structures                                        */
 /* ----------------------------------------------------------------- */
@@ -301,14 +300,6 @@ struct usbvision_frame_header {
 	__u16 frameHeight;				/* 10 - 11 after endian correction*/
 };
 
-/* tvnorms */
-struct usbvision_tvnorm {
-	char *name;
-	v4l2_std_id id;
-	/* mode for saa7113h */
-	int mode;
-};
-
 struct usbvision_frame {
 	char *data;					/* Frame buffer */
 	struct usbvision_frame_header isocHeader;	/* Header from stream */
@@ -379,14 +370,12 @@ struct usb_usbvision {
 	int ctrlUrbBusy;
 	struct usb_ctrlrequest ctrlUrbSetup;
 	wait_queue_head_t ctrlUrb_wq;					// Processes waiting
-	struct semaphore ctrlUrbLock;
 
 	/* configuration part */
 	int have_tuner;
 	int tuner_type;
 	int tuner_addr;
 	int bridgeType;							// NT1003, NT1004, NT1005
-	int channel;
 	int radio;
 	int video_inputs;						// # of inputs
 	unsigned long freq;
@@ -403,7 +392,7 @@ struct usb_usbvision {
 	unsigned char iface;						/* Video interface number */
 	unsigned char ifaceAlt;			/* Alt settings */
 	unsigned char Vin_Reg2_Preset;
-	struct semaphore lock;
+	struct mutex               lock;
 	struct timer_list powerOffTimer;
 	struct work_struct powerOffWork;
 	int power;							/* is the device powered on? */
@@ -441,7 +430,7 @@ struct usb_usbvision {
 
 	struct v4l2_capability vcap;					/* Video capabilities */
 	unsigned int ctl_input;						/* selected input */
-	struct usbvision_tvnorm *tvnorm;				/* selected tv norm */
+	v4l2_std_id tvnormId;						/* selected tv norm */
 	unsigned char video_endp;					/* 0x82 for USBVISION devices based */
 
 	// Decompression stuff:

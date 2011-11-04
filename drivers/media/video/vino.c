@@ -13,7 +13,7 @@
 /*
  * TODO:
  * - remove "mark pages reserved-hacks" from memory allocation code
- *   and implement nopage()
+ *   and implement fault()
  * - check decimation, calculating and reporting image size when
  *   using decimation
  * - implement read(), user mode buffers and overlay (?)
@@ -28,19 +28,16 @@
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
-#include <linux/moduleparam.h>
 #include <linux/time.h>
 #include <linux/version.h>
-
-#ifdef CONFIG_KMOD
 #include <linux/kmod.h>
-#endif
 
 #include <linux/i2c.h>
 #include <linux/i2c-algo-sgi.h>
 
-#include <linux/videodev.h>
+#include <linux/videodev2.h>
 #include <media/v4l2-common.h>
+#include <media/v4l2-ioctl.h>
 #include <linux/video_decoder.h>
 #include <linux/mutex.h>
 
@@ -334,7 +331,7 @@ struct vino_settings {
  *
  * Use non-zero value to enable conversion.
  */
-static int vino_pixel_conversion = 0;
+static int vino_pixel_conversion;
 
 module_param_named(pixelconv, vino_pixel_conversion, int, 0);
 
@@ -809,7 +806,7 @@ static void vino_free_buffer_with_count(struct vino_framebuffer *fb,
 	dprintk("vino_free_buffer_with_count(): count = %d\n", count);
 
 	for (i = 0; i < count; i++) {
-		ClearPageReserved(virt_to_page(fb->desc_table.virtual[i]));
+		ClearPageReserved(virt_to_page((void *)fb->desc_table.virtual[i]));
 		dma_unmap_single(NULL,
 				 fb->desc_table.dma_cpu[VINO_PAGE_RATIO * i],
 				 PAGE_SIZE, DMA_FROM_DEVICE);
@@ -887,7 +884,7 @@ static int vino_allocate_buffer(struct vino_framebuffer *fb,
 				dma_data_addr + VINO_PAGE_SIZE * j;
 		}
 
-		SetPageReserved(virt_to_page(fb->desc_table.virtual[i]));
+		SetPageReserved(virt_to_page((void *)fb->desc_table.virtual[i]));
 	}
 
 	/* page_count needs to be set anyway, because the descriptor table has
@@ -974,7 +971,7 @@ static int vino_prepare_user_buffer(struct vino_framebuffer *fb,
 				dma_data_addr + VINO_PAGE_SIZE * j;
 		}
 
-		SetPageReserved(virt_to_page(fb->desc_table.virtual[i]));
+		SetPageReserved(virt_to_page((void *)fb->desc_table.virtual[i]));
 	}
 
 	/* page_count needs to be set anyway, because the descriptor table has
@@ -2077,12 +2074,10 @@ static int vino_wait_for_frame(struct vino_channel_settings *vcs)
 	init_waitqueue_entry(&wait, current);
 	/* add ourselves into wait queue */
 	add_wait_queue(&vcs->fb_queue.frame_wait_queue, &wait);
-	/* and set current state */
-	set_current_state(TASK_INTERRUPTIBLE);
 
 	/* to ensure that schedule_timeout will return immediately
-	 * if VINO interrupt was triggred meanwhile */
-	schedule_timeout(HZ / 10);
+	 * if VINO interrupt was triggered meanwhile */
+	schedule_timeout_interruptible(msecs_to_jiffies(100));
 
 	if (signal_pending(current))
 		err = -EINTR;
@@ -2592,11 +2587,7 @@ static int vino_acquire_input(struct vino_channel_settings *vcs)
 	/* First try D1 and then SAA7191 */
 	if (vino_drvdata->camera.driver
 	    && (vino_drvdata->camera.owner == VINO_NO_CHANNEL)) {
-		if (i2c_use_client(vino_drvdata->camera.driver)) {
-			ret = -ENODEV;
-			goto out;
-		}
-
+		i2c_use_client(vino_drvdata->camera.driver);
 		vino_drvdata->camera.owner = vcs->channel;
 		vcs->input = VINO_INPUT_D1;
 		vcs->data_norm = VINO_DATA_NORM_D1;
@@ -2605,11 +2596,7 @@ static int vino_acquire_input(struct vino_channel_settings *vcs)
 		int input, data_norm;
 		int saa7191_input;
 
-		if (i2c_use_client(vino_drvdata->decoder.driver)) {
-			ret = -ENODEV;
-			goto out;
-		}
-
+		i2c_use_client(vino_drvdata->decoder.driver);
 		input = VINO_INPUT_COMPOSITE;
 
 		saa7191_input = vino_get_saa7191_input(input);
@@ -2691,10 +2678,7 @@ static int vino_set_input(struct vino_channel_settings *vcs, int input)
 		}
 
 		if (vino_drvdata->decoder.owner == VINO_NO_CHANNEL) {
-			if (i2c_use_client(vino_drvdata->decoder.driver)) {
-				ret = -ENODEV;
-				goto out;
-			}
+			i2c_use_client(vino_drvdata->decoder.driver);
 			vino_drvdata->decoder.owner = vcs->channel;
 		}
 
@@ -2762,10 +2746,7 @@ static int vino_set_input(struct vino_channel_settings *vcs, int input)
 		}
 
 		if (vino_drvdata->camera.owner == VINO_NO_CHANNEL) {
-			if (i2c_use_client(vino_drvdata->camera.driver)) {
-				ret = -ENODEV;
-				goto out;
-			}
+			i2c_use_client(vino_drvdata->camera.driver);
 			vino_drvdata->camera.owner = vcs->channel;
 		}
 
@@ -4040,8 +4021,7 @@ out:
 
 static int vino_open(struct inode *inode, struct file *file)
 {
-	struct video_device *dev = video_devdata(file);
-	struct vino_channel_settings *vcs = video_get_drvdata(dev);
+	struct vino_channel_settings *vcs = video_drvdata(file);
 	int ret = 0;
 	dprintk("open(): channel = %c\n",
 	       (vcs->channel == VINO_CHANNEL_A) ? 'A' : 'B');
@@ -4072,8 +4052,7 @@ static int vino_open(struct inode *inode, struct file *file)
 
 static int vino_close(struct inode *inode, struct file *file)
 {
-	struct video_device *dev = video_devdata(file);
-	struct vino_channel_settings *vcs = video_get_drvdata(dev);
+	struct vino_channel_settings *vcs = video_drvdata(file);
 	dprintk("close():\n");
 
 	mutex_lock(&vcs->mutex);
@@ -4116,8 +4095,7 @@ static struct vm_operations_struct vino_vm_ops = {
 
 static int vino_mmap(struct file *file, struct vm_area_struct *vma)
 {
-	struct video_device *dev = video_devdata(file);
-	struct vino_channel_settings *vcs = video_get_drvdata(dev);
+	struct vino_channel_settings *vcs = video_drvdata(file);
 
 	unsigned long start = vma->vm_start;
 	unsigned long size = vma->vm_end - vma->vm_start;
@@ -4222,8 +4200,7 @@ out:
 
 static unsigned int vino_poll(struct file *file, poll_table *pt)
 {
-	struct video_device *dev = video_devdata(file);
-	struct vino_channel_settings *vcs = video_get_drvdata(dev);
+	struct vino_channel_settings *vcs = video_drvdata(file);
 	unsigned int outgoing;
 	unsigned int ret = 0;
 
@@ -4263,8 +4240,7 @@ error:
 static int vino_do_ioctl(struct inode *inode, struct file *file,
 		      unsigned int cmd, void *arg)
 {
-	struct video_device *dev = video_devdata(file);
-	struct vino_channel_settings *vcs = video_get_drvdata(dev);
+	struct vino_channel_settings *vcs = video_drvdata(file);
 
 #ifdef VINO_DEBUG
 	switch (_IOC_TYPE(cmd)) {
@@ -4371,8 +4347,7 @@ static int vino_do_ioctl(struct inode *inode, struct file *file,
 static int vino_ioctl(struct inode *inode, struct file *file,
 		      unsigned int cmd, unsigned long arg)
 {
-	struct video_device *dev = video_devdata(file);
-	struct vino_channel_settings *vcs = video_get_drvdata(dev);
+	struct vino_channel_settings *vcs = video_drvdata(file);
 	int ret;
 
 	if (mutex_lock_interruptible(&vcs->mutex))
@@ -4387,8 +4362,8 @@ static int vino_ioctl(struct inode *inode, struct file *file,
 
 /* Initialization and cleanup */
 
-// __initdata
-static int vino_init_stage = 0;
+/* __initdata */
+static int vino_init_stage;
 
 static const struct file_operations vino_fops = {
 	.owner		= THIS_MODULE,
@@ -4402,8 +4377,6 @@ static const struct file_operations vino_fops = {
 
 static struct video_device v4l_device_template = {
 	.name		= "NOT SET",
-	//.type		= VID_TYPE_CAPTURE | VID_TYPE_SUBCAPTURE |
-	//	VID_TYPE_CLIPPING | VID_TYPE_SCALES, VID_TYPE_OVERLAY
 	.fops		= &vino_fops,
 	.minor		= -1,
 };
@@ -4658,7 +4631,7 @@ static int __init vino_module_init(void)
 	}
 	vino_init_stage++;
 
-#if defined(CONFIG_KMOD) && defined(MODULE)
+#ifdef MODULE
 	request_module("saa7191");
 	request_module("indycam");
 #endif

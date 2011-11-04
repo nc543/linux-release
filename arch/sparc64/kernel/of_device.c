@@ -1,132 +1,14 @@
 #include <linux/string.h>
 #include <linux/kernel.h>
+#include <linux/of.h>
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/mod_devicetable.h>
 #include <linux/slab.h>
-
-#include <asm/errno.h>
-#include <asm/of_device.h>
-
-/**
- * of_match_device - Tell if an of_device structure has a matching
- * of_match structure
- * @ids: array of of device match structures to search in
- * @dev: the of device structure to match against
- *
- * Used by a driver to check whether an of_device present in the
- * system is in its list of supported devices.
- */
-const struct of_device_id *of_match_device(const struct of_device_id *matches,
-					const struct of_device *dev)
-{
-	if (!dev->node)
-		return NULL;
-	while (matches->name[0] || matches->type[0] || matches->compatible[0]) {
-		int match = 1;
-		if (matches->name[0])
-			match &= dev->node->name
-				&& !strcmp(matches->name, dev->node->name);
-		if (matches->type[0])
-			match &= dev->node->type
-				&& !strcmp(matches->type, dev->node->type);
-		if (matches->compatible[0])
-			match &= of_device_is_compatible(dev->node,
-							 matches->compatible);
-		if (match)
-			return matches;
-		matches++;
-	}
-	return NULL;
-}
-
-static int of_platform_bus_match(struct device *dev, struct device_driver *drv)
-{
-	struct of_device * of_dev = to_of_device(dev);
-	struct of_platform_driver * of_drv = to_of_platform_driver(drv);
-	const struct of_device_id * matches = of_drv->match_table;
-
-	if (!matches)
-		return 0;
-
-	return of_match_device(matches, of_dev) != NULL;
-}
-
-struct of_device *of_dev_get(struct of_device *dev)
-{
-	struct device *tmp;
-
-	if (!dev)
-		return NULL;
-	tmp = get_device(&dev->dev);
-	if (tmp)
-		return to_of_device(tmp);
-	else
-		return NULL;
-}
-
-void of_dev_put(struct of_device *dev)
-{
-	if (dev)
-		put_device(&dev->dev);
-}
-
-
-static int of_device_probe(struct device *dev)
-{
-	int error = -ENODEV;
-	struct of_platform_driver *drv;
-	struct of_device *of_dev;
-	const struct of_device_id *match;
-
-	drv = to_of_platform_driver(dev->driver);
-	of_dev = to_of_device(dev);
-
-	if (!drv->probe)
-		return error;
-
-	of_dev_get(of_dev);
-
-	match = of_match_device(drv->match_table, of_dev);
-	if (match)
-		error = drv->probe(of_dev, match);
-	if (error)
-		of_dev_put(of_dev);
-
-	return error;
-}
-
-static int of_device_remove(struct device *dev)
-{
-	struct of_device * of_dev = to_of_device(dev);
-	struct of_platform_driver * drv = to_of_platform_driver(dev->driver);
-
-	if (dev->driver && drv->remove)
-		drv->remove(of_dev);
-	return 0;
-}
-
-static int of_device_suspend(struct device *dev, pm_message_t state)
-{
-	struct of_device * of_dev = to_of_device(dev);
-	struct of_platform_driver * drv = to_of_platform_driver(dev->driver);
-	int error = 0;
-
-	if (dev->driver && drv->suspend)
-		error = drv->suspend(of_dev, state);
-	return error;
-}
-
-static int of_device_resume(struct device * dev)
-{
-	struct of_device * of_dev = to_of_device(dev);
-	struct of_platform_driver * drv = to_of_platform_driver(dev->driver);
-	int error = 0;
-
-	if (dev->driver && drv->resume)
-		error = drv->resume(of_dev);
-	return error;
-}
+#include <linux/errno.h>
+#include <linux/irq.h>
+#include <linux/of_device.h>
+#include <linux/of_platform.h>
 
 void __iomem *of_ioremap(struct resource *res, unsigned long offset, unsigned long size, char *name)
 {
@@ -163,7 +45,7 @@ static int node_match(struct device *dev, void *data)
 
 struct of_device *of_find_device_by_node(struct device_node *dp)
 {
-	struct device *dev = bus_find_device(&of_bus_type, NULL,
+	struct device *dev = bus_find_device(&of_platform_bus_type, NULL,
 					     dp, node_match);
 
 	if (dev)
@@ -173,49 +55,41 @@ struct of_device *of_find_device_by_node(struct device_node *dp)
 }
 EXPORT_SYMBOL(of_find_device_by_node);
 
-#ifdef CONFIG_PCI
-struct bus_type isa_bus_type = {
-       .name	= "isa",
-       .match	= of_platform_bus_match,
-       .probe	= of_device_probe,
-       .remove	= of_device_remove,
-       .suspend	= of_device_suspend,
-       .resume	= of_device_resume,
-};
-EXPORT_SYMBOL(isa_bus_type);
+unsigned int irq_of_parse_and_map(struct device_node *node, int index)
+{
+	struct of_device *op = of_find_device_by_node(node);
 
-struct bus_type ebus_bus_type = {
-       .name	= "ebus",
-       .match	= of_platform_bus_match,
-       .probe	= of_device_probe,
-       .remove	= of_device_remove,
-       .suspend	= of_device_suspend,
-       .resume	= of_device_resume,
-};
-EXPORT_SYMBOL(ebus_bus_type);
-#endif
+	if (!op || index >= op->num_irqs)
+		return 0;
 
-#ifdef CONFIG_SBUS
-struct bus_type sbus_bus_type = {
-       .name	= "sbus",
-       .match	= of_platform_bus_match,
-       .probe	= of_device_probe,
-       .remove	= of_device_remove,
-       .suspend	= of_device_suspend,
-       .resume	= of_device_resume,
-};
-EXPORT_SYMBOL(sbus_bus_type);
-#endif
+	return op->irqs[index];
+}
+EXPORT_SYMBOL(irq_of_parse_and_map);
 
-struct bus_type of_bus_type = {
-       .name	= "of",
-       .match	= of_platform_bus_match,
-       .probe	= of_device_probe,
-       .remove	= of_device_remove,
-       .suspend	= of_device_suspend,
-       .resume	= of_device_resume,
-};
-EXPORT_SYMBOL(of_bus_type);
+/* Take the archdata values for IOMMU, STC, and HOSTDATA found in
+ * BUS and propagate to all child of_device objects.
+ */
+void of_propagate_archdata(struct of_device *bus)
+{
+	struct dev_archdata *bus_sd = &bus->dev.archdata;
+	struct device_node *bus_dp = bus->node;
+	struct device_node *dp;
+
+	for (dp = bus_dp->child; dp; dp = dp->sibling) {
+		struct of_device *op = of_find_device_by_node(dp);
+
+		op->dev.archdata.iommu = bus_sd->iommu;
+		op->dev.archdata.stc = bus_sd->stc;
+		op->dev.archdata.host_controller = bus_sd->host_controller;
+		op->dev.archdata.numa_node = bus_sd->numa_node;
+
+		if (dp->child)
+			of_propagate_archdata(op);
+	}
+}
+
+struct bus_type of_platform_bus_type;
+EXPORT_SYMBOL(of_platform_bus_type);
 
 static inline u64 of_read_addr(const u32 *cell, int size)
 {
@@ -245,7 +119,7 @@ struct of_bus {
 				       int *addrc, int *sizec);
 	int		(*map)(u32 *addr, const u32 *range,
 			       int na, int ns, int pna);
-	unsigned int	(*get_flags)(const u32 *addr);
+	unsigned long	(*get_flags)(const u32 *addr, unsigned long);
 };
 
 /*
@@ -305,8 +179,10 @@ static int of_bus_default_map(u32 *addr, const u32 *range,
 	return 0;
 }
 
-static unsigned int of_bus_default_get_flags(const u32 *addr)
+static unsigned long of_bus_default_get_flags(const u32 *addr, unsigned long flags)
 {
+	if (flags)
+		return flags;
 	return IORESOURCE_MEM;
 }
 
@@ -316,7 +192,7 @@ static unsigned int of_bus_default_get_flags(const u32 *addr)
 
 static int of_bus_pci_match(struct device_node *np)
 {
-	if (!strcmp(np->type, "pci") || !strcmp(np->type, "pciex")) {
+	if (!strcmp(np->name, "pci")) {
 		const char *model = of_get_property(np, "model", NULL);
 
 		if (model && !strcmp(model, "SUNW,simba"))
@@ -347,7 +223,7 @@ static int of_bus_simba_match(struct device_node *np)
 	/* Treat PCI busses lacking ranges property just like
 	 * simba.
 	 */
-	if (!strcmp(np->type, "pci") || !strcmp(np->type, "pciex")) {
+	if (!strcmp(np->name, "pci")) {
 		if (!of_find_property(np, "ranges", NULL))
 			return 1;
 	}
@@ -398,17 +274,21 @@ static int of_bus_pci_map(u32 *addr, const u32 *range,
 	return 0;
 }
 
-static unsigned int of_bus_pci_get_flags(const u32 *addr)
+static unsigned long of_bus_pci_get_flags(const u32 *addr, unsigned long flags)
 {
-	unsigned int flags = 0;
 	u32 w = addr[0];
 
+	/* For PCI, we override whatever child busses may have used.  */
+	flags = 0;
 	switch((w >> 24) & 0x03) {
 	case 0x01:
 		flags |= IORESOURCE_IO;
+		break;
+
 	case 0x02: /* 32 bits */
 	case 0x03: /* 64 bits */
 		flags |= IORESOURCE_MEM;
+		break;
 	}
 	if (w & 0x40000000)
 		flags |= IORESOURCE_PREFETCH;
@@ -521,8 +401,7 @@ static int __init build_one_resource(struct device_node *parent,
 				     int na, int ns, int pna)
 {
 	const u32 *ranges;
-	unsigned int rlen;
-	int rone;
+	int rone, rlen;
 
 	ranges = of_get_property(parent, "ranges", &rlen);
 	if (ranges == NULL || rlen == 0) {
@@ -558,27 +437,30 @@ static int __init build_one_resource(struct device_node *parent,
 
 static int __init use_1to1_mapping(struct device_node *pp)
 {
-	/* If this is on the PMU bus, don't try to translate it even
-	 * if a ranges property exists.
-	 */
-	if (!strcmp(pp->name, "pmu"))
-		return 1;
-
 	/* If we have a ranges property in the parent, use it.  */
 	if (of_find_property(pp, "ranges", NULL) != NULL)
 		return 0;
 
 	/* If the parent is the dma node of an ISA bus, pass
 	 * the translation up to the root.
+	 *
+	 * Some SBUS devices use intermediate nodes to express
+	 * hierarchy within the device itself.  These aren't
+	 * real bus nodes, and don't have a 'ranges' property.
+	 * But, we should still pass the translation work up
+	 * to the SBUS itself.
 	 */
-	if (!strcmp(pp->name, "dma"))
+	if (!strcmp(pp->name, "dma") ||
+	    !strcmp(pp->name, "espdma") ||
+	    !strcmp(pp->name, "ledma") ||
+	    !strcmp(pp->name, "lebuffer"))
 		return 0;
 
 	/* Similarly for all PCI bridges, if we get this far
 	 * it lacks a ranges property, and this will include
 	 * cases like Simba.
 	 */
-	if (!strcmp(pp->type, "pci") || !strcmp(pp->type, "pciex"))
+	if (!strcmp(pp->name, "pci"))
 		return 0;
 
 	return 1;
@@ -633,9 +515,9 @@ static void __init build_device_resources(struct of_device *op,
 		int pna, pns;
 
 		size = of_read_addr(reg + na, ns);
-		flags = bus->get_flags(reg);
-
 		memcpy(addr, reg, na * 4);
+
+		flags = bus->get_flags(addr, 0);
 
 		if (use_1to1_mapping(pp)) {
 			result = of_read_addr(addr, na);
@@ -660,6 +542,8 @@ static void __init build_device_resources(struct of_device *op,
 			if (build_one_resource(dp, dbus, pbus, addr,
 					       dna, dns, pna))
 				break;
+
+			flags = pbus->get_flags(addr, flags);
 
 			dna = pna;
 			dns = pns;
@@ -807,6 +691,7 @@ static unsigned int __init build_one_device_irq(struct of_device *op,
 	struct device_node *dp = op->node;
 	struct device_node *pp, *ip;
 	unsigned int orig_irq = irq;
+	int nid;
 
 	if (irq == 0xffffffff)
 		return irq;
@@ -819,7 +704,7 @@ static unsigned int __init build_one_device_irq(struct of_device *op,
 			printk("%s: direct translate %x --> %x\n",
 			       dp->full_name, orig_irq, irq);
 
-		return irq;
+		goto out;
 	}
 
 	/* Something more complicated.  Walk up to the root, applying
@@ -860,8 +745,7 @@ static unsigned int __init build_one_device_irq(struct of_device *op,
 				break;
 			}
 		} else {
-			if (!strcmp(pp->type, "pci") ||
-			    !strcmp(pp->type, "pciex")) {
+			if (!strcmp(pp->name, "pci")) {
 				unsigned int this_orig_irq = irq;
 
 				irq = pci_irq_swizzle(dp, pp, irq);
@@ -891,6 +775,14 @@ static unsigned int __init build_one_device_irq(struct of_device *op,
 		printk("%s: Apply IRQ trans [%s] %x --> %x\n",
 		       op->node->full_name, ip->full_name, orig_irq, irq);
 
+out:
+	nid = of_node_to_nid(dp);
+	if (nid != -1) {
+		cpumask_t numa_mask = node_to_cpumask(nid);
+
+		irq_set_affinity(irq, numa_mask);
+	}
+
 	return irq;
 }
 
@@ -899,10 +791,15 @@ static struct of_device * __init scan_one_device(struct device_node *dp,
 {
 	struct of_device *op = kzalloc(sizeof(*op), GFP_KERNEL);
 	const unsigned int *irq;
+	struct dev_archdata *sd;
 	int len, i;
 
 	if (!op)
 		return NULL;
+
+	sd = &op->dev.archdata;
+	sd->prom_node = dp;
+	sd->op = op;
 
 	op->node = dp;
 
@@ -933,11 +830,11 @@ static struct of_device * __init scan_one_device(struct device_node *dp,
 		op->irqs[i] = build_one_device_irq(op, parent, op->irqs[i]);
 
 	op->dev.parent = parent;
-	op->dev.bus = &of_bus_type;
+	op->dev.bus = &of_platform_bus_type;
 	if (!parent)
-		strcpy(op->dev.bus_id, "root");
+		dev_set_name(&op->dev, "root");
 	else
-		sprintf(op->dev.bus_id, "%08x", dp->node);
+		dev_set_name(&op->dev, "%08x", dp->node);
 
 	if (of_device_register(op)) {
 		printk("%s: Could not register of device.\n",
@@ -977,18 +874,7 @@ static int __init of_bus_driver_init(void)
 {
 	int err;
 
-	err = bus_register(&of_bus_type);
-#ifdef CONFIG_PCI
-	if (!err)
-		err = bus_register(&isa_bus_type);
-	if (!err)
-		err = bus_register(&ebus_bus_type);
-#endif
-#ifdef CONFIG_SBUS
-	if (!err)
-		err = bus_register(&sbus_bus_type);
-#endif
-
+	err = of_bus_type_init(&of_platform_bus_type, "of");
 	if (!err)
 		scan_of_devices();
 
@@ -1010,103 +896,3 @@ static int __init of_debug(char *str)
 }
 
 __setup("of_debug=", of_debug);
-
-int of_register_driver(struct of_platform_driver *drv, struct bus_type *bus)
-{
-	/* initialize common driver fields */
-	drv->driver.name = drv->name;
-	drv->driver.bus = bus;
-
-	/* register with core */
-	return driver_register(&drv->driver);
-}
-
-void of_unregister_driver(struct of_platform_driver *drv)
-{
-	driver_unregister(&drv->driver);
-}
-
-
-static ssize_t dev_show_devspec(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	struct of_device *ofdev;
-
-	ofdev = to_of_device(dev);
-	return sprintf(buf, "%s", ofdev->node->full_name);
-}
-
-static DEVICE_ATTR(devspec, S_IRUGO, dev_show_devspec, NULL);
-
-/**
- * of_release_dev - free an of device structure when all users of it are finished.
- * @dev: device that's been disconnected
- *
- * Will be called only by the device core when all users of this of device are
- * done.
- */
-void of_release_dev(struct device *dev)
-{
-	struct of_device *ofdev;
-
-        ofdev = to_of_device(dev);
-
-	kfree(ofdev);
-}
-
-int of_device_register(struct of_device *ofdev)
-{
-	int rc;
-
-	BUG_ON(ofdev->node == NULL);
-
-	rc = device_register(&ofdev->dev);
-	if (rc)
-		return rc;
-
-	rc = device_create_file(&ofdev->dev, &dev_attr_devspec);
-	if (rc)
-		device_unregister(&ofdev->dev);
-
-	return rc;
-}
-
-void of_device_unregister(struct of_device *ofdev)
-{
-	device_remove_file(&ofdev->dev, &dev_attr_devspec);
-	device_unregister(&ofdev->dev);
-}
-
-struct of_device* of_platform_device_create(struct device_node *np,
-					    const char *bus_id,
-					    struct device *parent,
-					    struct bus_type *bus)
-{
-	struct of_device *dev;
-
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
-	if (!dev)
-		return NULL;
-
-	dev->dev.parent = parent;
-	dev->dev.bus = bus;
-	dev->dev.release = of_release_dev;
-
-	strlcpy(dev->dev.bus_id, bus_id, BUS_ID_SIZE);
-
-	if (of_device_register(dev) != 0) {
-		kfree(dev);
-		return NULL;
-	}
-
-	return dev;
-}
-
-EXPORT_SYMBOL(of_match_device);
-EXPORT_SYMBOL(of_register_driver);
-EXPORT_SYMBOL(of_unregister_driver);
-EXPORT_SYMBOL(of_device_register);
-EXPORT_SYMBOL(of_device_unregister);
-EXPORT_SYMBOL(of_dev_get);
-EXPORT_SYMBOL(of_dev_put);
-EXPORT_SYMBOL(of_platform_device_create);
-EXPORT_SYMBOL(of_release_dev);

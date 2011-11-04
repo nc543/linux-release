@@ -33,7 +33,6 @@
 #include <acpi/acpi_bus.h>
 #include <acpi/acpi_drivers.h>
 
-#define ACPI_BUTTON_COMPONENT		0x00080000
 #define ACPI_BUTTON_CLASS		"button"
 #define ACPI_BUTTON_FILE_INFO		"info"
 #define ACPI_BUTTON_FILE_STATE		"state"
@@ -66,17 +65,29 @@ MODULE_AUTHOR("Paul Diefenbaugh");
 MODULE_DESCRIPTION("ACPI Button Driver");
 MODULE_LICENSE("GPL");
 
+static const struct acpi_device_id button_device_ids[] = {
+	{ACPI_BUTTON_HID_LID,    0},
+	{ACPI_BUTTON_HID_SLEEP,  0},
+	{ACPI_BUTTON_HID_SLEEPF, 0},
+	{ACPI_BUTTON_HID_POWER,  0},
+	{ACPI_BUTTON_HID_POWERF, 0},
+	{"", 0},
+};
+MODULE_DEVICE_TABLE(acpi, button_device_ids);
+
 static int acpi_button_add(struct acpi_device *device);
 static int acpi_button_remove(struct acpi_device *device, int type);
+static int acpi_button_resume(struct acpi_device *device);
 static int acpi_button_info_open_fs(struct inode *inode, struct file *file);
 static int acpi_button_state_open_fs(struct inode *inode, struct file *file);
 
 static struct acpi_driver acpi_button_driver = {
 	.name = "button",
 	.class = ACPI_BUTTON_CLASS,
-	.ids = "button_power,button_sleep,PNP0C0D,PNP0C0C,PNP0C0E",
+	.ids = button_device_ids,
 	.ops = {
 		.add = acpi_button_add,
+		.resume = acpi_button_resume,
 		.remove = acpi_button_remove,
 	},
 };
@@ -90,6 +101,7 @@ struct acpi_button {
 };
 
 static const struct file_operations acpi_button_info_fops = {
+	.owner = THIS_MODULE,
 	.open = acpi_button_info_open_fs,
 	.read = seq_read,
 	.llseek = seq_lseek,
@@ -97,6 +109,7 @@ static const struct file_operations acpi_button_info_fops = {
 };
 
 static const struct file_operations acpi_button_state_fops = {
+	.owner = THIS_MODULE,
 	.open = acpi_button_state_open_fs,
 	.read = seq_read,
 	.llseek = seq_lseek,
@@ -131,7 +144,7 @@ static int acpi_button_state_seq_show(struct seq_file *seq, void *offset)
 {
 	struct acpi_button *button = seq->private;
 	acpi_status status;
-	unsigned long state;
+	unsigned long long state;
 
 	if (!button || !button->device)
 		return 0;
@@ -195,27 +208,21 @@ static int acpi_button_add_fs(struct acpi_device *device)
 	acpi_device_dir(device)->owner = THIS_MODULE;
 
 	/* 'info' [R] */
-	entry = create_proc_entry(ACPI_BUTTON_FILE_INFO,
-				  S_IRUGO, acpi_device_dir(device));
+	entry = proc_create_data(ACPI_BUTTON_FILE_INFO,
+				 S_IRUGO, acpi_device_dir(device),
+				 &acpi_button_info_fops,
+				 acpi_driver_data(device));
 	if (!entry)
 		return -ENODEV;
-	else {
-		entry->proc_fops = &acpi_button_info_fops;
-		entry->data = acpi_driver_data(device);
-		entry->owner = THIS_MODULE;
-	}
 
 	/* show lid state [R] */
 	if (button->type == ACPI_BUTTON_TYPE_LID) {
-		entry = create_proc_entry(ACPI_BUTTON_FILE_STATE,
-					  S_IRUGO, acpi_device_dir(device));
+		entry = proc_create_data(ACPI_BUTTON_FILE_STATE,
+					 S_IRUGO, acpi_device_dir(device),
+					 &acpi_button_state_fops,
+					 acpi_driver_data(device));
 		if (!entry)
 			return -ENODEV;
-		else {
-			entry->proc_fops = &acpi_button_state_fops;
-			entry->data = acpi_driver_data(device);
-			entry->owner = THIS_MODULE;
-		}
 	}
 
 	return 0;
@@ -243,6 +250,20 @@ static int acpi_button_remove_fs(struct acpi_device *device)
 /* --------------------------------------------------------------------------
                                 Driver Interface
    -------------------------------------------------------------------------- */
+static int acpi_lid_send_state(struct acpi_button *button)
+{
+	unsigned long long state;
+	acpi_status status;
+
+	status = acpi_evaluate_integer(button->device->handle, "_LID", NULL,
+					&state);
+	if (ACPI_FAILURE(status))
+		return -ENODEV;
+	/* input layer checks if event is redundant */
+	input_report_switch(button->input, SW_LID, !state);
+	input_sync(button->input);
+	return 0;
+}
 
 static void acpi_button_notify(acpi_handle handle, u32 event, void *data)
 {
@@ -255,15 +276,8 @@ static void acpi_button_notify(acpi_handle handle, u32 event, void *data)
 	switch (event) {
 	case ACPI_BUTTON_NOTIFY_STATUS:
 		input = button->input;
-
 		if (button->type == ACPI_BUTTON_TYPE_LID) {
-			struct acpi_handle *handle = button->device->handle;
-			unsigned long state;
-
-			if (!ACPI_FAILURE(acpi_evaluate_integer(handle, "_LID",
-								NULL, &state)))
-				input_report_switch(input, SW_LID, !state);
-
+			acpi_lid_send_state(button);
 		} else {
 			int keycode = test_bit(KEY_SLEEP, input->keybit) ?
 						KEY_SLEEP : KEY_POWER;
@@ -271,10 +285,10 @@ static void acpi_button_notify(acpi_handle handle, u32 event, void *data)
 			input_report_key(input, keycode, 1);
 			input_sync(input);
 			input_report_key(input, keycode, 0);
+			input_sync(input);
 		}
-		input_sync(input);
 
-		acpi_bus_generate_event(button->device, event,
+		acpi_bus_generate_proc_event(button->device, event,
 					++button->pushed);
 		break;
 	default:
@@ -326,6 +340,17 @@ static int acpi_button_install_notify_handlers(struct acpi_button *button)
 	return ACPI_FAILURE(status) ? -ENODEV : 0;
 }
 
+static int acpi_button_resume(struct acpi_device *device)
+{
+	struct acpi_button *button;
+	if (!device)
+		return -EINVAL;
+	button = acpi_driver_data(device);
+	if (button && button->type == ACPI_BUTTON_TYPE_LID)
+		return acpi_lid_send_state(button);
+	return 0;
+}
+
 static void acpi_button_remove_notify_handlers(struct acpi_button *button)
 {
 	switch (button->type) {
@@ -359,7 +384,7 @@ static int acpi_button_add(struct acpi_device *device)
 		return -ENOMEM;
 
 	button->device = device;
-	acpi_driver_data(device) = button;
+	device->driver_data = button;
 
 	button->input = input = input_allocate_device();
 	if (!input) {
@@ -420,22 +445,23 @@ static int acpi_button_add(struct acpi_device *device)
 	input->phys = button->phys;
 	input->id.bustype = BUS_HOST;
 	input->id.product = button->type;
+	input->dev.parent = &device->dev;
 
 	switch (button->type) {
 	case ACPI_BUTTON_TYPE_POWER:
 	case ACPI_BUTTON_TYPE_POWERF:
-		input->evbit[0] = BIT(EV_KEY);
+		input->evbit[0] = BIT_MASK(EV_KEY);
 		set_bit(KEY_POWER, input->keybit);
 		break;
 
 	case ACPI_BUTTON_TYPE_SLEEP:
 	case ACPI_BUTTON_TYPE_SLEEPF:
-		input->evbit[0] = BIT(EV_KEY);
+		input->evbit[0] = BIT_MASK(EV_KEY);
 		set_bit(KEY_SLEEP, input->keybit);
 		break;
 
 	case ACPI_BUTTON_TYPE_LID:
-		input->evbit[0] = BIT(EV_SW);
+		input->evbit[0] = BIT_MASK(EV_SW);
 		set_bit(SW_LID, input->swbit);
 		break;
 	}
@@ -443,6 +469,8 @@ static int acpi_button_add(struct acpi_device *device)
 	error = input_register_device(input);
 	if (error)
 		goto err_remove_handlers;
+	if (button->type == ACPI_BUTTON_TYPE_LID)
+		acpi_lid_send_state(button);
 
 	if (device->wakeup.flags.valid) {
 		/* Button's GPE is run-wake GPE */
@@ -450,7 +478,7 @@ static int acpi_button_add(struct acpi_device *device)
 				  device->wakeup.gpe_number,
 				  ACPI_GPE_TYPE_WAKE_RUN);
 		acpi_enable_gpe(device->wakeup.gpe_device,
-				device->wakeup.gpe_number, ACPI_NOT_ISR);
+				device->wakeup.gpe_number);
 		device->wakeup.state.enabled = 1;
 	}
 

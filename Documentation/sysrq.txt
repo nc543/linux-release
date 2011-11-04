@@ -1,6 +1,6 @@
 Linux Magic System Request Key Hacks
 Documentation for sysrq.c
-Last update: 2007-MAR-14
+Last update: 2007-AUG-04
 
 *  What is the magic SysRq key?
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -43,7 +43,7 @@ On x86   - You press the key combo 'ALT-SysRq-<command key>'. Note - Some
            keyboards may not have a key labeled 'SysRq'. The 'SysRq' key is
            also known as the 'Print Screen' key. Also some keyboards cannot
 	   handle so many keys being pressed at the same time, so you might
-	   have better luck with "press Alt", "press SysRq", "release Alt",
+	   have better luck with "press Alt", "press SysRq", "release SysRq",
 	   "press <command key>", release everything.
 
 On SPARC - You press 'ALT-STOP-<command key>', I believe.
@@ -78,12 +78,14 @@ On all -  write a character to /proc/sysrq-trigger.  e.g.:
 'g'	- Used by kgdb on ppc and sh platforms.
 
 'h'     - Will display help (actually any other key than those listed
-          above will display help. but 'h' is easy to remember :-)
+          here will display help. but 'h' is easy to remember :-)
 
 'i'     - Send a SIGKILL to all processes, except for init.
 
 'k'     - Secure Access Key (SAK) Kills all programs on the current virtual
           console. NOTE: See important comments below in SAK section.
+
+'l'     - Shows a stack backtrace for all active CPUs.
 
 'm'     - Will dump current memory info to your console.
 
@@ -93,7 +95,9 @@ On all -  write a character to /proc/sysrq-trigger.  e.g.:
 
 'p'     - Will dump the current registers and flags to your console.
 
-'q'     - Will dump a list of all running timers.
+'q'     - Will dump per CPU lists of all armed hrtimers (but NOT regular
+          timer_list timers) and detailed information about all
+          clockevent devices.
 
 'r'     - Turns off keyboard raw mode and sets it to XLATE.
 

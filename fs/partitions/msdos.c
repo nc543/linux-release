@@ -18,7 +18,7 @@
  *
  *  Re-organised Feb 1998 Russell King
  */
-
+#include <linux/msdos_fs.h>
 
 #include "check.h"
 #include "msdos.h"
@@ -203,6 +203,7 @@ parse_solaris_x86(struct parsed_partitions *state, struct block_device *bdev,
 	Sector sect;
 	struct solaris_x86_vtoc *v;
 	int i;
+	short max_nparts;
 
 	v = (struct solaris_x86_vtoc *)read_dev_sector(bdev, offset+1, &sect);
 	if (!v)
@@ -218,7 +219,9 @@ parse_solaris_x86(struct parsed_partitions *state, struct block_device *bdev,
 		put_dev_sector(sect);
 		return;
 	}
-	for (i=0; i<SOLARIS_X86_NUMSLICE && state->next<state->limit; i++) {
+	/* Ensure we can handle previous case of VTOC with 8 entries gracefully */
+	max_nparts = le16_to_cpu (v->v_nparts) > 8 ? SOLARIS_X86_NUMSLICE : 8;
+	for (i=0; i<max_nparts && state->next<state->limit; i++) {
 		struct solaris_x86_slice *s = &v->v_slice[i];
 		if (s->s_size == 0)
 			continue;
@@ -416,6 +419,7 @@ int msdos_partition(struct parsed_partitions *state, struct block_device *bdev)
 	Sector sect;
 	unsigned char *data;
 	struct partition *p;
+	struct fat_boot_sector *fb;
 	int slot;
 
 	data = read_dev_sector(bdev, 0, &sect);
@@ -441,8 +445,21 @@ int msdos_partition(struct parsed_partitions *state, struct block_device *bdev)
 	p = (struct partition *) (data + 0x1be);
 	for (slot = 1; slot <= 4; slot++, p++) {
 		if (p->boot_ind != 0 && p->boot_ind != 0x80) {
-			put_dev_sector(sect);
-			return 0;
+			/*
+			 * Even without a valid boot inidicator value
+			 * its still possible this is valid FAT filesystem
+			 * without a partition table.
+			 */
+			fb = (struct fat_boot_sector *) data;
+			if (slot == 1 && fb->reserved && fb->fats
+				&& fat_valid_media(fb->media)) {
+				printk("\n");
+				put_dev_sector(sect);
+				return 1;
+			} else {
+				put_dev_sector(sect);
+				return 0;
+			}
 		}
 	}
 

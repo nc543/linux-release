@@ -41,6 +41,7 @@ static const struct file_operations afs_proc_cells_fops = {
 	.write		= afs_proc_cells_write,
 	.llseek		= seq_lseek,
 	.release	= seq_release,
+	.owner		= THIS_MODULE,
 };
 
 static int afs_proc_rootcell_open(struct inode *inode, struct file *file);
@@ -56,7 +57,8 @@ static const struct file_operations afs_proc_rootcell_fops = {
 	.read		= afs_proc_rootcell_read,
 	.write		= afs_proc_rootcell_write,
 	.llseek		= no_llseek,
-	.release	= afs_proc_rootcell_release
+	.release	= afs_proc_rootcell_release,
+	.owner		= THIS_MODULE,
 };
 
 static int afs_proc_cell_volumes_open(struct inode *inode, struct file *file);
@@ -80,6 +82,7 @@ static const struct file_operations afs_proc_cell_volumes_fops = {
 	.read		= seq_read,
 	.llseek		= seq_lseek,
 	.release	= afs_proc_cell_volumes_release,
+	.owner		= THIS_MODULE,
 };
 
 static int afs_proc_cell_vlservers_open(struct inode *inode,
@@ -104,6 +107,7 @@ static const struct file_operations afs_proc_cell_vlservers_fops = {
 	.read		= seq_read,
 	.llseek		= seq_lseek,
 	.release	= afs_proc_cell_vlservers_release,
+	.owner		= THIS_MODULE,
 };
 
 static int afs_proc_cell_servers_open(struct inode *inode, struct file *file);
@@ -127,6 +131,7 @@ static const struct file_operations afs_proc_cell_servers_fops = {
 	.read		= seq_read,
 	.llseek		= seq_lseek,
 	.release	= afs_proc_cell_servers_release,
+	.owner		= THIS_MODULE,
 };
 
 /*
@@ -143,17 +148,13 @@ int afs_proc_init(void)
 		goto error_dir;
 	proc_afs->owner = THIS_MODULE;
 
-	p = create_proc_entry("cells", 0, proc_afs);
+	p = proc_create("cells", 0, proc_afs, &afs_proc_cells_fops);
 	if (!p)
 		goto error_cells;
-	p->proc_fops = &afs_proc_cells_fops;
-	p->owner = THIS_MODULE;
 
-	p = create_proc_entry("rootcell", 0, proc_afs);
+	p = proc_create("rootcell", 0, proc_afs, &afs_proc_rootcell_fops);
 	if (!p)
 		goto error_rootcell;
-	p->proc_fops = &afs_proc_rootcell_fops;
-	p->owner = THIS_MODULE;
 
 	_leave(" = 0");
 	return 0;
@@ -201,23 +202,9 @@ static int afs_proc_cells_open(struct inode *inode, struct file *file)
  */
 static void *afs_proc_cells_start(struct seq_file *m, loff_t *_pos)
 {
-	struct list_head *_p;
-	loff_t pos = *_pos;
-
 	/* lock the list against modification */
 	down_read(&afs_proc_cells_sem);
-
-	/* allow for the header line */
-	if (!pos)
-		return (void *) 1;
-	pos--;
-
-	/* find the n'th element in the list */
-	list_for_each(_p, &afs_proc_cells)
-		if (!pos--)
-			break;
-
-	return _p != &afs_proc_cells ? _p : NULL;
+	return seq_list_start_head(&afs_proc_cells, *_pos);
 }
 
 /*
@@ -225,14 +212,7 @@ static void *afs_proc_cells_start(struct seq_file *m, loff_t *_pos)
  */
 static void *afs_proc_cells_next(struct seq_file *p, void *v, loff_t *pos)
 {
-	struct list_head *_p;
-
-	(*pos)++;
-
-	_p = v;
-	_p = v == (void *) 1 ? afs_proc_cells.next : _p->next;
-
-	return _p != &afs_proc_cells ? _p : NULL;
+	return seq_list_next(v, &afs_proc_cells, pos);
 }
 
 /*
@@ -250,7 +230,7 @@ static int afs_proc_cells_show(struct seq_file *m, void *v)
 {
 	struct afs_cell *cell = list_entry(v, struct afs_cell, proc_link);
 
-	if (v == (void *) 1) {
+	if (v == &afs_proc_cells) {
 		/* display header on line 1 */
 		seq_puts(m, "USE NAME\n");
 		return 0;
@@ -416,26 +396,20 @@ int afs_proc_cell_setup(struct afs_cell *cell)
 	if (!cell->proc_dir)
 		goto error_dir;
 
-	p = create_proc_entry("servers", 0, cell->proc_dir);
+	p = proc_create_data("servers", 0, cell->proc_dir,
+			     &afs_proc_cell_servers_fops, cell);
 	if (!p)
 		goto error_servers;
-	p->proc_fops = &afs_proc_cell_servers_fops;
-	p->owner = THIS_MODULE;
-	p->data = cell;
 
-	p = create_proc_entry("vlservers", 0, cell->proc_dir);
+	p = proc_create_data("vlservers", 0, cell->proc_dir,
+			     &afs_proc_cell_vlservers_fops, cell);
 	if (!p)
 		goto error_vlservers;
-	p->proc_fops = &afs_proc_cell_vlservers_fops;
-	p->owner = THIS_MODULE;
-	p->data = cell;
 
-	p = create_proc_entry("volumes", 0, cell->proc_dir);
+	p = proc_create_data("volumes", 0, cell->proc_dir,
+			     &afs_proc_cell_volumes_fops, cell);
 	if (!p)
 		goto error_volumes;
-	p->proc_fops = &afs_proc_cell_volumes_fops;
-	p->owner = THIS_MODULE;
-	p->data = cell;
 
 	_leave(" = 0");
 	return 0;
@@ -503,26 +477,13 @@ static int afs_proc_cell_volumes_release(struct inode *inode, struct file *file)
  */
 static void *afs_proc_cell_volumes_start(struct seq_file *m, loff_t *_pos)
 {
-	struct list_head *_p;
 	struct afs_cell *cell = m->private;
-	loff_t pos = *_pos;
 
 	_enter("cell=%p pos=%Ld", cell, *_pos);
 
 	/* lock the list against modification */
 	down_read(&cell->vl_sem);
-
-	/* allow for the header line */
-	if (!pos)
-		return (void *) 1;
-	pos--;
-
-	/* find the n'th element in the list */
-	list_for_each(_p, &cell->vl_list)
-		if (!pos--)
-			break;
-
-	return _p != &cell->vl_list ? _p : NULL;
+	return seq_list_start_head(&cell->vl_list, *_pos);
 }
 
 /*
@@ -531,17 +492,10 @@ static void *afs_proc_cell_volumes_start(struct seq_file *m, loff_t *_pos)
 static void *afs_proc_cell_volumes_next(struct seq_file *p, void *v,
 					loff_t *_pos)
 {
-	struct list_head *_p;
 	struct afs_cell *cell = p->private;
 
 	_enter("cell=%p pos=%Ld", cell, *_pos);
-
-	(*_pos)++;
-
-	_p = v;
-	_p = (v == (void *) 1) ? cell->vl_list.next : _p->next;
-
-	return (_p != &cell->vl_list) ? _p : NULL;
+	return seq_list_next(v, &cell->vl_list, _pos);
 }
 
 /*
@@ -554,7 +508,7 @@ static void afs_proc_cell_volumes_stop(struct seq_file *p, void *v)
 	up_read(&cell->vl_sem);
 }
 
-const char afs_vlocation_states[][4] = {
+static const char afs_vlocation_states[][4] = {
 	[AFS_VL_NEW]			= "New",
 	[AFS_VL_CREATING]		= "Crt",
 	[AFS_VL_VALID]			= "Val",
@@ -569,11 +523,12 @@ const char afs_vlocation_states[][4] = {
  */
 static int afs_proc_cell_volumes_show(struct seq_file *m, void *v)
 {
+	struct afs_cell *cell = m->private;
 	struct afs_vlocation *vlocation =
 		list_entry(v, struct afs_vlocation, link);
 
 	/* display header on line 1 */
-	if (v == (void *) 1) {
+	if (v == &cell->vl_list) {
 		seq_puts(m, "USE STT VLID[0]  VLID[1]  VLID[2]  NAME\n");
 		return 0;
 	}
@@ -734,26 +689,13 @@ static int afs_proc_cell_servers_release(struct inode *inode,
 static void *afs_proc_cell_servers_start(struct seq_file *m, loff_t *_pos)
 	__acquires(m->private->servers_lock)
 {
-	struct list_head *_p;
 	struct afs_cell *cell = m->private;
-	loff_t pos = *_pos;
 
 	_enter("cell=%p pos=%Ld", cell, *_pos);
 
 	/* lock the list against modification */
 	read_lock(&cell->servers_lock);
-
-	/* allow for the header line */
-	if (!pos)
-		return (void *) 1;
-	pos--;
-
-	/* find the n'th element in the list */
-	list_for_each(_p, &cell->servers)
-		if (!pos--)
-			break;
-
-	return _p != &cell->servers ? _p : NULL;
+	return seq_list_start_head(&cell->servers, *_pos);
 }
 
 /*
@@ -762,17 +704,10 @@ static void *afs_proc_cell_servers_start(struct seq_file *m, loff_t *_pos)
 static void *afs_proc_cell_servers_next(struct seq_file *p, void *v,
 					loff_t *_pos)
 {
-	struct list_head *_p;
 	struct afs_cell *cell = p->private;
 
 	_enter("cell=%p pos=%Ld", cell, *_pos);
-
-	(*_pos)++;
-
-	_p = v;
-	_p = v == (void *) 1 ? cell->servers.next : _p->next;
-
-	return _p != &cell->servers ? _p : NULL;
+	return seq_list_next(v, &cell->servers, _pos);
 }
 
 /*
@@ -791,11 +726,12 @@ static void afs_proc_cell_servers_stop(struct seq_file *p, void *v)
  */
 static int afs_proc_cell_servers_show(struct seq_file *m, void *v)
 {
+	struct afs_cell *cell = m->private;
 	struct afs_server *server = list_entry(v, struct afs_server, link);
 	char ipaddr[20];
 
 	/* display header on line 1 */
-	if (v == (void *) 1) {
+	if (v == &cell->servers) {
 		seq_puts(m, "USE ADDR            STATE\n");
 		return 0;
 	}

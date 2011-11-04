@@ -8,9 +8,9 @@
 #include <linux/init.h>
 #include <linux/pci.h>
 #include <linux/device.h>
+#include <linux/of_device.h>
 
 #include <asm/prom.h>
-#include <asm/of_device.h>
 #include <asm/oplib.h>
 
 #include "pci_impl.h"
@@ -44,6 +44,67 @@ static void *sun4u_config_mkaddr(struct pci_pbm_info *pbm,
 	return (void *)	(pbm->config_space | bus | devfn | reg);
 }
 
+/* At least on Sabre, it is necessary to access all PCI host controller
+ * registers at their natural size, otherwise zeros are returned.
+ * Strange but true, and I see no language in the UltraSPARC-IIi
+ * programmer's manual that mentions this even indirectly.
+ */
+static int sun4u_read_pci_cfg_host(struct pci_pbm_info *pbm,
+				   unsigned char bus, unsigned int devfn,
+				   int where, int size, u32 *value)
+{
+	u32 tmp32, *addr;
+	u16 tmp16;
+	u8 tmp8;
+
+	addr = sun4u_config_mkaddr(pbm, bus, devfn, where);
+	if (!addr)
+		return PCIBIOS_SUCCESSFUL;
+
+	switch (size) {
+	case 1:
+		if (where < 8) {
+			unsigned long align = (unsigned long) addr;
+
+			align &= ~1;
+			pci_config_read16((u16 *)align, &tmp16);
+			if (where & 1)
+				*value = tmp16 >> 8;
+			else
+				*value = tmp16 & 0xff;
+		} else {
+			pci_config_read8((u8 *)addr, &tmp8);
+			*value = (u32) tmp8;
+		}
+		break;
+
+	case 2:
+		if (where < 8) {
+			pci_config_read16((u16 *)addr, &tmp16);
+			*value = (u32) tmp16;
+		} else {
+			pci_config_read8((u8 *)addr, &tmp8);
+			*value = (u32) tmp8;
+			pci_config_read8(((u8 *)addr) + 1, &tmp8);
+			*value |= ((u32) tmp8) << 8;
+		}
+		break;
+
+	case 4:
+		tmp32 = 0xffffffff;
+		sun4u_read_pci_cfg_host(pbm, bus, devfn,
+					where, 2, &tmp32);
+		*value = tmp32;
+
+		tmp32 = 0xffffffff;
+		sun4u_read_pci_cfg_host(pbm, bus, devfn,
+					where + 2, 2, &tmp32);
+		*value |= tmp32 << 16;
+		break;
+	}
+	return PCIBIOS_SUCCESSFUL;
+}
+
 static int sun4u_read_pci_cfg(struct pci_bus *bus_dev, unsigned int devfn,
 			      int where, int size, u32 *value)
 {
@@ -52,10 +113,6 @@ static int sun4u_read_pci_cfg(struct pci_bus *bus_dev, unsigned int devfn,
 	u32 *addr;
 	u16 tmp16;
 	u8 tmp8;
-
-	if (bus_dev == pbm->pci_bus && devfn == 0x00)
-		return pci_host_bridge_read_pci_cfg(bus_dev, devfn, where,
-						    size, value);
 
 	switch (size) {
 	case 1:
@@ -68,6 +125,10 @@ static int sun4u_read_pci_cfg(struct pci_bus *bus_dev, unsigned int devfn,
 		*value = 0xffffffff;
 		break;
 	}
+
+	if (!bus_dev->number && !PCI_SLOT(devfn))
+		return sun4u_read_pci_cfg_host(pbm, bus, devfn, where,
+					       size, value);
 
 	addr = sun4u_config_mkaddr(pbm, bus, devfn, where);
 	if (!addr)
@@ -101,6 +162,53 @@ static int sun4u_read_pci_cfg(struct pci_bus *bus_dev, unsigned int devfn,
 	return PCIBIOS_SUCCESSFUL;
 }
 
+static int sun4u_write_pci_cfg_host(struct pci_pbm_info *pbm,
+				    unsigned char bus, unsigned int devfn,
+				    int where, int size, u32 value)
+{
+	u32 *addr;
+
+	addr = sun4u_config_mkaddr(pbm, bus, devfn, where);
+	if (!addr)
+		return PCIBIOS_SUCCESSFUL;
+
+	switch (size) {
+	case 1:
+		if (where < 8) {
+			unsigned long align = (unsigned long) addr;
+			u16 tmp16;
+
+			align &= ~1;
+			pci_config_read16((u16 *)align, &tmp16);
+			if (where & 1) {
+				tmp16 &= 0x00ff;
+				tmp16 |= value << 8;
+			} else {
+				tmp16 &= 0xff00;
+				tmp16 |= value;
+			}
+			pci_config_write16((u16 *)align, tmp16);
+		} else
+			pci_config_write8((u8 *)addr, value);
+		break;
+	case 2:
+		if (where < 8) {
+			pci_config_write16((u16 *)addr, value);
+		} else {
+			pci_config_write8((u8 *)addr, value & 0xff);
+			pci_config_write8(((u8 *)addr) + 1, value >> 8);
+		}
+		break;
+	case 4:
+		sun4u_write_pci_cfg_host(pbm, bus, devfn,
+					 where, 2, value & 0xffff);
+		sun4u_write_pci_cfg_host(pbm, bus, devfn,
+					 where + 2, 2, value >> 16);
+		break;
+	}
+	return PCIBIOS_SUCCESSFUL;
+}
+
 static int sun4u_write_pci_cfg(struct pci_bus *bus_dev, unsigned int devfn,
 			       int where, int size, u32 value)
 {
@@ -108,9 +216,10 @@ static int sun4u_write_pci_cfg(struct pci_bus *bus_dev, unsigned int devfn,
 	unsigned char bus = bus_dev->number;
 	u32 *addr;
 
-	if (bus_dev == pbm->pci_bus && devfn == 0x00)
-		return pci_host_bridge_write_pci_cfg(bus_dev, devfn, where,
-						     size, value);
+	if (!bus_dev->number && !PCI_SLOT(devfn))
+		return sun4u_write_pci_cfg_host(pbm, bus, devfn, where,
+						size, value);
+
 	addr = sun4u_config_mkaddr(pbm, bus, devfn, where);
 	if (!addr)
 		return PCIBIOS_SUCCESSFUL;
@@ -155,9 +264,6 @@ static int sun4v_read_pci_cfg(struct pci_bus *bus_dev, unsigned int devfn,
 	unsigned int func = PCI_FUNC(devfn);
 	unsigned long ret;
 
-	if (bus_dev == pbm->pci_bus && devfn == 0x00)
-		return pci_host_bridge_read_pci_cfg(bus_dev, devfn, where,
-						    size, value);
 	if (config_out_of_range(pbm, bus, devfn, where)) {
 		ret = ~0UL;
 	} else {
@@ -191,9 +297,6 @@ static int sun4v_write_pci_cfg(struct pci_bus *bus_dev, unsigned int devfn,
 	unsigned int func = PCI_FUNC(devfn);
 	unsigned long ret;
 
-	if (bus_dev == pbm->pci_bus && devfn == 0x00)
-		return pci_host_bridge_write_pci_cfg(bus_dev, devfn, where,
-						     size, value);
 	if (config_out_of_range(pbm, bus, devfn, where)) {
 		/* Do nothing. */
 	} else {
@@ -211,12 +314,12 @@ struct pci_ops sun4v_pci_ops = {
 
 void pci_get_pbm_props(struct pci_pbm_info *pbm)
 {
-	const u32 *val = of_get_property(pbm->prom_node, "bus-range", NULL);
+	const u32 *val = of_get_property(pbm->op->node, "bus-range", NULL);
 
 	pbm->pci_first_busno = val[0];
 	pbm->pci_last_busno = val[1];
 
-	val = of_get_property(pbm->prom_node, "ino-bitmap", NULL);
+	val = of_get_property(pbm->op->node, "ino-bitmap", NULL);
 	if (val) {
 		pbm->ino_bitmap = (((u64)val[1] << 32UL) |
 				   ((u64)val[0] <<  0UL));
@@ -262,7 +365,7 @@ static void pci_register_legacy_regions(struct resource *io_res,
 
 static void pci_register_iommu_region(struct pci_pbm_info *pbm)
 {
-	const u32 *vdma = of_get_property(pbm->prom_node, "virtual-dma", NULL);
+	const u32 *vdma = of_get_property(pbm->op->node, "virtual-dma", NULL);
 
 	if (vdma) {
 		struct resource *rp = kmalloc(sizeof(*rp), GFP_KERNEL);
@@ -286,7 +389,14 @@ void pci_determine_mem_io_space(struct pci_pbm_info *pbm)
 	int num_pbm_ranges;
 
 	saw_mem = saw_io = 0;
-	pbm_ranges = of_get_property(pbm->prom_node, "ranges", &i);
+	pbm_ranges = of_get_property(pbm->op->node, "ranges", &i);
+	if (!pbm_ranges) {
+		prom_printf("PCI: Fatal error, missing PBM ranges property "
+			    " for %s\n",
+			    pbm->name);
+		prom_halt();
+	}
+
 	num_pbm_ranges = i / sizeof(*pbm_ranges);
 
 	for (i = 0; i < num_pbm_ranges; i++) {

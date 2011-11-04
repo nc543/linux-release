@@ -1,7 +1,7 @@
 /*
  *  Driver for NEC VR4100 series Real Time Clock unit.
  *
- *  Copyright (C) 2003-2006  Yoichi Yuasa <yoichi_yuasa@tripeaks.co.jp>
+ *  Copyright (C) 2003-2008  Yoichi Yuasa <yoichi_yuasa@tripeaks.co.jp>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -17,10 +17,11 @@
  *  along with this program; if not, write to the Free Software
  *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
+#include <linux/err.h>
 #include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
-#include <linux/irq.h>
+#include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/rtc.h>
@@ -30,24 +31,10 @@
 #include <asm/div64.h>
 #include <asm/io.h>
 #include <asm/uaccess.h>
-#include <asm/vr41xx/irq.h>
 
 MODULE_AUTHOR("Yoichi Yuasa <yoichi_yuasa@tripeaks.co.jp>");
 MODULE_DESCRIPTION("NEC VR4100 series RTC driver");
-MODULE_LICENSE("GPL");
-
-#define RTC1_TYPE1_START	0x0b0000c0UL
-#define RTC1_TYPE1_END		0x0b0000dfUL
-#define RTC2_TYPE1_START	0x0b0001c0UL
-#define RTC2_TYPE1_END		0x0b0001dfUL
-
-#define RTC1_TYPE2_START	0x0f000100UL
-#define RTC1_TYPE2_END		0x0f00011fUL
-#define RTC2_TYPE2_START	0x0f000120UL
-#define RTC2_TYPE2_END		0x0f00013fUL
-
-#define RTC1_SIZE		0x20
-#define RTC2_SIZE		0x20
+MODULE_LICENSE("GPL v2");
 
 /* RTC 1 registers */
 #define ETIMELREG		0x00
@@ -95,16 +82,10 @@ static unsigned long epoch = 1970;	/* Jan 1 1970 00:00:00 */
 
 static DEFINE_SPINLOCK(rtc_lock);
 static char rtc_name[] = "RTC";
-static unsigned long periodic_frequency;
 static unsigned long periodic_count;
 static unsigned int alarm_enabled;
-
-struct resource rtc_resource[2] = {
-	{	.name	= rtc_name,
-		.flags	= IORESOURCE_MEM,	},
-	{	.name	= rtc_name,
-		.flags	= IORESOURCE_MEM,	},
-};
+static int aie_irq = -1;
+static int pie_irq = -1;
 
 static inline unsigned long read_elapsed_second(void)
 {
@@ -150,8 +131,8 @@ static void vr41xx_rtc_release(struct device *dev)
 
 	spin_unlock_irq(&rtc_lock);
 
-	disable_irq(ELAPSEDTIME_IRQ);
-	disable_irq(RTCLONG1_IRQ);
+	disable_irq(aie_irq);
+	disable_irq(pie_irq);
 }
 
 static int vr41xx_rtc_read_time(struct device *dev, struct rtc_time *time)
@@ -209,14 +190,14 @@ static int vr41xx_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *wkalrm)
 	spin_lock_irq(&rtc_lock);
 
 	if (alarm_enabled)
-		disable_irq(ELAPSEDTIME_IRQ);
+		disable_irq(aie_irq);
 
 	rtc1_write(ECMPLREG, (uint16_t)(alarm_sec << 15));
 	rtc1_write(ECMPMREG, (uint16_t)(alarm_sec >> 1));
 	rtc1_write(ECMPHREG, (uint16_t)(alarm_sec >> 17));
 
 	if (wkalrm->enabled)
-		enable_irq(ELAPSEDTIME_IRQ);
+		enable_irq(aie_irq);
 
 	alarm_enabled = wkalrm->enabled;
 
@@ -225,16 +206,43 @@ static int vr41xx_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *wkalrm)
 	return 0;
 }
 
-static int vr41xx_rtc_ioctl(struct device *dev, unsigned int cmd, unsigned long arg)
+static int vr41xx_rtc_irq_set_freq(struct device *dev, int freq)
 {
 	unsigned long count;
 
+	count = RTC_FREQUENCY;
+	do_div(count, freq);
+
+	periodic_count = count;
+
+	spin_lock_irq(&rtc_lock);
+
+	rtc1_write(RTCL1LREG, count);
+	rtc1_write(RTCL1HREG, count >> 16);
+
+	spin_unlock_irq(&rtc_lock);
+
+	return 0;
+}
+
+static int vr41xx_rtc_irq_set_state(struct device *dev, int enabled)
+{
+	if (enabled)
+		enable_irq(pie_irq);
+	else
+		disable_irq(pie_irq);
+
+	return 0;
+}
+
+static int vr41xx_rtc_ioctl(struct device *dev, unsigned int cmd, unsigned long arg)
+{
 	switch (cmd) {
 	case RTC_AIE_ON:
 		spin_lock_irq(&rtc_lock);
 
 		if (!alarm_enabled) {
-			enable_irq(ELAPSEDTIME_IRQ);
+			enable_irq(aie_irq);
 			alarm_enabled = 1;
 		}
 
@@ -244,36 +252,9 @@ static int vr41xx_rtc_ioctl(struct device *dev, unsigned int cmd, unsigned long 
 		spin_lock_irq(&rtc_lock);
 
 		if (alarm_enabled) {
-			disable_irq(ELAPSEDTIME_IRQ);
+			disable_irq(aie_irq);
 			alarm_enabled = 0;
 		}
-
-		spin_unlock_irq(&rtc_lock);
-		break;
-	case RTC_PIE_ON:
-		enable_irq(RTCLONG1_IRQ);
-		break;
-	case RTC_PIE_OFF:
-		disable_irq(RTCLONG1_IRQ);
-		break;
-	case RTC_IRQP_READ:
-		return put_user(periodic_frequency, (unsigned long __user *)arg);
-		break;
-	case RTC_IRQP_SET:
-		if (arg > MAX_PERIODIC_RATE)
-			return -EINVAL;
-
-		periodic_frequency = arg;
-
-		count = RTC_FREQUENCY;
-		do_div(count, arg);
-
-		periodic_count = count;
-
-		spin_lock_irq(&rtc_lock);
-
-		rtc1_write(RTCL1LREG, count);
-		rtc1_write(RTCL1HREG, count >> 16);
 
 		spin_unlock_irq(&rtc_lock);
 		break;
@@ -327,36 +308,46 @@ static const struct rtc_class_ops vr41xx_rtc_ops = {
 	.set_time	= vr41xx_rtc_set_time,
 	.read_alarm	= vr41xx_rtc_read_alarm,
 	.set_alarm	= vr41xx_rtc_set_alarm,
+	.irq_set_freq	= vr41xx_rtc_irq_set_freq,
+	.irq_set_state	= vr41xx_rtc_irq_set_state,
 };
 
 static int __devinit rtc_probe(struct platform_device *pdev)
 {
+	struct resource *res;
 	struct rtc_device *rtc;
-	unsigned int irq;
 	int retval;
 
-	if (pdev->num_resources != 2)
+	if (pdev->num_resources != 4)
 		return -EBUSY;
 
-	rtc1_base = ioremap(pdev->resource[0].start, RTC1_SIZE);
-	if (rtc1_base == NULL)
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!res)
 		return -EBUSY;
 
-	rtc2_base = ioremap(pdev->resource[1].start, RTC2_SIZE);
-	if (rtc2_base == NULL) {
-		iounmap(rtc1_base);
-		rtc1_base = NULL;
+	rtc1_base = ioremap(res->start, res->end - res->start + 1);
+	if (!rtc1_base)
 		return -EBUSY;
+
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
+	if (!res) {
+		retval = -EBUSY;
+		goto err_rtc1_iounmap;
+	}
+
+	rtc2_base = ioremap(res->start, res->end - res->start + 1);
+	if (!rtc2_base) {
+		retval = -EBUSY;
+		goto err_rtc1_iounmap;
 	}
 
 	rtc = rtc_device_register(rtc_name, &pdev->dev, &vr41xx_rtc_ops, THIS_MODULE);
 	if (IS_ERR(rtc)) {
-		iounmap(rtc1_base);
-		iounmap(rtc2_base);
-		rtc1_base = NULL;
-		rtc2_base = NULL;
-		return PTR_ERR(rtc);
+		retval = PTR_ERR(rtc);
+		goto err_iounmap_all;
 	}
+
+	rtc->max_user_freq = MAX_PERIODIC_RATE;
 
 	spin_lock_irq(&rtc_lock);
 
@@ -368,35 +359,50 @@ static int __devinit rtc_probe(struct platform_device *pdev)
 
 	spin_unlock_irq(&rtc_lock);
 
-	irq = ELAPSEDTIME_IRQ;
-	retval = request_irq(irq, elapsedtime_interrupt, IRQF_DISABLED,
-	                     "elapsed_time", pdev);
-	if (retval == 0) {
-		irq = RTCLONG1_IRQ;
-		retval = request_irq(irq, rtclong1_interrupt, IRQF_DISABLED,
-		                     "rtclong1", pdev);
+	aie_irq = platform_get_irq(pdev, 0);
+	if (aie_irq < 0 || aie_irq >= nr_irqs) {
+		retval = -EBUSY;
+		goto err_device_unregister;
 	}
 
-	if (retval < 0) {
-		printk(KERN_ERR "rtc: IRQ%d is busy\n", irq);
-		rtc_device_unregister(rtc);
-		if (irq == RTCLONG1_IRQ)
-			free_irq(ELAPSEDTIME_IRQ, NULL);
-		iounmap(rtc1_base);
-		iounmap(rtc2_base);
-		rtc1_base = NULL;
-		rtc2_base = NULL;
-		return retval;
-	}
+	retval = request_irq(aie_irq, elapsedtime_interrupt, IRQF_DISABLED,
+	                     "elapsed_time", pdev);
+	if (retval < 0)
+		goto err_device_unregister;
+
+	pie_irq = platform_get_irq(pdev, 1);
+	if (pie_irq < 0 || pie_irq >= nr_irqs)
+		goto err_free_irq;
+
+	retval = request_irq(pie_irq, rtclong1_interrupt, IRQF_DISABLED,
+		             "rtclong1", pdev);
+	if (retval < 0)
+		goto err_free_irq;
 
 	platform_set_drvdata(pdev, rtc);
 
-	disable_irq(ELAPSEDTIME_IRQ);
-	disable_irq(RTCLONG1_IRQ);
+	disable_irq(aie_irq);
+	disable_irq(pie_irq);
 
 	printk(KERN_INFO "rtc: Real Time Clock of NEC VR4100 series\n");
 
 	return 0;
+
+err_free_irq:
+	free_irq(aie_irq, pdev);
+
+err_device_unregister:
+	rtc_device_unregister(rtc);
+
+err_iounmap_all:
+	iounmap(rtc2_base);
+	rtc2_base = NULL;
+
+err_rtc1_iounmap:
+	iounmap(rtc1_base);
+	rtc1_base = NULL;
+
+	return retval;
 }
 
 static int __devexit rtc_remove(struct platform_device *pdev)
@@ -404,22 +410,23 @@ static int __devexit rtc_remove(struct platform_device *pdev)
 	struct rtc_device *rtc;
 
 	rtc = platform_get_drvdata(pdev);
-	if (rtc != NULL)
+	if (rtc)
 		rtc_device_unregister(rtc);
 
 	platform_set_drvdata(pdev, NULL);
 
-	free_irq(ELAPSEDTIME_IRQ, NULL);
-	free_irq(RTCLONG1_IRQ, NULL);
-	if (rtc1_base != NULL)
+	free_irq(aie_irq, pdev);
+	free_irq(pie_irq, pdev);
+	if (rtc1_base)
 		iounmap(rtc1_base);
-	if (rtc2_base != NULL)
+	if (rtc2_base)
 		iounmap(rtc2_base);
 
 	return 0;
 }
 
-static struct platform_device *rtc_platform_device;
+/* work with hotplug and coldplug */
+MODULE_ALIAS("platform:RTC");
 
 static struct platform_driver rtc_platform_driver = {
 	.probe		= rtc_probe,
@@ -432,55 +439,12 @@ static struct platform_driver rtc_platform_driver = {
 
 static int __init vr41xx_rtc_init(void)
 {
-	int retval;
-
-	switch (current_cpu_data.cputype) {
-	case CPU_VR4111:
-	case CPU_VR4121:
-		rtc_resource[0].start = RTC1_TYPE1_START;
-		rtc_resource[0].end = RTC1_TYPE1_END;
-		rtc_resource[1].start = RTC2_TYPE1_START;
-		rtc_resource[1].end = RTC2_TYPE1_END;
-		break;
-	case CPU_VR4122:
-	case CPU_VR4131:
-	case CPU_VR4133:
-		rtc_resource[0].start = RTC1_TYPE2_START;
-		rtc_resource[0].end = RTC1_TYPE2_END;
-		rtc_resource[1].start = RTC2_TYPE2_START;
-		rtc_resource[1].end = RTC2_TYPE2_END;
-		break;
-	default:
-		return -ENODEV;
-		break;
-	}
-
-	rtc_platform_device = platform_device_alloc("RTC", -1);
-	if (rtc_platform_device == NULL)
-		return -ENOMEM;
-
-	retval = platform_device_add_resources(rtc_platform_device,
-				rtc_resource, ARRAY_SIZE(rtc_resource));
-
-	if (retval == 0)
-		retval = platform_device_add(rtc_platform_device);
-
-	if (retval < 0) {
-		platform_device_put(rtc_platform_device);
-		return retval;
-	}
-
-	retval = platform_driver_register(&rtc_platform_driver);
-	if (retval < 0)
-		platform_device_unregister(rtc_platform_device);
-
-	return retval;
+	return platform_driver_register(&rtc_platform_driver);
 }
 
 static void __exit vr41xx_rtc_exit(void)
 {
 	platform_driver_unregister(&rtc_platform_driver);
-	platform_device_unregister(rtc_platform_device);
 }
 
 module_init(vr41xx_rtc_init);

@@ -33,7 +33,6 @@
  *  Sam Lin        - GPS support
  */
 
-#include <linux/autoconf.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
@@ -53,7 +52,6 @@
 #define ASUS_HOTK_NAME          "Asus Laptop Support"
 #define ASUS_HOTK_CLASS         "hotkey"
 #define ASUS_HOTK_DEVICE_NAME   "Hotkey"
-#define ASUS_HOTK_HID           "ATK0100"
 #define ASUS_HOTK_FILE          "asus-laptop"
 #define ASUS_HOTK_PREFIX        "\\_SB.ATKD."
 
@@ -141,6 +139,7 @@ ASUS_HANDLE(lcd_switch, "\\_SB.PCI0.SBRG.EC0._Q10",	/* All new models */
 	    "\\_SB.PCI0.PX40.ECD0._Q10",	/* L3C */
 	    "\\_SB.PCI0.PX40.EC0.Q10",	/* M1A */
 	    "\\_SB.PCI0.LPCB.EC0._Q10",	/* P30 */
+	    "\\_SB.PCI0.LPCB.EC0._Q0E", /* P30/P35 */
 	    "\\_SB.PCI0.PX40.Q10",	/* S1x */
 	    "\\Q10");		/* A2x, L2D, L3D, M2E */
 
@@ -197,12 +196,18 @@ static struct asus_hotk *hotk;
 /*
  * The hotkey driver declaration
  */
+static const struct acpi_device_id asus_device_ids[] = {
+	{"ATK0100", 0},
+	{"", 0},
+};
+MODULE_DEVICE_TABLE(acpi, asus_device_ids);
+
 static int asus_hotk_add(struct acpi_device *device);
 static int asus_hotk_remove(struct acpi_device *device, int type);
 static struct acpi_driver asus_hotk_driver = {
 	.name = ASUS_HOTK_NAME,
 	.class = ASUS_HOTK_CLASS,
-	.ids = ASUS_HOTK_HID,
+	.ids = asus_device_ids,
 	.ops = {
 		.add = asus_hotk_add,
 		.remove = asus_hotk_remove,
@@ -235,7 +240,7 @@ static struct workqueue_struct *led_workqueue;
 	static int object##_led_wk;					\
 	static DECLARE_WORK(object##_led_work, object##_led_update);	\
 	static struct led_classdev object##_led = {			\
-		.name           = "asus:" ledname,			\
+		.name           = "asus::" ledname,			\
 		.brightness_set = object##_led_set,			\
 	}
 
@@ -250,7 +255,7 @@ ASUS_LED(gled, "gaming");
  * method is searched within the scope of the handle, can be NULL. The output
  * of the method is written is output, which can also be NULL
  *
- * returns 1 if write is successful, 0 else.
+ * returns 0 if write is successful, -1 else.
  */
 static int write_acpi_int(acpi_handle handle, const char *method, int val,
 			  struct acpi_buffer *output)
@@ -259,18 +264,24 @@ static int write_acpi_int(acpi_handle handle, const char *method, int val,
 	union acpi_object in_obj;	//the only param we use
 	acpi_status status;
 
+	if (!handle)
+		return 0;
+
 	params.count = 1;
 	params.pointer = &in_obj;
 	in_obj.type = ACPI_TYPE_INTEGER;
 	in_obj.integer.value = val;
 
 	status = acpi_evaluate_object(handle, (char *)method, &params, output);
-	return (status == AE_OK);
+	if (status == AE_OK)
+		return 0;
+	else
+		return -1;
 }
 
 static int read_wireless_status(int mask)
 {
-	ulong status;
+	unsigned long long status;
 	acpi_status rv = AE_OK;
 
 	if (!wireless_status_handle)
@@ -287,7 +298,7 @@ static int read_wireless_status(int mask)
 
 static int read_gps_status(void)
 {
-	ulong status;
+	unsigned long long status;
 	acpi_status rv = AE_OK;
 
 	rv = acpi_evaluate_integer(gps_status_handle, NULL, NULL, &status);
@@ -317,7 +328,7 @@ static void write_status(acpi_handle handle, int out, int mask)
 
 	switch (mask) {
 	case MLED_ON:
-		out = !out & 0x1;
+		out = !(out & 0x1);
 		break;
 	case GLED_ON:
 		out = (out & 0x1) + 1;
@@ -331,7 +342,7 @@ static void write_status(acpi_handle handle, int out, int mask)
 		break;
 	}
 
-	if (handle && !write_acpi_int(handle, NULL, out, NULL))
+	if (write_acpi_int(handle, NULL, out, NULL))
 		printk(ASUS_WARNING " write failed %x\n", mask);
 }
 
@@ -340,7 +351,7 @@ static void write_status(acpi_handle handle, int out, int mask)
 	static void object##_led_set(struct led_classdev *led_cdev,	\
 				     enum led_brightness value)		\
 	{								\
-		object##_led_wk = value;				\
+		object##_led_wk = (value > 0) ? 1 : 0;			\
 		queue_work(led_workqueue, &object##_led_work);		\
 	}								\
 	static void object##_led_update(struct work_struct *ignored)	\
@@ -394,7 +405,7 @@ static void lcd_blank(int blank)
 
 static int read_brightness(struct backlight_device *bd)
 {
-	ulong value;
+	unsigned long long value;
 	acpi_status rv = AE_OK;
 
 	rv = acpi_evaluate_integer(brightness_get_handle, NULL, NULL, &value);
@@ -411,7 +422,7 @@ static int set_brightness(struct backlight_device *bd, int value)
 	value = (0 < value) ? ((15 < value) ? 15 : value) : 0;
 	/* 0 <= value <= 15 */
 
-	if (!write_acpi_int(brightness_set_handle, NULL, value, NULL)) {
+	if (write_acpi_int(brightness_set_handle, NULL, value, NULL)) {
 		printk(ASUS_WARNING "Error changing brightness\n");
 		ret = -EIO;
 	}
@@ -445,7 +456,7 @@ static ssize_t show_infos(struct device *dev,
 			  struct device_attribute *attr, char *page)
 {
 	int len = 0;
-	ulong temp;
+	unsigned long long temp;
 	char buf[16];		//enough for all info
 	acpi_status rv = AE_OK;
 
@@ -541,7 +552,7 @@ static ssize_t store_ledd(struct device *dev, struct device_attribute *attr,
 
 	rv = parse_arg(buf, count, &value);
 	if (rv > 0) {
-		if (!write_acpi_int(ledd_set_handle, NULL, value, NULL))
+		if (write_acpi_int(ledd_set_handle, NULL, value, NULL))
 			printk(ASUS_WARNING "LED display write failed\n");
 		else
 			hotk->ledd_status = (u32) value;
@@ -586,14 +597,14 @@ static ssize_t store_bluetooth(struct device *dev,
 static void set_display(int value)
 {
 	/* no sanity check needed for now */
-	if (!write_acpi_int(display_set_handle, NULL, value, NULL))
+	if (write_acpi_int(display_set_handle, NULL, value, NULL))
 		printk(ASUS_WARNING "Error setting display\n");
 	return;
 }
 
 static int read_display(void)
 {
-	ulong value = 0;
+	unsigned long long value = 0;
 	acpi_status rv = AE_OK;
 
 	/* In most of the case, we know how to set the display, but sometime
@@ -643,7 +654,7 @@ static ssize_t store_disp(struct device *dev, struct device_attribute *attr,
  */
 static void set_light_sens_switch(int value)
 {
-	if (!write_acpi_int(ls_switch_handle, NULL, value, NULL))
+	if (write_acpi_int(ls_switch_handle, NULL, value, NULL))
 		printk(ASUS_WARNING "Error setting light sensor switch\n");
 	hotk->light_switch = value;
 }
@@ -668,7 +679,7 @@ static ssize_t store_lssw(struct device *dev, struct device_attribute *attr,
 
 static void set_light_sens_level(int value)
 {
-	if (!write_acpi_int(ls_level_handle, NULL, value, NULL))
+	if (write_acpi_int(ls_level_handle, NULL, value, NULL))
 		printk(ASUS_WARNING "Error setting light sensor level\n");
 	hotk->light_level = value;
 }
@@ -727,7 +738,7 @@ static void asus_hotk_notify(acpi_handle handle, u32 event, void *data)
 		lcd_blank(FB_BLANK_POWERDOWN);
 	}
 
-	acpi_bus_generate_event(hotk->device, event,
+	acpi_bus_generate_proc_event(hotk->device, event,
 				hotk->event_count[event % 128]++);
 
 	return;
@@ -737,8 +748,7 @@ static void asus_hotk_notify(acpi_handle handle, u32 event, void *data)
 	struct device_attribute dev_attr_##_name = {			\
 		.attr = {						\
 			.name = __stringify(_name),			\
-			.mode = 0,					\
-			.owner = THIS_MODULE },				\
+			.mode = 0 },					\
 		.show   = NULL,						\
 		.store  = NULL,						\
 	}
@@ -840,7 +850,7 @@ static int asus_hotk_get_info(void)
 {
 	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
 	union acpi_object *model = NULL;
-	ulong bsts_result, hwrs_result;
+	unsigned long long bsts_result, hwrs_result;
 	char *string = NULL;
 	acpi_status status;
 
@@ -857,7 +867,7 @@ static int asus_hotk_get_info(void)
 		printk(ASUS_WARNING "Couldn't get the DSDT table header\n");
 
 	/* We have to write 0 on init this far for all ASUS models */
-	if (!write_acpi_int(hotk->handle, "INIT", 0, &buffer)) {
+	if (write_acpi_int(hotk->handle, "INIT", 0, &buffer)) {
 		printk(ASUS_ERR "Hotkey initialization failed\n");
 		return -ENODEV;
 	}
@@ -980,15 +990,14 @@ static int asus_hotk_add(struct acpi_device *device)
 	printk(ASUS_NOTICE "Asus Laptop Support version %s\n",
 	       ASUS_LAPTOP_VERSION);
 
-	hotk = kmalloc(sizeof(struct asus_hotk), GFP_KERNEL);
+	hotk = kzalloc(sizeof(struct asus_hotk), GFP_KERNEL);
 	if (!hotk)
 		return -ENOMEM;
-	memset(hotk, 0, sizeof(struct asus_hotk));
 
 	hotk->handle = device->handle;
 	strcpy(acpi_device_name(device), ASUS_HOTK_DEVICE_NAME);
 	strcpy(acpi_device_class(device), ASUS_HOTK_CLASS);
-	acpi_driver_data(device) = hotk;
+	device->driver_data = hotk;
 	hotk->device = device;
 
 	result = asus_hotk_check();
@@ -1069,19 +1078,17 @@ static void asus_backlight_exit(void)
 }
 
 #define  ASUS_LED_UNREGISTER(object)				\
-	if(object##_led.class_dev				\
-	   && !IS_ERR(object##_led.class_dev))			\
+	if (object##_led.dev)					\
 		led_classdev_unregister(&object##_led)
 
 static void asus_led_exit(void)
 {
+	destroy_workqueue(led_workqueue);
 	ASUS_LED_UNREGISTER(mled);
 	ASUS_LED_UNREGISTER(tled);
 	ASUS_LED_UNREGISTER(pled);
 	ASUS_LED_UNREGISTER(rled);
 	ASUS_LED_UNREGISTER(gled);
-
-	destroy_workqueue(led_workqueue);
 }
 
 static void __exit asus_laptop_exit(void)
@@ -1137,29 +1144,42 @@ static int asus_led_init(struct device *dev)
 
 	rv = ASUS_LED_REGISTER(mled, dev);
 	if (rv)
-		return rv;
+		goto out;
 
 	rv = ASUS_LED_REGISTER(tled, dev);
 	if (rv)
-		return rv;
+		goto out1;
 
 	rv = ASUS_LED_REGISTER(rled, dev);
 	if (rv)
-		return rv;
+		goto out2;
 
 	rv = ASUS_LED_REGISTER(pled, dev);
 	if (rv)
-		return rv;
+		goto out3;
 
 	rv = ASUS_LED_REGISTER(gled, dev);
 	if (rv)
-		return rv;
+		goto out4;
 
 	led_workqueue = create_singlethread_workqueue("led_workqueue");
 	if (!led_workqueue)
-		return -ENOMEM;
+		goto out5;
 
 	return 0;
+out5:
+	rv = -ENOMEM;
+	ASUS_LED_UNREGISTER(gled);
+out4:
+	ASUS_LED_UNREGISTER(pled);
+out3:
+	ASUS_LED_UNREGISTER(rled);
+out2:
+	ASUS_LED_UNREGISTER(tled);
+out1:
+	ASUS_LED_UNREGISTER(mled);
+out:
+	return rv;
 }
 
 static int __init asus_laptop_init(void)
@@ -1188,9 +1208,13 @@ static int __init asus_laptop_init(void)
 
 	dev = acpi_get_physical_device(hotk->device->handle);
 
-	result = asus_backlight_init(dev);
-	if (result)
-		goto fail_backlight;
+	if (!acpi_video_backlight_support()) {
+		result = asus_backlight_init(dev);
+		if (result)
+			goto fail_backlight;
+	} else
+		printk(ASUS_INFO "Brightness ignored, must be controlled by "
+		       "ACPI video driver\n");
 
 	result = asus_led_init(dev);
 	if (result)

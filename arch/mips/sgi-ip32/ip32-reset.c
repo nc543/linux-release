@@ -142,7 +142,7 @@ static irqreturn_t ip32_rtc_int(int irq, void *dev_id)
 	reg_c = CMOS_READ(RTC_INTR_FLAGS);
 	if (!(reg_c & RTC_IRQF)) {
 		printk(KERN_WARNING
-			"%s: RTC IRQ without RTC_IRQF\n", __FUNCTION__);
+			"%s: RTC IRQ without RTC_IRQF\n", __func__);
 	}
 	/* Wait until interrupt goes away */
 	disable_irq(MACEISA_RTC_IRQ);
@@ -195,7 +195,8 @@ static __init int ip32_reboot_setup(void)
 	blink_timer.function = blink_timeout;
 	atomic_notifier_chain_register(&panic_notifier_list, &panic_block);
 
-	request_irq(MACEISA_RTC_IRQ, ip32_rtc_int, 0, "rtc", NULL);
+	if (request_irq(MACEISA_RTC_IRQ, ip32_rtc_int, 0, "rtc", NULL))
+		panic("Can't allocate MACEISA RTC IRQ");
 
 	return 0;
 }

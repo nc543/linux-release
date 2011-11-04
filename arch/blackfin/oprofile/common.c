@@ -33,12 +33,12 @@
 #include <linux/smp.h>
 #include <linux/errno.h>
 #include <linux/mutex.h>
+#include <linux/ptrace.h>
+#include <linux/irq.h>
+#include <linux/io.h>
 
-#include <asm/ptrace.h>
 #include <asm/system.h>
 #include <asm/blackfin.h>
-#include <asm/irq.h>
-#include <asm/io.h>
 
 #include "op_blackfin.h"
 
@@ -75,7 +75,7 @@ static int op_bfin_start(void)
 {
 	int ret = -EBUSY;
 
-	printk(KERN_INFO "KSDBG:in %s\n", __FUNCTION__);
+	printk(KERN_INFO "KSDBG:in %s\n", __func__);
 	mutex_lock(&pfmon_lock);
 	if (!pfmon_enabled) {
 		ret = model->start(ctr);

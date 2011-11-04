@@ -12,7 +12,7 @@
 #include <linux/linkage.h>
 #include <asm/assembler.h>
 #include <asm/asm-offsets.h>
-#include <asm/elf.h>
+#include <asm/hwcap.h>
 #include <asm/pgtable-hwdef.h>
 #include <asm/pgtable.h>
 
@@ -25,9 +25,11 @@
 
 ENTRY(cpu_v7_proc_init)
 	mov	pc, lr
+ENDPROC(cpu_v7_proc_init)
 
 ENTRY(cpu_v7_proc_fin)
 	mov	pc, lr
+ENDPROC(cpu_v7_proc_fin)
 
 /*
  *	cpu_v7_reset(loc)
@@ -43,6 +45,7 @@ ENTRY(cpu_v7_proc_fin)
 	.align	5
 ENTRY(cpu_v7_reset)
 	mov	pc, r0
+ENDPROC(cpu_v7_reset)
 
 /*
  *	cpu_v7_do_idle()
@@ -52,8 +55,9 @@ ENTRY(cpu_v7_reset)
  *	IRQs are already disabled.
  */
 ENTRY(cpu_v7_do_idle)
-	.long	0xe320f003			@ ARM V7 WFI instruction
+	wfi
 	mov	pc, lr
+ENDPROC(cpu_v7_do_idle)
 
 ENTRY(cpu_v7_dcache_clean_area)
 #ifndef TLB_CAN_READ_FROM_L1_CACHE
@@ -65,6 +69,7 @@ ENTRY(cpu_v7_dcache_clean_area)
 	dsb
 #endif
 	mov	pc, lr
+ENDPROC(cpu_v7_dcache_clean_area)
 
 /*
  *	cpu_v7_switch_mm(pgd_phys, tsk)
@@ -77,6 +82,7 @@ ENTRY(cpu_v7_dcache_clean_area)
  *	- we are not using split page tables
  */
 ENTRY(cpu_v7_switch_mm)
+#ifdef CONFIG_MMU
 	mov	r2, #0
 	ldr	r1, [r1, #MM_CONTEXT_ID]	@ get mm->context.id
 	orr	r0, r0, #TTB_RGN_OC_WB		@ mark PTWs outer cacheable, WB
@@ -86,7 +92,9 @@ ENTRY(cpu_v7_switch_mm)
 	isb
 	mcr	p15, 0, r1, c13, c0, 1		@ set context ID
 	isb
+#endif
 	mov	pc, lr
+ENDPROC(cpu_v7_switch_mm)
 
 /*
  *	cpu_v7_set_pte_ext(ptep, pte)
@@ -97,24 +105,18 @@ ENTRY(cpu_v7_switch_mm)
  *		  (hardware version is stored at -1024 bytes)
  *	- pte   - PTE value to store
  *	- ext	- value for extended PTE bits
- *
- *	Permissions:
- *	  YUWD  APX AP1 AP0	SVC	User
- *	  0xxx   0   0   0	no acc	no acc
- *	  100x   1   0   1	r/o	no acc
- *	  10x0   1   0   1	r/o	no acc
- *	  1011   0   0   1	r/w	no acc
- *	  110x   0   1   0	r/w	r/o
- *	  11x0   0   1   0	r/w	r/o
- *	  1111   0   1   1	r/w	r/w
  */
 ENTRY(cpu_v7_set_pte_ext)
+#ifdef CONFIG_MMU
 	str	r1, [r0], #-2048		@ linux version
 
 	bic	r3, r1, #0x000003f0
-	bic	r3, r3, #0x00000003
+	bic	r3, r3, #PTE_TYPE_MASK
 	orr	r3, r3, r2
 	orr	r3, r3, #PTE_EXT_AP0 | 2
+
+	tst	r1, #1 << 4
+	orrne	r3, r3, #PTE_EXT_TEX(1)
 
 	tst	r1, #L_PTE_WRITE
 	tstne	r1, #L_PTE_DIRTY
@@ -125,18 +127,18 @@ ENTRY(cpu_v7_set_pte_ext)
 	tstne	r3, #PTE_EXT_APX
 	bicne	r3, r3, #PTE_EXT_APX | PTE_EXT_AP0
 
-	tst	r1, #L_PTE_YOUNG
-	biceq	r3, r3, #PTE_EXT_APX | PTE_EXT_AP_MASK
-
 	tst	r1, #L_PTE_EXEC
 	orreq	r3, r3, #PTE_EXT_XN
 
-	tst	r1, #L_PTE_PRESENT
+	tst	r1, #L_PTE_YOUNG
+	tstne	r1, #L_PTE_PRESENT
 	moveq	r3, #0
 
 	str	r3, [r0]
 	mcr	p15, 0, r0, c7, c10, 1		@ flush_pte
+#endif
 	mov	pc, lr
+ENDPROC(cpu_v7_set_pte_ext)
 
 cpu_v7_name:
 	.ascii	"ARMv7 Processor"
@@ -169,6 +171,7 @@ __v7_setup:
 	mcr	p15, 0, r10, c7, c5, 0		@ I+BTB cache invalidate
 #endif
 	dsb
+#ifdef CONFIG_MMU
 	mcr	p15, 0, r10, c8, c7, 0		@ invalidate I + D TLBs
 	mcr	p15, 0, r10, c2, c0, 2		@ TTB control register
 	orr	r4, r4, #TTB_RGN_OC_WB		@ mark PTWs outer cacheable, WB
@@ -176,35 +179,28 @@ __v7_setup:
 	mcr	p15, 0, r4, c2, c0, 1		@ load TTB1
 	mov	r10, #0x1f			@ domains 0, 1 = manager
 	mcr	p15, 0, r10, c3, c0, 0		@ load domain access register
-#ifndef CONFIG_CPU_L2CACHE_DISABLE
-	@ L2 cache configuration in the L2 aux control register
-	mrc	p15, 1, r10, c9, c0, 2
-	bic	r10, r10, #(1 << 16)		@ L2 outer cache
-	mcr	p15, 1, r10, c9, c0, 2
-	@ L2 cache is enabled in the aux control register
-	mrc	p15, 0, r10, c1, c0, 1
-	orr	r10, r10, #2
-	mcr	p15, 0, r10, c1, c0, 1
 #endif
-	mrc	p15, 0, r0, c1, c0, 0		@ read control register
-	ldr	r10, cr1_clear			@ get mask for bits to clear
-	bic	r0, r0, r10			@ clear bits them
-	ldr	r10, cr1_set			@ get mask for bits to set
-	orr	r0, r0, r10			@ set them
+	ldr	r5, =0xff0aa1a8
+	ldr	r6, =0x40e040e0
+	mcr	p15, 0, r5, c10, c2, 0		@ write PRRR
+	mcr	p15, 0, r6, c10, c2, 1		@ write NMRR
+	adr	r5, v7_crval
+	ldmia	r5, {r5, r6}
+   	mrc	p15, 0, r0, c1, c0, 0		@ read control register
+	bic	r0, r0, r5			@ clear bits them
+	orr	r0, r0, r6			@ set them
 	mov	pc, lr				@ return to head.S:__ret
+ENDPROC(__v7_setup)
 
-	/*
-	 *         V X F   I D LR
-	 * .... ...E PUI. .T.T 4RVI ZFRS BLDP WCAM
-	 * rrrr rrrx xxx0 0101 xxxx xxxx x111 xxxx < forced
-	 *         0 110       0011 1.00 .111 1101 < we want
+	/*   AT
+	 *  TFR   EV X F   I D LR
+	 * .EEE ..EE PUI. .T.T 4RVI ZFRS BLDP WCAM
+	 * rxxx rrxx xxx0 0101 xxxx xxxx x111 xxxx < forced
+	 *    1    0 110       0011 1.00 .111 1101 < we want
 	 */
-	.type	cr1_clear, #object
-	.type	cr1_set, #object
-cr1_clear:
-	.word	0x0120c302
-cr1_set:
-	.word	0x00c0387d
+	.type	v7_crval, #object
+v7_crval:
+	crval	clear=0x0120c302, mmuset=0x10c0387d, ucset=0x00c0187c
 
 __v7_setup_stack:
 	.space	4 * 11				@ 11 registers
@@ -212,6 +208,7 @@ __v7_setup_stack:
 	.type	v7_processor_functions, #object
 ENTRY(v7_processor_functions)
 	.word	v7_early_abort
+	.word	pabort_ifar
 	.word	cpu_v7_proc_init
 	.word	cpu_v7_proc_fin
 	.word	cpu_v7_reset

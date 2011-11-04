@@ -2,7 +2,7 @@
  *      	An implementation of a loadable kernel mode driver providing
  *		multiple kernel/user space bidirectional communications links.
  *
- * 		Author: 	Alan Cox <alan@redhat.com>
+ * 		Author: 	Alan Cox <alan@lxorguk.ukuu.org.uk>
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -45,11 +45,8 @@
 #include <linux/coda_linux.h>
 #include <linux/coda_fs_i.h>
 #include <linux/coda_psdev.h>
-#include <linux/coda_proc.h>
 
 #include "coda_int.h"
-
-#define upc_free(r) kfree(r)
 
 /* statistics */
 int           coda_hard;         /* allows signals during upcalls */
@@ -195,7 +192,8 @@ static ssize_t coda_psdev_write(struct file *file, const char __user *buf,
 	if (req->uc_opcode == CODA_OPEN_BY_FD) {
 		struct coda_open_by_fd_out *outp =
 			(struct coda_open_by_fd_out *)req->uc_data;
-		outp->fh = fget(outp->fd);
+		if (!outp->oh.result)
+			outp->fh = fget(outp->fd);
 	}
 
         wake_up(&req->uc_sleep);
@@ -263,7 +261,7 @@ static ssize_t coda_psdev_read(struct file * file, char __user * buf,
 	}
 
 	CODA_FREE(req->uc_data, sizeof(struct coda_in_hdr));
-	upc_free(req);
+	kfree(req);
 out:
 	unlock_kernel();
 	return (count ? count : retval);
@@ -271,71 +269,70 @@ out:
 
 static int coda_psdev_open(struct inode * inode, struct file * file)
 {
-        struct venus_comm *vcp;
-	int idx;
+	struct venus_comm *vcp;
+	int idx, err;
+
+	idx = iminor(inode);
+	if (idx < 0 || idx >= MAX_CODADEVS)
+		return -ENODEV;
 
 	lock_kernel();
-	idx = iminor(inode);
-	if(idx >= MAX_CODADEVS) {
-		unlock_kernel();
-		return -ENODEV;
-	}
 
+	err = -EBUSY;
 	vcp = &coda_comms[idx];
-	if(vcp->vc_inuse) {
-		unlock_kernel();
-		return -EBUSY;
-	}
-	
-	if (!vcp->vc_inuse++) {
+	if (!vcp->vc_inuse) {
+		vcp->vc_inuse++;
+
 		INIT_LIST_HEAD(&vcp->vc_pending);
 		INIT_LIST_HEAD(&vcp->vc_processing);
 		init_waitqueue_head(&vcp->vc_waitq);
 		vcp->vc_sb = NULL;
 		vcp->vc_seq = 0;
+
+		file->private_data = vcp;
+		err = 0;
 	}
-	
-	file->private_data = vcp;
 
 	unlock_kernel();
-        return 0;
+	return err;
 }
 
 
 static int coda_psdev_release(struct inode * inode, struct file * file)
 {
-        struct venus_comm *vcp = (struct venus_comm *) file->private_data;
-        struct upc_req *req, *tmp;
+	struct venus_comm *vcp = (struct venus_comm *) file->private_data;
+	struct upc_req *req, *tmp;
 
-	lock_kernel();
-	if ( !vcp->vc_inuse ) {
-		unlock_kernel();
+	if (!vcp || !vcp->vc_inuse ) {
 		printk("psdev_release: Not open.\n");
 		return -1;
 	}
 
-	if (--vcp->vc_inuse) {
-		unlock_kernel();
-		return 0;
-	}
-        
-        /* Wakeup clients so they can return. */
+	lock_kernel();
+
+	/* Wakeup clients so they can return. */
 	list_for_each_entry_safe(req, tmp, &vcp->vc_pending, uc_chain) {
+		list_del(&req->uc_chain);
+
 		/* Async requests need to be freed here */
 		if (req->uc_flags & REQ_ASYNC) {
 			CODA_FREE(req->uc_data, sizeof(struct coda_in_hdr));
-			upc_free(req);
+			kfree(req);
 			continue;
 		}
 		req->uc_flags |= REQ_ABORT;
 		wake_up(&req->uc_sleep);
-        }
-        
-	list_for_each_entry(req, &vcp->vc_processing, uc_chain) {
-		req->uc_flags |= REQ_ABORT;
-	        wake_up(&req->uc_sleep);
-        }
+	}
 
+	list_for_each_entry_safe(req, tmp, &vcp->vc_processing, uc_chain) {
+		list_del(&req->uc_chain);
+
+		req->uc_flags |= REQ_ABORT;
+		wake_up(&req->uc_sleep);
+	}
+
+	file->private_data = NULL;
+	vcp->vc_inuse--;
 	unlock_kernel();
 	return 0;
 }
@@ -365,8 +362,8 @@ static int init_coda_psdev(void)
 		goto out_chrdev;
 	}		
 	for (i = 0; i < MAX_CODADEVS; i++)
-		class_device_create(coda_psdev_class, NULL,
-				MKDEV(CODA_PSDEV_MAJOR,i), NULL, "cfs%d", i);
+		device_create(coda_psdev_class, NULL,
+			      MKDEV(CODA_PSDEV_MAJOR, i), NULL, "cfs%d", i);
 	coda_sysctl_init();
 	goto out;
 
@@ -376,21 +373,16 @@ out:
 	return err;
 }
 
-
-MODULE_AUTHOR("Peter J. Braam <braam@cs.cmu.edu>");
+MODULE_AUTHOR("Jan Harkes, Peter J. Braam");
+MODULE_DESCRIPTION("Coda Distributed File System VFS interface");
+MODULE_ALIAS_CHARDEV_MAJOR(CODA_PSDEV_MAJOR);
 MODULE_LICENSE("GPL");
+MODULE_VERSION("6.6");
 
 static int __init init_coda(void)
 {
 	int status;
 	int i;
-	printk(KERN_INFO "Coda Kernel/Venus communications, "
-#ifdef CONFIG_CODA_FS_OLD_API
-	       "v5.3.20"
-#else
-	       "v6.0.0"
-#endif
-	       ", coda@cs.cmu.edu\n");
 
 	status = coda_init_inodecache();
 	if (status)
@@ -409,7 +401,7 @@ static int __init init_coda(void)
 	return 0;
 out:
 	for (i = 0; i < MAX_CODADEVS; i++)
-		class_device_destroy(coda_psdev_class, MKDEV(CODA_PSDEV_MAJOR, i));
+		device_destroy(coda_psdev_class, MKDEV(CODA_PSDEV_MAJOR, i));
 	class_destroy(coda_psdev_class);
 	unregister_chrdev(CODA_PSDEV_MAJOR, "coda");
 	coda_sysctl_clean();
@@ -428,7 +420,7 @@ static void __exit exit_coda(void)
                 printk("coda: failed to unregister filesystem\n");
         }
 	for (i = 0; i < MAX_CODADEVS; i++)
-		class_device_destroy(coda_psdev_class, MKDEV(CODA_PSDEV_MAJOR, i));
+		device_destroy(coda_psdev_class, MKDEV(CODA_PSDEV_MAJOR, i));
 	class_destroy(coda_psdev_class);
 	unregister_chrdev(CODA_PSDEV_MAJOR, "coda");
 	coda_sysctl_clean();

@@ -36,8 +36,6 @@
 ACPI_MODULE_NAME("numa");
 
 static nodemask_t nodes_found_map = NODE_MASK_NONE;
-#define PXM_INVAL	-1
-#define NID_INVAL	-1
 
 /* maps to convert between proximity domain and logical node ID */
 static int pxm_to_node_map[MAX_PXM_DOMAINS]
@@ -59,6 +57,12 @@ int node_to_pxm(int node)
 	return node_to_pxm_map[node];
 }
 
+void __acpi_map_pxm_to_node(int pxm, int node)
+{
+	pxm_to_node_map[pxm] = node;
+	node_to_pxm_map[node] = pxm;
+}
+
 int acpi_map_pxm_to_node(int pxm)
 {
 	int node = pxm_to_node_map[pxm];
@@ -67,14 +71,14 @@ int acpi_map_pxm_to_node(int pxm)
 		if (nodes_weight(nodes_found_map) >= MAX_NUMNODES)
 			return NID_INVAL;
 		node = first_unset_node(nodes_found_map);
-		pxm_to_node_map[pxm] = node;
-		node_to_pxm_map[node] = pxm;
+		__acpi_map_pxm_to_node(pxm, node);
 		node_set(node, nodes_found_map);
 	}
 
 	return node;
 }
 
+#if 0
 void __cpuinit acpi_unmap_pxm_to_node(int node)
 {
 	int pxm = node_to_pxm_map[node];
@@ -82,8 +86,10 @@ void __cpuinit acpi_unmap_pxm_to_node(int node)
 	node_to_pxm_map[node] = PXM_INVAL;
 	node_clear(node, nodes_found_map);
 }
+#endif  /*  0  */
 
-void __init acpi_table_print_srat_entry(struct acpi_subtable_header * header)
+static void __init
+acpi_table_print_srat_entry(struct acpi_subtable_header *header)
 {
 
 	ACPI_FUNCTION_NAME("acpi_table_print_srat_entry");
@@ -114,10 +120,10 @@ void __init acpi_table_print_srat_entry(struct acpi_subtable_header * header)
 			struct acpi_srat_mem_affinity *p =
 			    (struct acpi_srat_mem_affinity *)header;
 			ACPI_DEBUG_PRINT((ACPI_DB_INFO,
-					  "SRAT Memory (0x%lx length 0x%lx type 0x%x) in proximity domain %d %s%s\n",
+					  "SRAT Memory (0x%lx length 0x%lx) in proximity domain %d %s%s\n",
 					  (unsigned long)p->base_address,
 					  (unsigned long)p->length,
-					  p->memory_type, p->proximity_domain,
+					  p->proximity_domain,
 					  (p->flags & ACPI_SRAT_MEM_ENABLED)?
 					  "enabled" : "disabled",
 					  (p->flags & ACPI_SRAT_MEM_HOT_PLUGGABLE)?
@@ -134,19 +140,42 @@ void __init acpi_table_print_srat_entry(struct acpi_subtable_header * header)
 	}
 }
 
+/*
+ * A lot of BIOS fill in 10 (= no distance) everywhere. This messes
+ * up the NUMA heuristics which wants the local node to have a smaller
+ * distance than the others.
+ * Do some quick checks here and only use the SLIT if it passes.
+ */
+static __init int slit_valid(struct acpi_table_slit *slit)
+{
+	int i, j;
+	int d = slit->locality_count;
+	for (i = 0; i < d; i++) {
+		for (j = 0; j < d; j++)  {
+			u8 val = slit->entry[d*i + j];
+			if (i == j) {
+				if (val != LOCAL_DISTANCE)
+					return 0;
+			} else if (val <= LOCAL_DISTANCE)
+				return 0;
+		}
+	}
+	return 1;
+}
+
 static int __init acpi_parse_slit(struct acpi_table_header *table)
 {
 	struct acpi_table_slit *slit;
-	u32 localities;
 
 	if (!table)
 		return -EINVAL;
 
 	slit = (struct acpi_table_slit *)table;
 
-	/* downcast just for %llu vs %lu for i386/ia64  */
-	localities = (u32) slit->locality_count;
-
+	if (!slit_valid(slit)) {
+		printk(KERN_INFO "ACPI: SLIT table looks invalid. Not used.\n");
+		return -EINVAL;
+	}
 	acpi_numa_slit_init(slit);
 
 	return 0;
@@ -200,7 +229,7 @@ static int __init acpi_parse_srat(struct acpi_table_header *table)
 	return 0;
 }
 
-int __init
+static int __init
 acpi_table_parse_srat(enum acpi_srat_type id,
 		      acpi_table_entry_handler handler, unsigned int max_entries)
 {
@@ -211,14 +240,13 @@ acpi_table_parse_srat(enum acpi_srat_type id,
 
 int __init acpi_numa_init(void)
 {
-	int result;
-
 	/* SRAT: Static Resource Affinity Table */
 	if (!acpi_table_parse(ACPI_SIG_SRAT, acpi_parse_srat)) {
-		result = acpi_table_parse_srat(ACPI_SRAT_TYPE_CPU_AFFINITY,
-					       acpi_parse_processor_affinity,
-					       NR_CPUS);
-		result = acpi_table_parse_srat(ACPI_SRAT_TYPE_MEMORY_AFFINITY, acpi_parse_memory_affinity, NR_NODE_MEMBLKS);	// IA64 specific
+		acpi_table_parse_srat(ACPI_SRAT_TYPE_CPU_AFFINITY,
+				      acpi_parse_processor_affinity, NR_CPUS);
+		acpi_table_parse_srat(ACPI_SRAT_TYPE_MEMORY_AFFINITY,
+				      acpi_parse_memory_affinity,
+				      NR_NODE_MEMBLKS);
 	}
 
 	/* SLIT: System Locality Information Table */
@@ -230,7 +258,7 @@ int __init acpi_numa_init(void)
 
 int acpi_get_pxm(acpi_handle h)
 {
-	unsigned long pxm;
+	unsigned long long pxm;
 	acpi_status status;
 	acpi_handle handle;
 	acpi_handle phandle = h;
@@ -244,7 +272,6 @@ int acpi_get_pxm(acpi_handle h)
 	} while (ACPI_SUCCESS(status));
 	return -1;
 }
-EXPORT_SYMBOL(acpi_get_pxm);
 
 int acpi_get_node(acpi_handle *handle)
 {

@@ -297,12 +297,6 @@ struct dvb_usb_adapter {
 	int feedcount;
 	int pid_filtering;
 
-	/* tuner programming information */
-	u8 pll_addr;
-	u8 pll_init[4];
-	struct dvb_pll_desc *pll_desc;
-	int (*tuner_pass_ctrl) (struct dvb_frontend *, int, u8);
-
 	/* dvb */
 	struct dvb_adapter   dvb_adap;
 	struct dmxdev        dmxdev;
@@ -378,7 +372,10 @@ struct dvb_usb_device {
 	void *priv;
 };
 
-extern int dvb_usb_device_init(struct usb_interface *, struct dvb_usb_device_properties *, struct module *, struct dvb_usb_device **);
+extern int dvb_usb_device_init(struct usb_interface *,
+			       struct dvb_usb_device_properties *,
+			       struct module *, struct dvb_usb_device **,
+			       short *adapter_nums);
 extern void dvb_usb_device_exit(struct usb_interface *);
 
 /* the generic read/write method for device control */
@@ -387,11 +384,6 @@ extern int dvb_usb_generic_write(struct dvb_usb_device *, u8 *, u16);
 
 /* commonly used remote control parsing */
 extern int dvb_usb_nec_rc_key_to_event(struct dvb_usb_device *, u8[], u32 *, int *);
-
-/* commonly used pll init and set functions */
-extern int dvb_usb_tuner_init_i2c(struct dvb_frontend *);
-extern int dvb_usb_tuner_calc_regs(struct dvb_frontend *, struct dvb_frontend_parameters *, u8 *buf, int buf_len);
-extern int dvb_usb_tuner_set_params_i2c(struct dvb_frontend *, struct dvb_frontend_parameters *);
 
 /* commonly used firmware download types and function */
 struct hexline {

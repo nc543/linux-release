@@ -44,9 +44,6 @@
 extern int m68k_realnum_memory;
 extern struct mem_info m68k_memory[NUM_MEMINFO];
 
-#define TRUE                  (1)
-#define FALSE                 (0)
-
 #define Z2MINOR_COMBINED      (0)
 #define Z2MINOR_Z2ONLY        (1)
 #define Z2MINOR_CHIPONLY      (2)
@@ -70,7 +67,7 @@ static DEFINE_SPINLOCK(z2ram_lock);
 static struct block_device_operations z2_fops;
 static struct gendisk *z2ram_gendisk;
 
-static void do_z2_request(request_queue_t *q)
+static void do_z2_request(struct request_queue *q)
 {
 	struct request *req;
 	while ((req = elv_next_request(q)) != NULL) {
@@ -140,8 +137,7 @@ get_chipram( void )
     return;
 }
 
-static int
-z2_open( struct inode *inode, struct file *filp )
+static int z2_open(struct block_device *bdev, fmode_t mode)
 {
     int device;
     int max_z2_map = ( Z2RAM_SIZE / Z2RAM_CHUNKSIZE ) *
@@ -150,7 +146,7 @@ z2_open( struct inode *inode, struct file *filp )
 	sizeof( z2ram_map[0] );
     int rc = -ENOMEM;
 
-    device = iminor(inode);
+    device = MINOR(bdev->bd_dev);
 
     if ( current_device != -1 && current_device != device )
     {
@@ -302,7 +298,7 @@ err_out:
 }
 
 static int
-z2_release( struct inode *inode, struct file *filp )
+z2_release(struct gendisk *disk, fmode_t mode)
 {
     if ( current_device == -1 )
 	return 0;     
@@ -335,7 +331,7 @@ z2_init(void)
     int ret;
 
     if (!MACH_IS_AMIGA)
-	return -ENXIO;
+	return -ENODEV;
 
     ret = -EBUSY;
     if (register_blkdev(Z2RAM_MAJOR, DEVICE_NAME))
@@ -374,9 +370,7 @@ static void __exit z2_exit(void)
 {
     int i, j;
     blk_unregister_region(MKDEV(Z2RAM_MAJOR, 0), 256);
-    if ( unregister_blkdev( Z2RAM_MAJOR, DEVICE_NAME ) != 0 )
-	printk( KERN_ERR DEVICE_NAME ": unregister of device failed\n");
-
+    unregister_blkdev(Z2RAM_MAJOR, DEVICE_NAME);
     del_gendisk(z2ram_gendisk);
     put_disk(z2ram_gendisk);
     blk_cleanup_queue(z2_queue);

@@ -18,15 +18,15 @@
 #include <linux/personality.h>
 #include <linux/kallsyms.h>
 #include <linux/delay.h>
+#include <linux/hardirq.h>
 #include <linux/init.h>
+#include <linux/uaccess.h>
 
 #include <asm/atomic.h>
 #include <asm/cacheflush.h>
 #include <asm/system.h>
-#include <asm/uaccess.h>
 #include <asm/unistd.h>
 #include <asm/traps.h>
-#include <asm/io.h>
 
 #include "ptrace.h"
 #include "signal.h"
@@ -45,15 +45,6 @@ __setup("user_debug=", user_debug_setup);
 #endif
 
 static void dump_mem(const char *str, unsigned long bottom, unsigned long top);
-
-static inline int in_exception_text(unsigned long ptr)
-{
-	extern char __exception_text_start[];
-	extern char __exception_text_end[];
-
-	return ptr >= (unsigned long)&__exception_text_start &&
-	       ptr < (unsigned long)&__exception_text_end;
-}
 
 void dump_backtrace_entry(unsigned long where, unsigned long from, unsigned long frame)
 {
@@ -77,7 +68,8 @@ void dump_backtrace_entry(unsigned long where, unsigned long from, unsigned long
  */
 static int verify_stack(unsigned long sp)
 {
-	if (sp < PAGE_OFFSET || (sp > (unsigned long)high_memory && high_memory != 0))
+	if (sp < PAGE_OFFSET ||
+	    (sp > (unsigned long)high_memory && high_memory != NULL))
 		return -EFAULT;
 
 	return 0;
@@ -223,7 +215,7 @@ static void __die(const char *str, int err, struct thread_info *thread, struct p
 	print_modules();
 	__show_regs(regs);
 	printk("Process %s (pid: %d, stack limit = 0x%p)\n",
-		tsk->comm, tsk->pid, thread + 1);
+		tsk->comm, task_pid_nr(tsk), thread + 1);
 
 	if (!user_mode(regs) || in_interrupt()) {
 		dump_mem("Stack: ", regs->ARM_sp,
@@ -249,6 +241,7 @@ NORET_TYPE void die(const char *str, struct pt_regs *regs, int err)
 	bust_spinlocks(1);
 	__die(str, err, thread, regs);
 	bust_spinlocks(0);
+	add_taint(TAINT_DIE);
 	spin_unlock_irq(&die_lock);
 
 	if (in_interrupt())
@@ -295,14 +288,28 @@ void unregister_undef_hook(struct undef_hook *hook)
 	spin_unlock_irqrestore(&undef_lock, flags);
 }
 
+static int call_undef_hook(struct pt_regs *regs, unsigned int instr)
+{
+	struct undef_hook *hook;
+	unsigned long flags;
+	int (*fn)(struct pt_regs *regs, unsigned int instr) = NULL;
+
+	spin_lock_irqsave(&undef_lock, flags);
+	list_for_each_entry(hook, &undef_hook, node)
+		if ((instr & hook->instr_mask) == hook->instr_val &&
+		    (regs->ARM_cpsr & hook->cpsr_mask) == hook->cpsr_val)
+			fn = hook->fn;
+	spin_unlock_irqrestore(&undef_lock, flags);
+
+	return fn ? fn(regs, instr) : 1;
+}
+
 asmlinkage void __exception do_undefinstr(struct pt_regs *regs)
 {
 	unsigned int correction = thumb_mode(regs) ? 2 : 4;
 	unsigned int instr;
-	struct undef_hook *hook;
 	siginfo_t info;
 	void __user *pc;
-	unsigned long flags;
 
 	/*
 	 * According to the ARM ARM, PC is 2 or 4 bytes ahead,
@@ -321,22 +328,13 @@ asmlinkage void __exception do_undefinstr(struct pt_regs *regs)
 		get_user(instr, (u32 __user *)pc);
 	}
 
-	spin_lock_irqsave(&undef_lock, flags);
-	list_for_each_entry(hook, &undef_hook, node) {
-		if ((instr & hook->instr_mask) == hook->instr_val &&
-		    (regs->ARM_cpsr & hook->cpsr_mask) == hook->cpsr_val) {
-			if (hook->fn(regs, instr) == 0) {
-				spin_unlock_irq(&undef_lock);
-				return;
-			}
-		}
-	}
-	spin_unlock_irqrestore(&undef_lock, flags);
+	if (call_undef_hook(regs, instr) == 0)
+		return;
 
 #ifdef CONFIG_DEBUG_USER
 	if (user_debug & UDBG_UNDEFINED) {
 		printk(KERN_INFO "%s (%d): undefined instruction: pc=%p\n",
-			current->comm, current->pid, pc);
+			current->comm, task_pid_nr(current), pc);
 		dump_instr(regs);
 	}
 #endif
@@ -351,10 +349,8 @@ asmlinkage void __exception do_undefinstr(struct pt_regs *regs)
 
 asmlinkage void do_unexp_fiq (struct pt_regs *regs)
 {
-#ifndef CONFIG_IGNORE_FIQ
 	printk("Hmm.  Unexpected FIQ received, but trying to continue\n");
 	printk("You may have a hardware problem...\n");
-#endif
 }
 
 /*
@@ -389,7 +385,7 @@ static int bad_syscall(int n, struct pt_regs *regs)
 #ifdef CONFIG_DEBUG_USER
 	if (user_debug & UDBG_SYSCALL) {
 		printk(KERN_ERR "[%d] %s: obsolete system call %08x.\n",
-			current->pid, current->comm, n);
+			task_pid_nr(current), current->comm, n);
 		dump_instr(regs);
 	}
 #endif
@@ -510,7 +506,7 @@ asmlinkage int arm_syscall(int no, struct pt_regs *regs)
 	 * existence.  Don't ever use this from user code.
 	 */
 	case 0xfff0:
-	{
+	for (;;) {
 		extern void do_DataAbort(unsigned long addr, unsigned int fsr,
 					 struct pt_regs *regs);
 		unsigned long val;
@@ -546,7 +542,6 @@ asmlinkage int arm_syscall(int no, struct pt_regs *regs)
 		up_read(&mm->mmap_sem);
 		/* simulate a write access fault */
 		do_DataAbort(addr, 15 + (1 << 11), regs);
-		return -1;
 	}
 #endif
 
@@ -566,7 +561,7 @@ asmlinkage int arm_syscall(int no, struct pt_regs *regs)
 	 */
 	if (user_debug & UDBG_SYSCALL) {
 		printk("[%d] %s: arm syscall %d\n",
-		       current->pid, current->comm, no);
+		       task_pid_nr(current), current->comm, no);
 		dump_instr(regs);
 		if (user_mode(regs)) {
 			__show_regs(regs);
@@ -643,7 +638,7 @@ baddataabort(int code, unsigned long instr, struct pt_regs *regs)
 #ifdef CONFIG_DEBUG_USER
 	if (user_debug & UDBG_BADABORT) {
 		printk(KERN_ERR "[%d] %s: bad data abort: code %d instr 0x%08lx\n",
-			current->pid, current->comm, code, instr);
+			task_pid_nr(current), current->comm, code, instr);
 		dump_instr(regs);
 		show_pte(current->mm, addr);
 	}
@@ -706,6 +701,11 @@ void abort(void)
 EXPORT_SYMBOL(abort);
 
 void __init trap_init(void)
+{
+	return;
+}
+
+void __init early_trap_init(void)
 {
 	unsigned long vectors = CONFIG_VECTORS_BASE;
 	extern char __stubs_start[], __stubs_end[];

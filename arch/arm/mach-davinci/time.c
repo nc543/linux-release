@@ -15,15 +15,15 @@
 #include <linux/clocksource.h>
 #include <linux/clockchips.h>
 #include <linux/spinlock.h>
+#include <linux/io.h>
 
-#include <asm/io.h>
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/system.h>
 #include <asm/irq.h>
 #include <asm/mach/irq.h>
 #include <asm/mach/time.h>
 #include <asm/errno.h>
-#include <asm/arch/io.h>
+#include <mach/io.h>
 
 static struct clock_event_device clockevent_davinci;
 
@@ -284,6 +284,8 @@ static void davinci_set_mode(enum clock_event_mode mode,
 	case CLOCK_EVT_MODE_UNUSED:
 	case CLOCK_EVT_MODE_SHUTDOWN:
 		t->opts = TIMER_OPTS_DISABLED;
+		break;
+	case CLOCK_EVT_MODE_RESUME:
 		break;
 	}
 }

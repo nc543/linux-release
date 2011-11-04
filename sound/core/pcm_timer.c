@@ -1,6 +1,6 @@
 /*
  *  Digital Audio (PCM) abstract layer
- *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *
  *
  *   This program is free software; you can redistribute it and/or modify
@@ -19,7 +19,6 @@
  *
  */
 
-#include <sound/driver.h>
 #include <linux/time.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -52,12 +51,14 @@ void snd_pcm_timer_resolution_change(struct snd_pcm_substream *substream)
 	
         mult = 1000000000;
 	rate = runtime->rate;
-	snd_assert(rate != 0, return);
+	if (snd_BUG_ON(!rate))
+		return;
 	l = gcd(mult, rate);
 	mult /= l;
 	rate /= l;
 	fsize = runtime->period_size;
-	snd_assert(fsize != 0, return);
+	if (snd_BUG_ON(!fsize))
+		return;
 	l = gcd(rate, fsize);
 	rate /= l;
 	fsize /= l;

@@ -112,6 +112,7 @@
 #define ML_CONN		0x0000000004000000ULL /* net connection management */
 #define ML_QUORUM	0x0000000008000000ULL /* net connection quorum */
 #define ML_EXPORT	0x0000000010000000ULL /* ocfs2 export operations */
+#define ML_XATTR	0x0000000020000000ULL /* ocfs2 extended attributes */
 /* bits that are infrequently given and frequently matched in the high word */
 #define ML_ERROR	0x0000000100000000ULL /* sent to KERN_ERR */
 #define ML_NOTICE	0x0000000200000000ULL /* setn to KERN_NOTICE */
@@ -192,7 +193,7 @@ extern struct mlog_bits mlog_and_bits, mlog_not_bits;
  * previous token if args expands to nothing.
  */
 #define __mlog_printk(level, fmt, args...)				\
-	printk(level "(%u,%lu):%s:%d " fmt, current->pid,		\
+	printk(level "(%u,%lu):%s:%d " fmt, task_pid_nr(current),	\
 	       __mlog_cpu_guess, __PRETTY_FUNCTION__, __LINE__ ,	\
 	       ##args)
 
@@ -212,7 +213,7 @@ extern struct mlog_bits mlog_and_bits, mlog_not_bits;
 #define mlog_errno(st) do {						\
 	int _st = (st);							\
 	if (_st != -ERESTARTSYS && _st != -EINTR &&			\
-	    _st != AOP_TRUNCATED_PAGE)					\
+	    _st != AOP_TRUNCATED_PAGE && _st != -ENOSPC)		\
 		mlog(ML_ERROR, "status = %lld\n", (long long)_st);	\
 } while (0)
 

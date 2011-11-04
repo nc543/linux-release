@@ -24,13 +24,14 @@
 #include <linux/platform_device.h>
 #include <linux/leds.h>
 #include <linux/apm-emulation.h>
+#include <linux/suspend.h>
 
-#include <asm/hardware.h>
-#include <asm/mach-types.h>
+#include <mach/hardware.h>
 #include <asm/irq.h>
-#include <asm/arch/pm.h>
-#include <asm/arch/pxa-regs.h>
-#include <asm/arch/sharpsl.h>
+#include <mach/pm.h>
+#include <mach/pxa-regs.h>
+#include <mach/pxa2xx-regs.h>
+#include <mach/sharpsl.h>
 #include <asm/hardware/sharpsl_pm.h>
 
 /*
@@ -53,11 +54,13 @@
 /*
  * Prototypes
  */
+#ifdef CONFIG_PM
 static int sharpsl_off_charge_battery(void);
-static int sharpsl_check_battery_temp(void);
 static int sharpsl_check_battery_voltage(void);
-static int sharpsl_ac_check(void);
 static int sharpsl_fatal_check(void);
+#endif
+static int sharpsl_check_battery_temp(void);
+static int sharpsl_ac_check(void);
 static int sharpsl_average_value(int ad);
 static void sharpsl_average_clear(void);
 static void sharpsl_charge_toggle(struct work_struct *private_);
@@ -156,6 +159,7 @@ static void sharpsl_battery_thread(struct work_struct *private_)
 	dev_dbg(sharpsl_pm.dev, "Battery: voltage: %d, status: %d, percentage: %d, time: %ld\n", voltage,
 			sharpsl_pm.battstat.mainbat_status, sharpsl_pm.battstat.mainbat_percent, jiffies);
 
+#ifdef CONFIG_BACKLIGHT_CORGI
 	/* If battery is low. limit backlight intensity to save power. */
 	if ((sharpsl_pm.battstat.ac_status != APM_AC_ONLINE)
 			&& ((sharpsl_pm.battstat.mainbat_status == APM_BATTERY_STATUS_LOW) ||
@@ -168,6 +172,7 @@ static void sharpsl_battery_thread(struct work_struct *private_)
 		sharpsl_pm.machinfo->backlight_limit(0);
 		sharpsl_pm.flags &= ~SHARPSL_BL_LIMIT;
 	}
+#endif
 
 	/* Suspend if critical battery level */
 	if ((sharpsl_pm.battstat.ac_status != APM_AC_ONLINE)
@@ -421,6 +426,7 @@ static int sharpsl_check_battery_temp(void)
 	return 0;
 }
 
+#ifdef CONFIG_PM
 static int sharpsl_check_battery_voltage(void)
 {
 	int val, i, buff[5];
@@ -452,6 +458,7 @@ static int sharpsl_check_battery_voltage(void)
 
 	return 0;
 }
+#endif
 
 static int sharpsl_ac_check(void)
 {
@@ -583,8 +590,6 @@ static int corgi_pxa_pm_enter(suspend_state_t state)
 
 	return 0;
 }
-#endif
-
 
 /*
  * Check for fatal battery errors
@@ -735,7 +740,10 @@ static int sharpsl_off_charge_battery(void)
 		}
 	}
 }
-
+#else
+#define sharpsl_pm_suspend	NULL
+#define sharpsl_pm_resume	NULL
+#endif
 
 static ssize_t battery_percentage_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
@@ -765,12 +773,12 @@ static void sharpsl_apm_get_power_status(struct apm_power_info *info)
 	info->battery_life = sharpsl_pm.battstat.mainbat_percent;
 }
 
-static struct pm_ops sharpsl_pm_ops = {
-	.prepare	= pxa_pm_prepare,
+#ifdef CONFIG_PM
+static struct platform_suspend_ops sharpsl_pm_ops = {
 	.enter		= corgi_pxa_pm_enter,
-	.finish		= pxa_pm_finish,
-	.valid		= pm_valid_only_mem,
+	.valid		= suspend_valid_only_mem,
 };
+#endif
 
 static int __init sharpsl_pm_probe(struct platform_device *pdev)
 {
@@ -801,7 +809,9 @@ static int __init sharpsl_pm_probe(struct platform_device *pdev)
 
 	apm_get_power_status = sharpsl_apm_get_power_status;
 
-	pm_set_ops(&sharpsl_pm_ops);
+#ifdef CONFIG_PM
+	suspend_set_ops(&sharpsl_pm_ops);
+#endif
 
 	mod_timer(&sharpsl_pm.ac_timer, jiffies + msecs_to_jiffies(250));
 
@@ -810,7 +820,7 @@ static int __init sharpsl_pm_probe(struct platform_device *pdev)
 
 static int sharpsl_pm_remove(struct platform_device *pdev)
 {
-	pm_set_ops(NULL);
+	suspend_set_ops(NULL);
 
 	device_remove_file(&pdev->dev, &dev_attr_battery_percentage);
 	device_remove_file(&pdev->dev, &dev_attr_battery_voltage);

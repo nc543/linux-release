@@ -60,18 +60,9 @@ static int ati_create_page_map(struct ati_page_map *page_map)
 	if (page_map->real == NULL)
 		return -ENOMEM;
 
-	SetPageReserved(virt_to_page(page_map->real));
+	set_memory_uc((unsigned long)page_map->real, 1);
 	err = map_page_into_agp(virt_to_page(page_map->real));
-	page_map->remapped = ioremap_nocache(virt_to_gart(page_map->real),
-					    PAGE_SIZE);
-	if (page_map->remapped == NULL || err) {
-		ClearPageReserved(virt_to_page(page_map->real));
-		free_page((unsigned long) page_map->real);
-		page_map->real = NULL;
-		return -ENOMEM;
-	}
-	/*CACHE_FLUSH();*/
-	global_cache_flush();
+	page_map->remapped = page_map->real;
 
 	for (i = 0; i < PAGE_SIZE / sizeof(unsigned long); i++) {
 		writel(agp_bridge->scratch_page, page_map->remapped+i);
@@ -85,8 +76,7 @@ static int ati_create_page_map(struct ati_page_map *page_map)
 static void ati_free_page_map(struct ati_page_map *page_map)
 {
 	unmap_page_from_agp(virt_to_page(page_map->real));
-	iounmap(page_map->remapped);
-	ClearPageReserved(virt_to_page(page_map->real));
+	set_memory_wb((unsigned long)page_map->real, 1);
 	free_page((unsigned long) page_map->real);
 }
 
@@ -123,21 +113,16 @@ static int ati_create_gatt_pages(int nr_tables)
 
 	for (i = 0; i < nr_tables; i++) {
 		entry = kzalloc(sizeof(struct ati_page_map), GFP_KERNEL);
+		tables[i] = entry;
 		if (entry == NULL) {
-			while (i > 0) {
-				kfree(tables[i-1]);
-				i--;
-			}
-			kfree(tables);
 			retval = -ENOMEM;
 			break;
 		}
-		tables[i] = entry;
 		retval = ati_create_page_map(entry);
 		if (retval != 0)
 			break;
 	}
-	ati_generic_private.num_tables = nr_tables;
+	ati_generic_private.num_tables = i;
 	ati_generic_private.gatt_pages = tables;
 
 	if (retval != 0)
@@ -217,6 +202,9 @@ static int ati_configure(void)
 	pci_read_config_dword(agp_bridge->dev, ATI_GART_MMBASE_ADDR, &temp);
 	temp = (temp & 0xfffff000);
 	ati_generic_private.registers = (volatile u8 __iomem *) ioremap(temp, 4096);
+
+	if (!ati_generic_private.registers)
+		return -ENOMEM;
 
 	if (is_r200())
 		pci_write_config_dword(agp_bridge->dev, ATI_RS100_IG_AGPMODE, 0x20000);
@@ -299,10 +287,10 @@ static int ati_insert_memory(struct agp_memory * mem,
 		j++;
 	}
 
-	if (mem->is_flushed == FALSE) {
+	if (!mem->is_flushed) {
 		/*CACHE_FLUSH(); */
 		global_cache_flush();
-		mem->is_flushed = TRUE;
+		mem->is_flushed = true;
 	}
 
 	for (i = 0, j = pg_start; i < mem->page_count; i++, j++) {
@@ -430,7 +418,9 @@ static const struct agp_bridge_driver ati_generic_bridge = {
 	.alloc_by_type		= agp_generic_alloc_by_type,
 	.free_by_type		= agp_generic_free_by_type,
 	.agp_alloc_page		= agp_generic_alloc_page,
+	.agp_alloc_pages	= agp_generic_alloc_pages,
 	.agp_destroy_page	= agp_generic_destroy_page,
+	.agp_destroy_pages	= agp_generic_destroy_pages,
 	.agp_type_to_mask_type  = agp_generic_type_to_mask_type,
 };
 
@@ -470,6 +460,10 @@ static struct agp_device_ids ati_agp_device_ids[] __devinitdata =
 		.chipset_name	= "IGP9100/M",
 	},
 	{
+		.device_id	= PCI_DEVICE_ID_ATI_RS350_133,
+		.chipset_name	= "IGP9000/M",
+	},
+	{
 		.device_id	= PCI_DEVICE_ID_ATI_RS350_200,
 		.chipset_name	= "IGP9100/M",
 	},
@@ -494,8 +488,8 @@ static int __devinit agp_ati_probe(struct pci_dev *pdev,
 			goto found;
 	}
 
-	printk(KERN_ERR PFX
-	     "Unsupported Ati chipset (device id: %04x)\n", pdev->device);
+	dev_err(&pdev->dev, "unsupported Ati chipset [%04x/%04x])\n",
+		pdev->vendor, pdev->device);
 	return -ENODEV;
 
 found:
@@ -508,8 +502,7 @@ found:
 
 	bridge->driver = &ati_generic_bridge;
 
-	printk(KERN_INFO PFX "Detected Ati %s chipset\n",
-			devs[j].chipset_name);
+	dev_info(&pdev->dev, "Ati %s chipset\n", devs[j].chipset_name);
 
 	/* Fill in the mode register */
 	pci_read_config_dword(pdev,
@@ -568,6 +561,6 @@ static void __exit agp_ati_cleanup(void)
 module_init(agp_ati_init);
 module_exit(agp_ati_cleanup);
 
-MODULE_AUTHOR("Dave Jones <davej@codemonkey.org.uk>");
+MODULE_AUTHOR("Dave Jones <davej@redhat.com>");
 MODULE_LICENSE("GPL and additional rights");
 

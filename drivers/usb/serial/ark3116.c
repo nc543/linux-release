@@ -24,7 +24,7 @@
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
 #include <linux/serial.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 
 static int debug;
@@ -151,17 +151,21 @@ static int ark3116_attach(struct usb_serial *serial)
 	return 0;
 
 cleanup:
-	for (--i; i >= 0; --i)
+	for (--i; i >= 0; --i) {
+		kfree(usb_get_serial_port_data(serial->port[i]));
 		usb_set_serial_port_data(serial->port[i], NULL);
+	}
 	return -ENOMEM;
 }
 
-static void ark3116_set_termios(struct usb_serial_port *port,
+static void ark3116_set_termios(struct tty_struct *tty,
+				struct usb_serial_port *port,
 				struct ktermios *old_termios)
 {
 	struct usb_serial *serial = port->serial;
 	struct ark3116_private *priv = usb_get_serial_port_data(port);
-	unsigned int cflag = port->tty->termios->c_cflag;
+	struct ktermios *termios = tty->termios;
+	unsigned int cflag = termios->c_cflag;
 	unsigned long flags;
 	int baud;
 	int ark3116_baud;
@@ -170,37 +174,26 @@ static void ark3116_set_termios(struct usb_serial_port *port,
 
 	config = 0;
 
-	dbg("%s - port %d", __FUNCTION__, port->number);
-
-	if ((!port->tty) || (!port->tty->termios)) {
-		dbg("%s - no tty structures", __FUNCTION__);
-		return;
-	}
+	dbg("%s - port %d", __func__, port->number);
 
 	spin_lock_irqsave(&priv->lock, flags);
 	if (!priv->termios_initialized) {
-		*(port->tty->termios) = tty_std_termios;
-		port->tty->termios->c_cflag = B9600 | CS8
+		*termios = tty_std_termios;
+		termios->c_cflag = B9600 | CS8
 					      | CREAD | HUPCL | CLOCAL;
+		termios->c_ispeed = 9600;
+		termios->c_ospeed = 9600;
 		priv->termios_initialized = 1;
 	}
 	spin_unlock_irqrestore(&priv->lock, flags);
 
-	cflag = port->tty->termios->c_cflag;
-
-	/* check that they really want us to change something: */
-	if (old_termios) {
-		if ((cflag == old_termios->c_cflag) &&
-		    (RELEVANT_IFLAG(port->tty->termios->c_iflag) ==
-		     RELEVANT_IFLAG(old_termios->c_iflag))) {
-			dbg("%s - nothing to change...", __FUNCTION__);
-			return;
-		}
-	}
+	cflag = termios->c_cflag;
+	termios->c_cflag &= ~(CMSPAR|CRTSCTS);
 
 	buf = kmalloc(1, GFP_KERNEL);
 	if (!buf) {
 		dbg("error kmalloc");
+		*termios = *old_termios;
 		return;
 	}
 
@@ -220,7 +213,7 @@ static void ark3116_set_termios(struct usb_serial_port *port,
 			dbg("setting CS7");
 			break;
 		default:
-			err("CSIZE was set but not CS5-CS8, using CS8!");
+			dbg("CSIZE was set but not CS5-CS8, using CS8!");
 			/* fall through */
 		case CS8:
 			config |= 0x03;
@@ -251,38 +244,37 @@ static void ark3116_set_termios(struct usb_serial_port *port,
 	}
 
 	/* set baudrate */
-	baud = 0;
-	switch (cflag & CBAUD) {
-		case B0:
-			err("can't set 0 baud, using 9600 instead");
-			break;
-		case B75:	baud = 75;	break;
-		case B150:	baud = 150;	break;
-		case B300:	baud = 300;	break;
-		case B600:	baud = 600;	break;
-		case B1200:	baud = 1200;	break;
-		case B1800:	baud = 1800;	break;
-		case B2400:	baud = 2400;	break;
-		case B4800:	baud = 4800;	break;
-		case B9600:	baud = 9600;	break;
-		case B19200:	baud = 19200;	break;
-		case B38400:	baud = 38400;	break;
-		case B57600:	baud = 57600;	break;
-		case B115200:	baud = 115200;	break;
-		case B230400:	baud = 230400;	break;
-		case B460800:	baud = 460800;	break;
-		default:
-			dbg("does not support the baudrate requested (fix it)");
-			break;
-	}
+	baud = tty_get_baud_rate(tty);
 
+	switch (baud) {
+	case 75:
+	case 150:
+	case 300:
+	case 600:
+	case 1200:
+	case 1800:
+	case 2400:
+	case 4800:
+	case 9600:
+	case 19200:
+	case 38400:
+	case 57600:
+	case 115200:
+	case 230400:
+	case 460800:
+		/* Report the resulting rate back to the caller */
+		tty_encode_baud_rate(tty, baud, baud);
+		break;
 	/* set 9600 as default (if given baudrate is invalid for example) */
-	if (baud == 0)
+	default:
+		tty_encode_baud_rate(tty, 9600, 9600);
+	case 0:
 		baud = 9600;
+	}
 
 	/*
 	 * found by try'n'error, be careful, maybe there are other options
-	 * for multiplicator etc!
+	 * for multiplicator etc! (3.5 for example)
 	 */
 	if (baud == 460800)
 		/* strange, for 460800 the formula is wrong
@@ -322,17 +314,19 @@ static void ark3116_set_termios(struct usb_serial_port *port,
 	/* TEST ARK3116_SND(154, 0xFE, 0x40, 0xFFFF, 0x0006); */
 
 	kfree(buf);
+
 	return;
 }
 
-static int ark3116_open(struct usb_serial_port *port, struct file *filp)
+static int ark3116_open(struct tty_struct *tty, struct usb_serial_port *port,
+					struct file *filp)
 {
 	struct ktermios tmp_termios;
 	struct usb_serial *serial = port->serial;
 	char *buf;
 	int result = 0;
 
-	dbg("%s - port %d", __FUNCTION__, port->number);
+	dbg("%s - port %d", __func__, port->number);
 
 	buf = kmalloc(1, GFP_KERNEL);
 	if (!buf) {
@@ -340,7 +334,7 @@ static int ark3116_open(struct usb_serial_port *port, struct file *filp)
 		return -ENOMEM;
 	}
 
-	result = usb_serial_generic_open(port, filp);
+	result = usb_serial_generic_open(tty, port, filp);
 	if (result)
 		goto err_out;
 
@@ -370,8 +364,8 @@ static int ark3116_open(struct usb_serial_port *port, struct file *filp)
 	ARK3116_RCV(serial, 124, 0xFE, 0xC0, 0x0000, 0x0006, 0xFF, buf);
 
 	/* initialise termios */
-	if (port->tty)
-		ark3116_set_termios(port, &tmp_termios);
+	if (tty)
+		ark3116_set_termios(tty, port, &tmp_termios);
 
 err_out:
 	kfree(buf);
@@ -379,40 +373,42 @@ err_out:
 	return result;
 }
 
-static int ark3116_ioctl(struct usb_serial_port *port, struct file *file,
+static int ark3116_ioctl(struct tty_struct *tty, struct file *file,
 			 unsigned int cmd, unsigned long arg)
 {
+	struct usb_serial_port *port = tty->driver_data;
 	struct serial_struct serstruct;
 	void __user *user_arg = (void __user *)arg;
 
 	switch (cmd) {
 	case TIOCGSERIAL:
 		/* XXX: Some of these values are probably wrong. */
-		memset(&serstruct, 0, sizeof (serstruct));
+		memset(&serstruct, 0, sizeof(serstruct));
 		serstruct.type = PORT_16654;
 		serstruct.line = port->serial->minor;
 		serstruct.port = port->number;
 		serstruct.custom_divisor = 0;
 		serstruct.baud_base = 460800;
 
-		if (copy_to_user(user_arg, &serstruct, sizeof (serstruct)))
+		if (copy_to_user(user_arg, &serstruct, sizeof(serstruct)))
 			return -EFAULT;
 
 		return 0;
 	case TIOCSSERIAL:
-		if (copy_from_user(&serstruct, user_arg, sizeof (serstruct)))
+		if (copy_from_user(&serstruct, user_arg, sizeof(serstruct)))
 			return -EFAULT;
 		return 0;
 	default:
-		dbg("%s cmd 0x%04x not supported", __FUNCTION__, cmd);
+		dbg("%s cmd 0x%04x not supported", __func__, cmd);
 		break;
 	}
 
 	return -ENOIOCTLCMD;
 }
 
-static int ark3116_tiocmget(struct usb_serial_port *port, struct file *file)
+static int ark3116_tiocmget(struct tty_struct *tty, struct file *file)
 {
+	struct usb_serial_port *port = tty->driver_data;
 	struct usb_serial *serial = port->serial;
 	char *buf;
 	char temp;
@@ -456,9 +452,6 @@ static struct usb_serial_driver ark3116_device = {
 	},
 	.id_table =		id_table,
 	.usb_driver =		&ark3116_driver,
-	.num_interrupt_in =	1,
-	.num_bulk_in =		1,
-	.num_bulk_out =		1,
 	.num_ports =		1,
 	.attach =		ark3116_attach,
 	.set_termios =		ark3116_set_termios,

@@ -18,8 +18,8 @@
 #include <linux/security.h>
 #include <linux/init.h>
 #include <linux/signal.h>
+#include <linux/uaccess.h>
 
-#include <asm/uaccess.h>
 #include <asm/pgtable.h>
 #include <asm/system.h>
 #include <asm/traps.h>
@@ -126,7 +126,7 @@ ptrace_getrn(struct task_struct *child, unsigned long insn)
 
 	val = get_user_reg(child, reg);
 	if (reg == 15)
-		val = pc_pointer(val + 8);
+		val += 8;
 
 	return val;
 }
@@ -278,8 +278,7 @@ get_branch_address(struct task_struct *child, unsigned long pc, unsigned long in
 				else
 					base -= aluop2;
 			}
-			if (read_u32(child, base, &alt) == 0)
-				alt = pc_pointer(alt);
+			read_u32(child, base, &alt);
 		}
 		break;
 
@@ -305,8 +304,7 @@ get_branch_address(struct task_struct *child, unsigned long pc, unsigned long in
 
 			base = ptrace_getrn(child, insn);
 
-			if (read_u32(child, base + nr_regs, &alt) == 0)
-				alt = pc_pointer(alt);
+			read_u32(child, base + nr_regs, &alt);
 			break;
 		}
 		break;
@@ -382,16 +380,16 @@ static void clear_breakpoint(struct task_struct *task, struct debug_entry *bp)
 
 		if (ret != 2 || old_insn.thumb != BREAKINST_THUMB)
 			printk(KERN_ERR "%s:%d: corrupted Thumb breakpoint at "
-				"0x%08lx (0x%04x)\n", task->comm, task->pid,
-				addr, old_insn.thumb);
+				"0x%08lx (0x%04x)\n", task->comm,
+				task_pid_nr(task), addr, old_insn.thumb);
 	} else {
 		ret = swap_insn(task, addr & ~3, &old_insn.arm,
 				&bp->insn.arm, 4);
 
 		if (ret != 4 || old_insn.arm != BREAKINST_ARM)
 			printk(KERN_ERR "%s:%d: corrupted ARM breakpoint at "
-				"0x%08lx (0x%08x)\n", task->comm, task->pid,
-				addr, old_insn.arm);
+				"0x%08lx (0x%08x)\n", task->comm,
+				task_pid_nr(task), addr, old_insn.arm);
 	}
 }
 
@@ -657,7 +655,6 @@ static int ptrace_setcrunchregs(struct task_struct *tsk, void __user *ufp)
 
 long arch_ptrace(struct task_struct *child, long request, long addr, long data)
 {
-	unsigned long tmp;
 	int ret;
 
 	switch (request) {
@@ -666,12 +663,7 @@ long arch_ptrace(struct task_struct *child, long request, long addr, long data)
 		 */
 		case PTRACE_PEEKTEXT:
 		case PTRACE_PEEKDATA:
-			ret = access_process_vm(child, addr, &tmp,
-						sizeof(unsigned long), 0);
-			if (ret == sizeof(unsigned long))
-				ret = put_user(tmp, (unsigned long __user *) data);
-			else
-				ret = -EIO;
+			ret = generic_ptrace_peekdata(child, addr, data);
 			break;
 
 		case PTRACE_PEEKUSR:
@@ -683,12 +675,7 @@ long arch_ptrace(struct task_struct *child, long request, long addr, long data)
 		 */
 		case PTRACE_POKETEXT:
 		case PTRACE_POKEDATA:
-			ret = access_process_vm(child, addr, &data,
-						sizeof(unsigned long), 1);
-			if (ret == sizeof(unsigned long))
-				ret = 0;
-			else
-				ret = -EIO;
+			ret = generic_ptrace_pokedata(child, addr, data);
 			break;
 
 		case PTRACE_POKEUSR:
@@ -740,10 +727,6 @@ long arch_ptrace(struct task_struct *child, long request, long addr, long data)
 			/* give it a chance to run. */
 			wake_up_process(child);
 			ret = 0;
-			break;
-
-		case PTRACE_DETACH:
-			ret = ptrace_detach(child, data);
 			break;
 
 		case PTRACE_GETREGS:

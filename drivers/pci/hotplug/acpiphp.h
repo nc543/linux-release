@@ -36,7 +36,7 @@
 #define _ACPIPHP_H
 
 #include <linux/acpi.h>
-#include <linux/kobject.h>	/* for KOBJ_NAME_LEN */
+#include <linux/kobject.h>
 #include <linux/mutex.h>
 #include <linux/pci_hotplug.h>
 
@@ -50,9 +50,6 @@
 #define info(format, arg...) printk(KERN_INFO "%s: " format, MY_NAME , ## arg)
 #define warn(format, arg...) printk(KERN_WARNING "%s: " format, MY_NAME , ## arg)
 
-/* name size which is used for entries in pcihpfs */
-#define SLOT_NAME_SIZE	KOBJ_NAME_LEN		/* {_SUN} */
-
 struct acpiphp_bridge;
 struct acpiphp_slot;
 
@@ -63,10 +60,14 @@ struct slot {
 	struct hotplug_slot	*hotplug_slot;
 	struct acpiphp_slot	*acpi_slot;
 	struct hotplug_slot_info info;
-	char name[SLOT_NAME_SIZE];
 };
 
-/**
+static inline const char *slot_name(struct slot *slot)
+{
+	return hotplug_slot_name(slot->hotplug_slot);
+}
+
+/*
  * struct acpiphp_bridge - PCI bridge information
  *
  * for each bridge device in ACPI namespace
@@ -97,7 +98,7 @@ struct acpiphp_bridge {
 };
 
 
-/**
+/*
  * struct acpiphp_slot - PCI slot information
  *
  * PCI slot information for each *physical* PCI slot
@@ -112,13 +113,12 @@ struct acpiphp_slot {
 
 	u8		device;		/* pci device# */
 
-	u32		sun;		/* ACPI _SUN (slot unique number) */
-	u32		slotno;		/* slot number relative to bridge */
+	unsigned long long sun;		/* ACPI _SUN (slot unique number) */
 	u32		flags;		/* see below */
 };
 
 
-/**
+/*
  * struct acpiphp_func - PCI function information
  *
  * PCI function information for each object in ACPI namespace
@@ -137,7 +137,7 @@ struct acpiphp_func {
 	u32		flags;		/* see below */
 };
 
-/**
+/*
  * struct acpiphp_attention_info - device specific attention registration
  *
  * ACPI has no generic method of setting/getting attention status
@@ -211,11 +211,11 @@ typedef int (*acpiphp_callback)(struct acpiphp_slot *slot, void *data);
 
 extern int acpiphp_enable_slot (struct acpiphp_slot *slot);
 extern int acpiphp_disable_slot (struct acpiphp_slot *slot);
+extern int acpiphp_eject_slot (struct acpiphp_slot *slot);
 extern u8 acpiphp_get_power_status (struct acpiphp_slot *slot);
 extern u8 acpiphp_get_attention_status (struct acpiphp_slot *slot);
 extern u8 acpiphp_get_latch_status (struct acpiphp_slot *slot);
 extern u8 acpiphp_get_adapter_status (struct acpiphp_slot *slot);
-extern u32 acpiphp_get_address (struct acpiphp_slot *slot);
 
 /* variables */
 extern int acpiphp_debug;

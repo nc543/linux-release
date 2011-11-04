@@ -200,7 +200,7 @@ static inline int mga_ioremap(unsigned long phys, unsigned long size, int flags,
 		virt->vaddr = ioremap_nocache(phys, size);
 	else
 		virt->vaddr = ioremap(phys, size);
-	return (virt->vaddr == 0); /* 0, !0... 0, error_code in future */
+	return (virt->vaddr == NULL); /* 0, !0... 0, error_code in future */
 }
 
 static inline void mga_iounmap(vaddr_t va) {
@@ -424,6 +424,7 @@ struct matrox_fb_info {
 		      } mmio;
 
 	unsigned int	max_pixel_clock;
+	unsigned int	max_pixel_clock_panellink;
 
 	struct matrox_switch*	hw_switch;
 
@@ -518,7 +519,7 @@ struct matrox_fb_info {
 					dll:1;
 				      } memory;
 			      } values;
-	u_int32_t cmap[17];
+	u_int32_t cmap[16];
 };
 
 #define info2minfo(info) container_of(info, struct matrox_fb_info, fbcon)

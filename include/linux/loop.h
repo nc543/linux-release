@@ -63,7 +63,7 @@ struct loop_device {
 	struct task_struct	*lo_thread;
 	wait_queue_head_t	lo_event;
 
-	request_queue_t		*lo_queue;
+	struct request_queue	*lo_queue;
 	struct gendisk		*lo_disk;
 	struct list_head	lo_list;
 };
@@ -76,6 +76,7 @@ struct loop_device {
 enum {
 	LO_FLAGS_READ_ONLY	= 1,
 	LO_FLAGS_USE_AOPS	= 2,
+	LO_FLAGS_AUTOCLEAR	= 4,
 };
 
 #include <asm/posix_types.h>	/* for __kernel_old_dev_t */

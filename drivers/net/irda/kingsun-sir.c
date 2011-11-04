@@ -4,7 +4,7 @@
 * Version:       0.1.1
 * Description:   Irda KingSun/DonShine USB Dongle
 * Status:        Experimental
-* Author:        Alex Villac�s Lasso <a_villacis@palosanto.com>
+* Author:        Alex Villacís Lasso <a_villacis@palosanto.com>
 *
 *  	Based on stir4200 and mcs7780 drivers, with (strange?) differences
 *
@@ -66,7 +66,6 @@
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/slab.h>
-#include <linux/module.h>
 #include <linux/kref.h>
 #include <linux/usb.h>
 #include <linux/device.h>
@@ -244,7 +243,7 @@ static void kingsun_rcv_irq(struct urb *urb)
 		}
 	} else if (urb->actual_length > 0) {
 		err("%s(): Unexpected response length, expected %d got %d",
-		    __FUNCTION__, kingsun->max_rx, urb->actual_length);
+		    __func__, kingsun->max_rx, urb->actual_length);
 	}
 	/* This urb has already been filled in kingsun_net_open */
 	ret = usb_submit_urb(urb, GFP_ATOMIC);
@@ -488,7 +487,6 @@ static int kingsun_probe(struct usb_interface *intf,
 	if(!net)
 		goto err_out1;
 
-	SET_MODULE_OWNER(net);
 	SET_NETDEV_DEV(net, &intf->dev);
 	kingsun = netdev_priv(net);
 	kingsun->irlap = NULL;
@@ -509,12 +507,12 @@ static int kingsun_probe(struct usb_interface *intf,
 	spin_lock_init(&kingsun->lock);
 
 	/* Allocate input buffer */
-	kingsun->in_buf = (__u8 *)kmalloc(kingsun->max_rx, GFP_KERNEL);
+	kingsun->in_buf = kmalloc(kingsun->max_rx, GFP_KERNEL);
 	if (!kingsun->in_buf)
 		goto free_mem;
 
 	/* Allocate output buffer */
-	kingsun->out_buf = (__u8 *)kmalloc(KINGSUN_FIFO_SIZE, GFP_KERNEL);
+	kingsun->out_buf = kmalloc(KINGSUN_FIFO_SIZE, GFP_KERNEL);
 	if (!kingsun->out_buf)
 		goto free_mem;
 
@@ -542,7 +540,8 @@ static int kingsun_probe(struct usb_interface *intf,
 	if (ret != 0)
 		goto free_mem;
 
-	info("IrDA: Registered KingSun/DonShine device %s", net->name);
+	dev_info(&net->dev, "IrDA: Registered KingSun/DonShine device %s\n",
+		 net->name);
 
 	usb_set_intfdata(intf, kingsun);
 
@@ -652,6 +651,6 @@ static void __exit kingsun_cleanup(void)
 }
 module_exit(kingsun_cleanup);
 
-MODULE_AUTHOR("Alex Villac�s Lasso <a_villacis@palosanto.com>");
+MODULE_AUTHOR("Alex Villacís Lasso <a_villacis@palosanto.com>");
 MODULE_DESCRIPTION("IrDA-USB Dongle Driver for KingSun/DonShine");
 MODULE_LICENSE("GPL");

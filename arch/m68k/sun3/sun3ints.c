@@ -30,7 +30,7 @@ void sun3_enable_interrupts(void)
 	sun3_enable_irq(0);
 }
 
-int led_pattern[8] = {
+static int led_pattern[8] = {
        ~(0x80), ~(0x01),
        ~(0x40), ~(0x02),
        ~(0x20), ~(0x04),
@@ -97,7 +97,7 @@ static struct irq_controller sun3_irq_controller = {
 	.disable	= sun3_disable_irq,
 };
 
-void sun3_init_IRQ(void)
+void __init sun3_init_IRQ(void)
 {
 	*sun3_intreg = 1;
 

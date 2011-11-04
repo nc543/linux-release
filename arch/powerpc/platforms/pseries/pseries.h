@@ -10,7 +10,7 @@
 #ifndef _PSERIES_PSERIES_H
 #define _PSERIES_PSERIES_H
 
-extern void __init fw_feature_init(void);
+extern void __init fw_feature_init(const char *hypertas, unsigned long len);
 
 struct pt_regs;
 
@@ -33,7 +33,11 @@ static inline void setup_kexec_cpu_down_xics(void) { }
 static inline void setup_kexec_cpu_down_mpic(void) { }
 #endif
 
+extern void pSeries_final_fixup(void);
+
 /* Poweron flag used for enabling auto ups restart */
 extern unsigned long rtas_poweron_auto;
+
+extern void find_udbg_vterm(void);
 
 #endif /* _PSERIES_PSERIES_H */

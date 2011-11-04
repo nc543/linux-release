@@ -22,6 +22,9 @@
 #include <linux/bitops.h>
 #include <asm/system.h>
 #include <asm/irq.h>
+#include <asm/hpsim.h>
+
+#include "hpsim_ssc.h"
 
 #define SIMETH_RECV_MAX	10
 
@@ -34,12 +37,6 @@
  */
 #define SIMETH_FRAME_SIZE	ETH_FRAME_LEN
 
-
-#define SSC_NETDEV_PROBE		100
-#define SSC_NETDEV_SEND			101
-#define SSC_NETDEV_RECV			102
-#define SSC_NETDEV_ATTACH		103
-#define SSC_NETDEV_DETACH		104
 
 #define NETWORK_INTR			8
 
@@ -123,9 +120,6 @@ simeth_probe (void)
 
 	return r;
 }
-
-extern long ia64_ssc (long, long, long, long, int);
-extern void ia64_ssc_connect_irq (long intr, long irq);
 
 static inline int
 netdev_probe(char *name, unsigned char *ether)
@@ -228,7 +222,7 @@ simeth_probe1(void)
 	}
 
 	if ((rc = assign_irq_vector(AUTO_ASSIGN)) < 0)
-		panic("%s: out of interrupt vectors!\n", __FUNCTION__);
+		panic("%s: out of interrupt vectors!\n", __func__);
 	dev->irq = rc;
 
 	/*
@@ -299,6 +293,9 @@ simeth_device_event(struct notifier_block *this,unsigned long event, void *ptr)
 		printk(KERN_WARNING "simeth_device_event dev=0\n");
 		return NOTIFY_DONE;
 	}
+
+	if (dev_net(dev) != &init_net)
+		return NOTIFY_DONE;
 
 	if ( event != NETDEV_UP && event != NETDEV_DOWN ) return NOTIFY_DONE;
 
@@ -499,11 +496,6 @@ static irqreturn_t
 simeth_interrupt(int irq, void *dev_id)
 {
 	struct net_device *dev = dev_id;
-
-	if ( dev == NULL ) {
-		printk(KERN_WARNING "simeth: irq %d for unknown device\n", irq);
-		return IRQ_NONE;
-	}
 
 	/*
 	 * very simple loop because we get interrupts only when receiving

@@ -27,10 +27,14 @@ static int hfsplus_writepage(struct page *page, struct writeback_control *wbc)
 	return block_write_full_page(page, hfsplus_get_block, wbc);
 }
 
-static int hfsplus_prepare_write(struct file *file, struct page *page, unsigned from, unsigned to)
+static int hfsplus_write_begin(struct file *file, struct address_space *mapping,
+			loff_t pos, unsigned len, unsigned flags,
+			struct page **pagep, void **fsdata)
 {
-	return cont_prepare_write(page, from, to, hfsplus_get_block,
-		&HFSPLUS_I(page->mapping->host).phys_size);
+	*pagep = NULL;
+	return cont_write_begin(file, mapping, pos, len, flags, pagep, fsdata,
+				hfsplus_get_block,
+				&HFSPLUS_I(mapping->host).phys_size);
 }
 
 static sector_t hfsplus_bmap(struct address_space *mapping, sector_t block)
@@ -61,6 +65,8 @@ static int hfsplus_releasepage(struct page *page, gfp_t mask)
 		BUG();
 		return 0;
 	}
+	if (!tree)
+		return 0;
 	if (tree->node_size >= PAGE_CACHE_SIZE) {
 		nidx = page->index >> (tree->node_size_shift - PAGE_CACHE_SHIFT);
 		spin_lock(&tree->hash_lock);
@@ -114,8 +120,8 @@ const struct address_space_operations hfsplus_btree_aops = {
 	.readpage	= hfsplus_readpage,
 	.writepage	= hfsplus_writepage,
 	.sync_page	= block_sync_page,
-	.prepare_write	= hfsplus_prepare_write,
-	.commit_write	= generic_commit_write,
+	.write_begin	= hfsplus_write_begin,
+	.write_end	= generic_write_end,
 	.bmap		= hfsplus_bmap,
 	.releasepage	= hfsplus_releasepage,
 };
@@ -124,11 +130,16 @@ const struct address_space_operations hfsplus_aops = {
 	.readpage	= hfsplus_readpage,
 	.writepage	= hfsplus_writepage,
 	.sync_page	= block_sync_page,
-	.prepare_write	= hfsplus_prepare_write,
-	.commit_write	= generic_commit_write,
+	.write_begin	= hfsplus_write_begin,
+	.write_end	= generic_write_end,
 	.bmap		= hfsplus_bmap,
 	.direct_IO	= hfsplus_direct_IO,
 	.writepages	= hfsplus_writepages,
+};
+
+struct dentry_operations hfsplus_dentry_operations = {
+	.d_hash       = hfsplus_hash_dentry,
+	.d_compare    = hfsplus_compare_dentry,
 };
 
 static struct dentry *hfsplus_file_lookup(struct inode *dir, struct dentry *dentry,
@@ -152,7 +163,7 @@ static struct dentry *hfsplus_file_lookup(struct inode *dir, struct dentry *dent
 
 	inode->i_ino = dir->i_ino;
 	INIT_LIST_HEAD(&HFSPLUS_I(inode).open_dir_list);
-	init_MUTEX(&HFSPLUS_I(inode).extents_lock);
+	mutex_init(&HFSPLUS_I(inode).extents_lock);
 	HFSPLUS_I(inode).flags = HFSPLUS_FLG_RSRC;
 
 	hfs_find_init(HFSPLUS_SB(sb).cat_tree, &fd);
@@ -227,24 +238,12 @@ static void hfsplus_set_perms(struct inode *inode, struct hfsplus_perm *perms)
 	perms->dev = cpu_to_be32(HFSPLUS_I(inode).dev);
 }
 
-static int hfsplus_permission(struct inode *inode, int mask, struct nameidata *nd)
-{
-	/* MAY_EXEC is also used for lookup, if no x bit is set allow lookup,
-	 * open_exec has the same test, so it's still not executable, if a x bit
-	 * is set fall back to standard permission check.
-	 */
-	if (S_ISREG(inode->i_mode) && mask & MAY_EXEC && !(inode->i_mode & 0111))
-		return 0;
-	return generic_permission(inode, mask, NULL);
-}
-
-
 static int hfsplus_file_open(struct inode *inode, struct file *file)
 {
 	if (HFSPLUS_IS_RSRC(inode))
 		inode = HFSPLUS_I(inode).rsrc_inode;
-	if (atomic_read(&file->f_count) != 1)
-		return 0;
+	if (!(file->f_flags & O_LARGEFILE) && i_size_read(inode) > MAX_NON_LFS)
+		return -EOVERFLOW;
 	atomic_inc(&HFSPLUS_I(inode).opencnt);
 	return 0;
 }
@@ -255,8 +254,6 @@ static int hfsplus_file_release(struct inode *inode, struct file *file)
 
 	if (HFSPLUS_IS_RSRC(inode))
 		inode = HFSPLUS_I(inode).rsrc_inode;
-	if (atomic_read(&file->f_count) != 0)
-		return 0;
 	if (atomic_dec_and_test(&HFSPLUS_I(inode).opencnt)) {
 		mutex_lock(&inode->i_mutex);
 		hfsplus_file_truncate(inode);
@@ -269,13 +266,9 @@ static int hfsplus_file_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-extern const struct inode_operations hfsplus_dir_inode_operations;
-extern struct file_operations hfsplus_dir_operations;
-
 static const struct inode_operations hfsplus_file_inode_operations = {
 	.lookup		= hfsplus_file_lookup,
 	.truncate	= hfsplus_file_truncate,
-	.permission	= hfsplus_permission,
 	.setxattr	= hfsplus_setxattr,
 	.getxattr	= hfsplus_getxattr,
 	.listxattr	= hfsplus_listxattr,
@@ -288,7 +281,7 @@ static const struct file_operations hfsplus_file_operations = {
 	.write		= do_sync_write,
 	.aio_write	= generic_file_aio_write,
 	.mmap		= generic_file_mmap,
-	.sendfile	= generic_file_sendfile,
+	.splice_read	= generic_file_splice_read,
 	.fsync		= file_fsync,
 	.open		= hfsplus_file_open,
 	.release	= hfsplus_file_release,
@@ -308,7 +301,7 @@ struct inode *hfsplus_new_inode(struct super_block *sb, int mode)
 	inode->i_nlink = 1;
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME_SEC;
 	INIT_LIST_HEAD(&HFSPLUS_I(inode).open_dir_list);
-	init_MUTEX(&HFSPLUS_I(inode).extents_lock);
+	mutex_init(&HFSPLUS_I(inode).extents_lock);
 	atomic_set(&HFSPLUS_I(inode).opencnt, 0);
 	HFSPLUS_I(inode).flags = 0;
 	memset(HFSPLUS_I(inode).first_extents, 0, sizeof(hfsplus_extent_rec));

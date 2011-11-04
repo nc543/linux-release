@@ -14,6 +14,7 @@
 # (Use VAR=<xtensa_config> to use another default compiler.)
 
 variant-$(CONFIG_XTENSA_VARIANT_FSF)		:= fsf
+variant-$(CONFIG_XTENSA_VARIANT_DC232B)		:= dc232b
 variant-$(CONFIG_XTENSA_VARIANT_LINUX_CUSTOM)	:= custom
 
 VARIANT = $(variant-y)
@@ -27,7 +28,10 @@ platform-$(CONFIG_XTENSA_PLATFORM_ISS)		:= iss
 PLATFORM = $(platform-y)
 export PLATFORM
 
-CFLAGS		+= -pipe -mlongcalls
+# temporarily until string.h is fixed
+KBUILD_CFLAGS += -ffreestanding
+
+KBUILD_CFLAGS += -pipe -mlongcalls
 
 KBUILD_DEFCONFIG := iss_defconfig
 
@@ -51,12 +55,12 @@ endif
 
 #
 
-LIBGCC := $(shell $(CC) $(CFLAGS) -print-libgcc-file-name)
+LIBGCC := $(shell $(CC) $(KBUILD_CFLAGS) -print-libgcc-file-name)
 
 head-y		:= arch/xtensa/kernel/head.o
 core-y		+= arch/xtensa/kernel/ arch/xtensa/mm/
 ifneq ($(PLATFORM),)
-core-y		+= arch/xtensa/platform-$(PLATFORM)/
+core-y		+= arch/xtensa/platforms/$(PLATFORM)/
 endif
 libs-y		+= arch/xtensa/lib/ $(LIBGCC)
 

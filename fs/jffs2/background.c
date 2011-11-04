@@ -23,8 +23,8 @@ static int jffs2_garbage_collect_thread(void *);
 void jffs2_garbage_collect_trigger(struct jffs2_sb_info *c)
 {
 	spin_lock(&c->erase_completion_lock);
-        if (c->gc_task && jffs2_thread_should_wake(c))
-                send_sig(SIGHUP, c->gc_task, 1);
+	if (c->gc_task && jffs2_thread_should_wake(c))
+		send_sig(SIGHUP, c->gc_task, 1);
 	spin_unlock(&c->erase_completion_lock);
 }
 
@@ -81,21 +81,19 @@ static int jffs2_garbage_collect_thread(void *_c)
 
 	set_user_nice(current, 10);
 
+	set_freezable();
 	for (;;) {
 		allow_signal(SIGHUP);
-
+	again:
+		spin_lock(&c->erase_completion_lock);
 		if (!jffs2_thread_should_wake(c)) {
 			set_current_state (TASK_INTERRUPTIBLE);
+			spin_unlock(&c->erase_completion_lock);
 			D1(printk(KERN_DEBUG "jffs2_garbage_collect_thread sleeping...\n"));
-			/* Yes, there's a race here; we checked jffs2_thread_should_wake()
-			   before setting current->state to TASK_INTERRUPTIBLE. But it doesn't
-			   matter - We don't care if we miss a wakeup, because the GC thread
-			   is only an optimisation anyway. */
 			schedule();
-		}
-
-		if (try_to_freeze())
-			continue;
+		} else
+			spin_unlock(&c->erase_completion_lock);
+			
 
 		/* This thread is purely an optimisation. But if it runs when
 		   other things could be running, it actually makes things a
@@ -107,9 +105,12 @@ static int jffs2_garbage_collect_thread(void *_c)
 
 		/* Put_super will send a SIGKILL and then wait on the sem.
 		 */
-		while (signal_pending(current)) {
+		while (signal_pending(current) || freezing(current)) {
 			siginfo_t info;
 			unsigned long signr;
+
+			if (try_to_freeze())
+				goto again;
 
 			signr = dequeue_signal_lock(current, &current->blocked, &info);
 

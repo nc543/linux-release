@@ -9,20 +9,23 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
+#undef DEBUG
+
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/err.h>
 #include <linux/clk.h>
 #include <linux/ioport.h>
 #include <linux/spinlock.h>
+#include <linux/io.h>
+#include <linux/module.h>
 
-#include <asm/io.h>
 #include <asm/mach-types.h>
-#include <asm/arch/gpmc.h>
+#include <mach/gpmc.h>
 
-#undef DEBUG
+#include <mach/sdrc.h>
 
-#define GPMC_BASE		0x6800a000
+/* GPMC register offsets */
 #define GPMC_REVISION		0x00
 #define GPMC_SYSCONFIG		0x10
 #define GPMC_SYSSTATUS		0x14
@@ -35,7 +38,7 @@
 #define GPMC_STATUS		0x54
 #define GPMC_PREFETCH_CONFIG1	0x1e0
 #define GPMC_PREFETCH_CONFIG2	0x1e4
-#define GPMC_PREFETCH_CONTROL	0x1e8
+#define GPMC_PREFETCH_CONTROL	0x1ec
 #define GPMC_PREFETCH_STATUS	0x1f0
 #define GPMC_ECC_CONFIG		0x1f4
 #define GPMC_ECC_CONTROL	0x1f8
@@ -44,7 +47,6 @@
 #define GPMC_CS0		0x60
 #define GPMC_CS_SIZE		0x30
 
-#define GPMC_CS_NUM		8
 #define GPMC_MEM_START		0x00000000
 #define GPMC_MEM_END		0x3FFFFFFF
 #define BOOT_ROM_SPACE		0x100000	/* 1MB */
@@ -57,10 +59,7 @@ static struct resource	gpmc_cs_mem[GPMC_CS_NUM];
 static DEFINE_SPINLOCK(gpmc_mem_lock);
 static unsigned		gpmc_cs_map;
 
-static void __iomem *gpmc_base =
-	(void __iomem *) IO_ADDRESS(GPMC_BASE);
-static void __iomem *gpmc_cs_base =
-	(void __iomem *) IO_ADDRESS(GPMC_BASE) + GPMC_CS0;
+static void __iomem *gpmc_base;
 
 static struct clk *gpmc_l3_clk;
 
@@ -78,20 +77,32 @@ void gpmc_cs_write_reg(int cs, int idx, u32 val)
 {
 	void __iomem *reg_addr;
 
-	reg_addr = gpmc_cs_base + (cs * GPMC_CS_SIZE) + idx;
+	reg_addr = gpmc_base + GPMC_CS0 + (cs * GPMC_CS_SIZE) + idx;
 	__raw_writel(val, reg_addr);
 }
 
 u32 gpmc_cs_read_reg(int cs, int idx)
 {
-	return __raw_readl(gpmc_cs_base + (cs * GPMC_CS_SIZE) + idx);
+	void __iomem *reg_addr;
+
+	reg_addr = gpmc_base + GPMC_CS0 + (cs * GPMC_CS_SIZE) + idx;
+	return __raw_readl(reg_addr);
 }
 
 /* TODO: Add support for gpmc_fck to clock framework and use it */
-static unsigned long gpmc_get_fclk_period(void)
+unsigned long gpmc_get_fclk_period(void)
 {
-	/* In picoseconds */
-	return 1000000000 / ((clk_get_rate(gpmc_l3_clk)) / 1000);
+	unsigned long rate = clk_get_rate(gpmc_l3_clk);
+
+	if (rate == 0) {
+		printk(KERN_WARNING "gpmc_l3_clk not enabled\n");
+		return 0;
+	}
+
+	rate /= 1000;
+	rate = 1000000000 / rate;	/* In picoseconds */
+
+	return rate;
 }
 
 unsigned int gpmc_ns_to_ticks(unsigned int time_ns)
@@ -102,6 +113,18 @@ unsigned int gpmc_ns_to_ticks(unsigned int time_ns)
 	tick_ps = gpmc_get_fclk_period();
 
 	return (time_ns * 1000 + tick_ps - 1) / tick_ps;
+}
+
+unsigned int gpmc_ticks_to_ns(unsigned int ticks)
+{
+	return ticks * gpmc_get_fclk_period() / 1000;
+}
+
+unsigned int gpmc_round_ns_to_ticks(unsigned int time_ns)
+{
+	unsigned long ticks = gpmc_ns_to_ticks(time_ns);
+
+	return ticks * gpmc_get_fclk_period() / 1000;
 }
 
 #ifdef DEBUG
@@ -120,15 +143,21 @@ static int set_gpmc_timing_reg(int cs, int reg, int st_bit, int end_bit,
 	else
 		ticks = gpmc_ns_to_ticks(time);
 	nr_bits = end_bit - st_bit + 1;
-	if (ticks >= 1 << nr_bits)
+	if (ticks >= 1 << nr_bits) {
+#ifdef DEBUG
+		printk(KERN_INFO "GPMC CS%d: %-10s* %3d ns, %3d ticks >= %d\n",
+				cs, name, time, ticks, 1 << nr_bits);
+#endif
 		return -1;
+	}
 
 	mask = (1 << nr_bits) - 1;
 	l = gpmc_cs_read_reg(cs, reg);
 #ifdef DEBUG
-	printk(KERN_INFO "GPMC CS%d: %-10s: %d ticks, %3lu ns (was %i ticks)\n",
+	printk(KERN_INFO
+		"GPMC CS%d: %-10s: %3d ticks, %3lu ns (was %3i ticks) %3d ns\n",
 	       cs, name, ticks, gpmc_get_fclk_period() * ticks / 1000,
-	       (l >> st_bit) & mask);
+			(l >> st_bit) & mask, time);
 #endif
 	l &= ~(mask << st_bit);
 	l |= ticks << st_bit;
@@ -157,7 +186,7 @@ int gpmc_cs_calc_divider(int cs, unsigned int sync_clk)
 	div = l / gpmc_get_fclk_period();
 	if (div > 4)
 		return -1;
-	if (div < 0)
+	if (div <= 0)
 		div = 1;
 
 	return div;
@@ -191,14 +220,24 @@ int gpmc_cs_set_timings(int cs, const struct gpmc_timings *t)
 
 	GPMC_SET_ONE(GPMC_CS_CONFIG5, 24, 27, page_burst_access);
 
-#ifdef DEBUG
-	printk(KERN_INFO "GPMC CS%d CLK period is %lu (div %d)\n",
-	       cs, gpmc_get_fclk_period(), div);
-#endif
+	if (cpu_is_omap34xx()) {
+		GPMC_SET_ONE(GPMC_CS_CONFIG6, 16, 19, wr_data_mux_bus);
+		GPMC_SET_ONE(GPMC_CS_CONFIG6, 24, 28, wr_access);
+	}
 
+	/* caller is expected to have initialized CONFIG1 to cover
+	 * at least sync vs async
+	 */
 	l = gpmc_cs_read_reg(cs, GPMC_CS_CONFIG1);
-	l &= ~0x03;
-	l |= (div - 1);
+	if (l & (GPMC_CONFIG1_READTYPE_SYNC | GPMC_CONFIG1_WRITETYPE_SYNC)) {
+#ifdef DEBUG
+		printk(KERN_INFO "GPMC CS%d CLK period is %lu ns (div %d)\n",
+				cs, (div * gpmc_get_fclk_period()) / 1000, div);
+#endif
+		l &= ~0x03;
+		l |= (div - 1);
+		gpmc_cs_write_reg(cs, GPMC_CS_CONFIG1, l);
+	}
 
 	return 0;
 }
@@ -326,6 +365,7 @@ out:
 	spin_unlock(&gpmc_mem_lock);
 	return r;
 }
+EXPORT_SYMBOL(gpmc_cs_request);
 
 void gpmc_cs_free(int cs)
 {
@@ -341,8 +381,9 @@ void gpmc_cs_free(int cs)
 	gpmc_cs_set_reserved(cs, 0);
 	spin_unlock(&gpmc_mem_lock);
 }
+EXPORT_SYMBOL(gpmc_cs_free);
 
-void __init gpmc_mem_init(void)
+static void __init gpmc_mem_init(void)
 {
 	int cs;
 	unsigned long boot_rom_space = 0;
@@ -372,9 +413,31 @@ void __init gpmc_mem_init(void)
 void __init gpmc_init(void)
 {
 	u32 l;
+	char *ck;
 
-	gpmc_l3_clk = clk_get(NULL, "core_l3_ck");
-	BUG_ON(IS_ERR(gpmc_l3_clk));
+	if (cpu_is_omap24xx()) {
+		ck = "core_l3_ck";
+		if (cpu_is_omap2420())
+			l = OMAP2420_GPMC_BASE;
+		else
+			l = OMAP34XX_GPMC_BASE;
+	} else if (cpu_is_omap34xx()) {
+		ck = "gpmc_fck";
+		l = OMAP34XX_GPMC_BASE;
+	}
+
+	gpmc_l3_clk = clk_get(NULL, ck);
+	if (IS_ERR(gpmc_l3_clk)) {
+		printk(KERN_ERR "Could not get GPMC clock %s\n", ck);
+		BUG();
+	}
+
+	gpmc_base = ioremap(l, SZ_4K);
+	if (!gpmc_base) {
+		clk_put(gpmc_l3_clk);
+		printk(KERN_ERR "Could not get GPMC register memory\n");
+		BUG();
+	}
 
 	l = gpmc_read_reg(GPMC_REVISION);
 	printk(KERN_INFO "GPMC revision %d.%d\n", (l >> 4) & 0x0f, l & 0x0f);

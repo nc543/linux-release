@@ -18,14 +18,9 @@
    Software Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.  
 */
 
-#include <linux/module.h>
 #include <linux/raid/raid0.h>
 
-#define MAJOR_NR MD_MAJOR
-#define MD_DRIVER
-#define MD_PERSONALITY
-
-static void raid0_unplug(request_queue_t *q)
+static void raid0_unplug(struct request_queue *q)
 {
 	mddev_t *mddev = q->queuedata;
 	raid0_conf_t *conf = mddev_to_conf(mddev);
@@ -33,31 +28,10 @@ static void raid0_unplug(request_queue_t *q)
 	int i;
 
 	for (i=0; i<mddev->raid_disks; i++) {
-		request_queue_t *r_queue = bdev_get_queue(devlist[i]->bdev);
+		struct request_queue *r_queue = bdev_get_queue(devlist[i]->bdev);
 
-		if (r_queue->unplug_fn)
-			r_queue->unplug_fn(r_queue);
+		blk_unplug(r_queue);
 	}
-}
-
-static int raid0_issue_flush(request_queue_t *q, struct gendisk *disk,
-			     sector_t *error_sector)
-{
-	mddev_t *mddev = q->queuedata;
-	raid0_conf_t *conf = mddev_to_conf(mddev);
-	mdk_rdev_t **devlist = conf->strip_zone[0].dev;
-	int i, ret = 0;
-
-	for (i=0; i<mddev->raid_disks && ret == 0; i++) {
-		struct block_device *bdev = devlist[i]->bdev;
-		request_queue_t *r_queue = bdev_get_queue(bdev);
-
-		if (!r_queue->issue_flush_fn)
-			ret = -EOPNOTSUPP;
-		else
-			ret = r_queue->issue_flush_fn(r_queue, bdev->bd_disk, error_sector);
-	}
-	return ret;
 }
 
 static int raid0_congested(void *data, int bits)
@@ -68,7 +42,7 @@ static int raid0_congested(void *data, int bits)
 	int i, ret = 0;
 
 	for (i = 0; i < mddev->raid_disks && !ret ; i++) {
-		request_queue_t *q = bdev_get_queue(devlist[i]->bdev);
+		struct request_queue *q = bdev_get_queue(devlist[i]->bdev);
 
 		ret |= bdi_congested(&q->backing_dev_info, bits);
 	}
@@ -93,11 +67,11 @@ static int create_strip_zones (mddev_t *mddev)
 	 */
 	conf->nr_strip_zones = 0;
  
-	ITERATE_RDEV(mddev,rdev1,tmp1) {
+	rdev_for_each(rdev1, tmp1, mddev) {
 		printk("raid0: looking at %s\n",
 			bdevname(rdev1->bdev,b));
 		c = 0;
-		ITERATE_RDEV(mddev,rdev2,tmp2) {
+		rdev_for_each(rdev2, tmp2, mddev) {
 			printk("raid0:   comparing %s(%llu)",
 			       bdevname(rdev1->bdev,b),
 			       (unsigned long long)rdev1->size);
@@ -145,7 +119,7 @@ static int create_strip_zones (mddev_t *mddev)
 	cnt = 0;
 	smallest = NULL;
 	zone->dev = conf->devlist;
-	ITERATE_RDEV(mddev, rdev1, tmp1) {
+	rdev_for_each(rdev1, tmp1, mddev) {
 		int j = rdev1->raid_disk;
 
 		if (j < 0 || j >= mddev->raid_disks) {
@@ -250,7 +224,6 @@ static int create_strip_zones (mddev_t *mddev)
 
 	mddev->queue->unplug_fn = raid0_unplug;
 
-	mddev->queue->issue_flush_fn = raid0_issue_flush;
 	mddev->queue->backing_dev_info.congested_fn = raid0_congested;
 	mddev->queue->backing_dev_info.congested_data = mddev;
 
@@ -263,18 +236,20 @@ static int create_strip_zones (mddev_t *mddev)
 /**
  *	raid0_mergeable_bvec -- tell bio layer if a two requests can be merged
  *	@q: request queue
- *	@bio: the buffer head that's been built up so far
+ *	@bvm: properties of new bio
  *	@biovec: the request that could be merged to it.
  *
  *	Return amount of bytes we can accept at this offset
  */
-static int raid0_mergeable_bvec(request_queue_t *q, struct bio *bio, struct bio_vec *biovec)
+static int raid0_mergeable_bvec(struct request_queue *q,
+				struct bvec_merge_data *bvm,
+				struct bio_vec *biovec)
 {
 	mddev_t *mddev = q->queuedata;
-	sector_t sector = bio->bi_sector + get_start_sect(bio->bi_bdev);
+	sector_t sector = bvm->bi_sector + get_start_sect(bvm->bi_bdev);
 	int max;
 	unsigned int chunk_sectors = mddev->chunk_size >> 9;
-	unsigned int bio_sectors = bio->bi_size >> 9;
+	unsigned int bio_sectors = bvm->bi_size >> 9;
 
 	max =  (chunk_sectors - ((sector & (chunk_sectors - 1)) + bio_sectors)) << 9;
 	if (max < 0) max = 0; /* bio_add cannot handle a negative return */
@@ -302,6 +277,7 @@ static int raid0_run (mddev_t *mddev)
 	       (mddev->chunk_size>>1)-1);
 	blk_queue_max_sectors(mddev->queue, mddev->chunk_size >> 9);
 	blk_queue_segment_boundary(mddev->queue, (mddev->chunk_size>>1) - 1);
+	mddev->queue->queue_lock = &mddev->queue->__queue_lock;
 
 	conf = kmalloc(sizeof (raid0_conf_t), GFP_KERNEL);
 	if (!conf)
@@ -314,16 +290,16 @@ static int raid0_run (mddev_t *mddev)
 		goto out_free_conf;
 
 	/* calculate array device size */
-	mddev->array_size = 0;
-	ITERATE_RDEV(mddev,rdev,tmp)
-		mddev->array_size += rdev->size;
+	mddev->array_sectors = 0;
+	rdev_for_each(rdev, tmp, mddev)
+		mddev->array_sectors += rdev->size * 2;
 
 	printk("raid0 : md_size is %llu blocks.\n", 
-		(unsigned long long)mddev->array_size);
+		(unsigned long long)mddev->array_sectors / 2);
 	printk("raid0 : conf->hash_spacing is %llu blocks.\n",
 		(unsigned long long)conf->hash_spacing);
 	{
-		sector_t s = mddev->array_size;
+		sector_t s = mddev->array_sectors / 2;
 		sector_t space = conf->hash_spacing;
 		int round;
 		conf->preshift = 0;
@@ -408,7 +384,7 @@ static int raid0_stop (mddev_t *mddev)
 	return 0;
 }
 
-static int raid0_make_request (request_queue_t *q, struct bio *bio)
+static int raid0_make_request (struct request_queue *q, struct bio *bio)
 {
 	mddev_t *mddev = q->queuedata;
 	unsigned int sect_in_chunk, chunksize_bits,  chunk_size, chunk_sects;
@@ -418,14 +394,18 @@ static int raid0_make_request (request_queue_t *q, struct bio *bio)
 	sector_t chunk;
 	sector_t block, rsect;
 	const int rw = bio_data_dir(bio);
+	int cpu;
 
 	if (unlikely(bio_barrier(bio))) {
-		bio_endio(bio, bio->bi_size, -EOPNOTSUPP);
+		bio_endio(bio, -EOPNOTSUPP);
 		return 0;
 	}
 
-	disk_stat_inc(mddev->gendisk, ios[rw]);
-	disk_stat_add(mddev->gendisk, sectors[rw], bio_sectors(bio));
+	cpu = part_stat_lock();
+	part_stat_inc(cpu, &mddev->gendisk->part0, ios[rw]);
+	part_stat_add(cpu, &mddev->gendisk->part0, sectors[rw],
+		      bio_sectors(bio));
+	part_stat_unlock();
 
 	chunk_size = mddev->chunk_size >> 10;
 	chunk_sects = mddev->chunk_size >> 9;
@@ -442,7 +422,7 @@ static int raid0_make_request (request_queue_t *q, struct bio *bio)
 		/* This is a one page bio that upper layers
 		 * refuse to split for us, so we need to split it.
 		 */
-		bp = bio_split(bio, bio_split_pool, chunk_sects - (bio->bi_sector & (chunk_sects - 1)) );
+		bp = bio_split(bio, chunk_sects - (bio->bi_sector & (chunk_sects - 1)));
 		if (raid0_make_request(q, &bp->bio1))
 			generic_make_request(&bp->bio1);
 		if (raid0_make_request(q, &bp->bio2))
@@ -490,10 +470,10 @@ bad_map:
 		" or bigger than %dk %llu %d\n", chunk_size, 
 		(unsigned long long)bio->bi_sector, bio->bi_size >> 10);
 
-	bio_io_error(bio, bio->bi_size);
+	bio_io_error(bio);
 	return 0;
 }
-			   
+
 static void raid0_status (struct seq_file *seq, mddev_t *mddev)
 {
 #undef MD_DEBUG
@@ -501,18 +481,18 @@ static void raid0_status (struct seq_file *seq, mddev_t *mddev)
 	int j, k, h;
 	char b[BDEVNAME_SIZE];
 	raid0_conf_t *conf = mddev_to_conf(mddev);
-  
+
 	h = 0;
 	for (j = 0; j < conf->nr_strip_zones; j++) {
 		seq_printf(seq, "      z%d", j);
 		if (conf->hash_table[h] == conf->strip_zone+j)
-			seq_printf("(h%d)", h++);
+			seq_printf(seq, "(h%d)", h++);
 		seq_printf(seq, "=[");
 		for (k = 0; k < conf->strip_zone[j].nb_dev; k++)
-			seq_printf (seq, "%s/", bdevname(
+			seq_printf(seq, "%s/", bdevname(
 				conf->strip_zone[j].dev[k]->bdev,b));
 
-		seq_printf (seq, "] zo=%d do=%d s=%d\n",
+		seq_printf(seq, "] zo=%d do=%d s=%d\n",
 				conf->strip_zone[j].zone_offset,
 				conf->strip_zone[j].dev_offset,
 				conf->strip_zone[j].size);

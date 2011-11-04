@@ -5,8 +5,6 @@
  *	Authors:
  *	Lennert Buytenhek		<buytenh@gnu.org>
  *
- *	$Id: br_forward.c,v 1.4 2001/08/14 22:05:57 davem Exp $
- *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
  *	as published by the Free Software Foundation; either version
@@ -91,7 +89,7 @@ void br_deliver(const struct net_bridge_port *to, struct sk_buff *skb)
 /* called with rcu_read_lock */
 void br_forward(const struct net_bridge_port *to, struct sk_buff *skb)
 {
-	if (should_deliver(to, skb)) {
+	if (!skb_warn_if_lro(skb) && should_deliver(to, skb)) {
 		__br_forward(to, skb);
 		return;
 	}
@@ -100,23 +98,12 @@ void br_forward(const struct net_bridge_port *to, struct sk_buff *skb)
 }
 
 /* called under bridge lock */
-static void br_flood(struct net_bridge *br, struct sk_buff *skb, int clone,
+static void br_flood(struct net_bridge *br, struct sk_buff *skb,
 	void (*__packet_hook)(const struct net_bridge_port *p,
 			      struct sk_buff *skb))
 {
 	struct net_bridge_port *p;
 	struct net_bridge_port *prev;
-
-	if (clone) {
-		struct sk_buff *skb2;
-
-		if ((skb2 = skb_clone(skb, GFP_ATOMIC)) == NULL) {
-			br->statistics.tx_dropped++;
-			return;
-		}
-
-		skb = skb2;
-	}
 
 	prev = NULL;
 
@@ -126,7 +113,7 @@ static void br_flood(struct net_bridge *br, struct sk_buff *skb, int clone,
 				struct sk_buff *skb2;
 
 				if ((skb2 = skb_clone(skb, GFP_ATOMIC)) == NULL) {
-					br->statistics.tx_dropped++;
+					br->dev->stats.tx_dropped++;
 					kfree_skb(skb);
 					return;
 				}
@@ -148,13 +135,13 @@ static void br_flood(struct net_bridge *br, struct sk_buff *skb, int clone,
 
 
 /* called with rcu_read_lock */
-void br_flood_deliver(struct net_bridge *br, struct sk_buff *skb, int clone)
+void br_flood_deliver(struct net_bridge *br, struct sk_buff *skb)
 {
-	br_flood(br, skb, clone, __br_deliver);
+	br_flood(br, skb, __br_deliver);
 }
 
 /* called under bridge lock */
-void br_flood_forward(struct net_bridge *br, struct sk_buff *skb, int clone)
+void br_flood_forward(struct net_bridge *br, struct sk_buff *skb)
 {
-	br_flood(br, skb, clone, __br_forward);
+	br_flood(br, skb, __br_forward);
 }

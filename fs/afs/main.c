@@ -22,7 +22,7 @@ MODULE_LICENSE("GPL");
 
 unsigned afs_debug;
 module_param_named(debug, afs_debug, uint, S_IWUSR | S_IRUGO);
-MODULE_PARM_DESC(afs_debug, "AFS debugging mask");
+MODULE_PARM_DESC(debug, "AFS debugging mask");
 
 static char *rootcell;
 
@@ -168,6 +168,7 @@ static void __exit afs_exit(void)
 	printk(KERN_INFO "kAFS: Red Hat AFS client v0.1 unregistering.\n");
 
 	afs_fs_exit();
+	afs_kill_lock_manager();
 	afs_close_socket();
 	afs_purge_servers();
 	afs_callback_update_kill();

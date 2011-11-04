@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *  Routines for control of ESS ES1688/688/488 chip
  *
  *
@@ -19,7 +19,6 @@
  *
  */
 
-#include <sound/driver.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
@@ -32,7 +31,7 @@
 #include <asm/io.h>
 #include <asm/dma.h>
 
-MODULE_AUTHOR("Jaroslav Kysela <perex@suse.cz>");
+MODULE_AUTHOR("Jaroslav Kysela <perex@perex.cz>");
 MODULE_DESCRIPTION("ESS ESx688 lowlevel module");
 MODULE_LICENSE("GPL");
 
@@ -1010,7 +1009,8 @@ int snd_es1688_mixer(struct snd_es1688 *chip)
 	int err;
 	unsigned char reg, val;
 
-	snd_assert(chip != NULL && chip->card != NULL, return -EINVAL);
+	if (snd_BUG_ON(!chip || !chip->card))
+		return -EINVAL;
 
 	card = chip->card;
 

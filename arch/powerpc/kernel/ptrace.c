@@ -21,6 +21,9 @@
 #include <linux/smp.h>
 #include <linux/errno.h>
 #include <linux/ptrace.h>
+#include <linux/regset.h>
+#include <linux/tracehook.h>
+#include <linux/elf.h>
 #include <linux/user.h>
 #include <linux/security.h>
 #include <linux/signal.h>
@@ -35,11 +38,11 @@
 #include <asm/pgtable.h>
 #include <asm/system.h>
 
-#ifdef CONFIG_PPC64
-#include "ptrace-common.h"
-#endif
+/*
+ * does not yet catch signals sent when the child dies.
+ * in exit.c or in signal.c.
+ */
 
-#ifdef CONFIG_PPC32
 /*
  * Set of msr bits that gdb can change on behalf of a process.
  */
@@ -48,98 +51,355 @@
 #else
 #define MSR_DEBUGCHANGE	(MSR_SE | MSR_BE)
 #endif
-#endif /* CONFIG_PPC32 */
 
 /*
- * does not yet catch signals sent when the child dies.
- * in exit.c or in signal.c.
+ * Max register writeable via put_reg
  */
-
 #ifdef CONFIG_PPC32
+#define PT_MAX_PUT_REG	PT_MQ
+#else
+#define PT_MAX_PUT_REG	PT_CCR
+#endif
+
+static unsigned long get_user_msr(struct task_struct *task)
+{
+	return task->thread.regs->msr | task->thread.fpexc_mode;
+}
+
+static int set_user_msr(struct task_struct *task, unsigned long msr)
+{
+	task->thread.regs->msr &= ~MSR_DEBUGCHANGE;
+	task->thread.regs->msr |= msr & MSR_DEBUGCHANGE;
+	return 0;
+}
+
+/*
+ * We prevent mucking around with the reserved area of trap
+ * which are used internally by the kernel.
+ */
+static int set_user_trap(struct task_struct *task, unsigned long trap)
+{
+	task->thread.regs->trap = trap & 0xfff0;
+	return 0;
+}
+
 /*
  * Get contents of register REGNO in task TASK.
  */
-static inline unsigned long get_reg(struct task_struct *task, int regno)
+unsigned long ptrace_get_reg(struct task_struct *task, int regno)
 {
-	if (regno < sizeof(struct pt_regs) / sizeof(unsigned long)
-	    && task->thread.regs != NULL)
+	if (task->thread.regs == NULL)
+		return -EIO;
+
+	if (regno == PT_MSR)
+		return get_user_msr(task);
+
+	if (regno < (sizeof(struct pt_regs) / sizeof(unsigned long)))
 		return ((unsigned long *)task->thread.regs)[regno];
-	return (0);
+
+	return -EIO;
 }
 
 /*
  * Write contents of register REGNO in task TASK.
  */
-static inline int put_reg(struct task_struct *task, int regno,
-			  unsigned long data)
+int ptrace_put_reg(struct task_struct *task, int regno, unsigned long data)
 {
-	if (regno <= PT_MQ && task->thread.regs != NULL) {
-		if (regno == PT_MSR)
-			data = (data & MSR_DEBUGCHANGE)
-				| (task->thread.regs->msr & ~MSR_DEBUGCHANGE);
+	if (task->thread.regs == NULL)
+		return -EIO;
+
+	if (regno == PT_MSR)
+		return set_user_msr(task, data);
+	if (regno == PT_TRAP)
+		return set_user_trap(task, data);
+
+	if (regno <= PT_MAX_PUT_REG) {
 		((unsigned long *)task->thread.regs)[regno] = data;
 		return 0;
 	}
 	return -EIO;
 }
 
+static int gpr_get(struct task_struct *target, const struct user_regset *regset,
+		   unsigned int pos, unsigned int count,
+		   void *kbuf, void __user *ubuf)
+{
+	int ret;
+
+	if (target->thread.regs == NULL)
+		return -EIO;
+
+	CHECK_FULL_REGS(target->thread.regs);
+
+	ret = user_regset_copyout(&pos, &count, &kbuf, &ubuf,
+				  target->thread.regs,
+				  0, offsetof(struct pt_regs, msr));
+	if (!ret) {
+		unsigned long msr = get_user_msr(target);
+		ret = user_regset_copyout(&pos, &count, &kbuf, &ubuf, &msr,
+					  offsetof(struct pt_regs, msr),
+					  offsetof(struct pt_regs, msr) +
+					  sizeof(msr));
+	}
+
+	BUILD_BUG_ON(offsetof(struct pt_regs, orig_gpr3) !=
+		     offsetof(struct pt_regs, msr) + sizeof(long));
+
+	if (!ret)
+		ret = user_regset_copyout(&pos, &count, &kbuf, &ubuf,
+					  &target->thread.regs->orig_gpr3,
+					  offsetof(struct pt_regs, orig_gpr3),
+					  sizeof(struct pt_regs));
+	if (!ret)
+		ret = user_regset_copyout_zero(&pos, &count, &kbuf, &ubuf,
+					       sizeof(struct pt_regs), -1);
+
+	return ret;
+}
+
+static int gpr_set(struct task_struct *target, const struct user_regset *regset,
+		   unsigned int pos, unsigned int count,
+		   const void *kbuf, const void __user *ubuf)
+{
+	unsigned long reg;
+	int ret;
+
+	if (target->thread.regs == NULL)
+		return -EIO;
+
+	CHECK_FULL_REGS(target->thread.regs);
+
+	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf,
+				 target->thread.regs,
+				 0, PT_MSR * sizeof(reg));
+
+	if (!ret && count > 0) {
+		ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf, &reg,
+					 PT_MSR * sizeof(reg),
+					 (PT_MSR + 1) * sizeof(reg));
+		if (!ret)
+			ret = set_user_msr(target, reg);
+	}
+
+	BUILD_BUG_ON(offsetof(struct pt_regs, orig_gpr3) !=
+		     offsetof(struct pt_regs, msr) + sizeof(long));
+
+	if (!ret)
+		ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf,
+					 &target->thread.regs->orig_gpr3,
+					 PT_ORIG_R3 * sizeof(reg),
+					 (PT_MAX_PUT_REG + 1) * sizeof(reg));
+
+	if (PT_MAX_PUT_REG + 1 < PT_TRAP && !ret)
+		ret = user_regset_copyin_ignore(
+			&pos, &count, &kbuf, &ubuf,
+			(PT_MAX_PUT_REG + 1) * sizeof(reg),
+			PT_TRAP * sizeof(reg));
+
+	if (!ret && count > 0) {
+		ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf, &reg,
+					 PT_TRAP * sizeof(reg),
+					 (PT_TRAP + 1) * sizeof(reg));
+		if (!ret)
+			ret = set_user_trap(target, reg);
+	}
+
+	if (!ret)
+		ret = user_regset_copyin_ignore(
+			&pos, &count, &kbuf, &ubuf,
+			(PT_TRAP + 1) * sizeof(reg), -1);
+
+	return ret;
+}
+
+static int fpr_get(struct task_struct *target, const struct user_regset *regset,
+		   unsigned int pos, unsigned int count,
+		   void *kbuf, void __user *ubuf)
+{
+#ifdef CONFIG_VSX
+	double buf[33];
+	int i;
+#endif
+	flush_fp_to_thread(target);
+
+#ifdef CONFIG_VSX
+	/* copy to local buffer then write that out */
+	for (i = 0; i < 32 ; i++)
+		buf[i] = target->thread.TS_FPR(i);
+	memcpy(&buf[32], &target->thread.fpscr, sizeof(double));
+	return user_regset_copyout(&pos, &count, &kbuf, &ubuf, buf, 0, -1);
+
+#else
+	BUILD_BUG_ON(offsetof(struct thread_struct, fpscr) !=
+		     offsetof(struct thread_struct, TS_FPR(32)));
+
+	return user_regset_copyout(&pos, &count, &kbuf, &ubuf,
+				   &target->thread.fpr, 0, -1);
+#endif
+}
+
+static int fpr_set(struct task_struct *target, const struct user_regset *regset,
+		   unsigned int pos, unsigned int count,
+		   const void *kbuf, const void __user *ubuf)
+{
+#ifdef CONFIG_VSX
+	double buf[33];
+	int i;
+#endif
+	flush_fp_to_thread(target);
+
+#ifdef CONFIG_VSX
+	/* copy to local buffer then write that out */
+	i = user_regset_copyin(&pos, &count, &kbuf, &ubuf, buf, 0, -1);
+	if (i)
+		return i;
+	for (i = 0; i < 32 ; i++)
+		target->thread.TS_FPR(i) = buf[i];
+	memcpy(&target->thread.fpscr, &buf[32], sizeof(double));
+	return 0;
+#else
+	BUILD_BUG_ON(offsetof(struct thread_struct, fpscr) !=
+		     offsetof(struct thread_struct, TS_FPR(32)));
+
+	return user_regset_copyin(&pos, &count, &kbuf, &ubuf,
+				  &target->thread.fpr, 0, -1);
+#endif
+}
+
 #ifdef CONFIG_ALTIVEC
 /*
- * Get contents of AltiVec register state in task TASK
+ * Get/set all the altivec registers vr0..vr31, vscr, vrsave, in one go.
+ * The transfer totals 34 quadword.  Quadwords 0-31 contain the
+ * corresponding vector registers.  Quadword 32 contains the vscr as the
+ * last word (offset 12) within that quadword.  Quadword 33 contains the
+ * vrsave as the first word (offset 0) within the quadword.
+ *
+ * This definition of the VMX state is compatible with the current PPC32
+ * ptrace interface.  This allows signal handling and ptrace to use the
+ * same structures.  This also simplifies the implementation of a bi-arch
+ * (combined (32- and 64-bit) gdb.
  */
-static inline int get_vrregs(unsigned long __user *data, struct task_struct *task)
+
+static int vr_active(struct task_struct *target,
+		     const struct user_regset *regset)
 {
-	int i, j;
-
-	if (!access_ok(VERIFY_WRITE, data, 133 * sizeof(unsigned long)))
-		return -EFAULT;
-
-	/* copy AltiVec registers VR[0] .. VR[31] */
-	for (i = 0; i < 32; i++)
-		for (j = 0; j < 4; j++, data++)
-			if (__put_user(task->thread.vr[i].u[j], data))
-				return -EFAULT;
-
-	/* copy VSCR */
-	for (i = 0; i < 4; i++, data++)
-		if (__put_user(task->thread.vscr.u[i], data))
-			return -EFAULT;
-
-        /* copy VRSAVE */
-	if (__put_user(task->thread.vrsave, data))
-		return -EFAULT;
-
-	return 0;
+	flush_altivec_to_thread(target);
+	return target->thread.used_vr ? regset->n : 0;
 }
 
+static int vr_get(struct task_struct *target, const struct user_regset *regset,
+		  unsigned int pos, unsigned int count,
+		  void *kbuf, void __user *ubuf)
+{
+	int ret;
+
+	flush_altivec_to_thread(target);
+
+	BUILD_BUG_ON(offsetof(struct thread_struct, vscr) !=
+		     offsetof(struct thread_struct, vr[32]));
+
+	ret = user_regset_copyout(&pos, &count, &kbuf, &ubuf,
+				  &target->thread.vr, 0,
+				  33 * sizeof(vector128));
+	if (!ret) {
+		/*
+		 * Copy out only the low-order word of vrsave.
+		 */
+		union {
+			elf_vrreg_t reg;
+			u32 word;
+		} vrsave;
+		memset(&vrsave, 0, sizeof(vrsave));
+		vrsave.word = target->thread.vrsave;
+		ret = user_regset_copyout(&pos, &count, &kbuf, &ubuf, &vrsave,
+					  33 * sizeof(vector128), -1);
+	}
+
+	return ret;
+}
+
+static int vr_set(struct task_struct *target, const struct user_regset *regset,
+		  unsigned int pos, unsigned int count,
+		  const void *kbuf, const void __user *ubuf)
+{
+	int ret;
+
+	flush_altivec_to_thread(target);
+
+	BUILD_BUG_ON(offsetof(struct thread_struct, vscr) !=
+		     offsetof(struct thread_struct, vr[32]));
+
+	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf,
+				 &target->thread.vr, 0, 33 * sizeof(vector128));
+	if (!ret && count > 0) {
+		/*
+		 * We use only the first word of vrsave.
+		 */
+		union {
+			elf_vrreg_t reg;
+			u32 word;
+		} vrsave;
+		memset(&vrsave, 0, sizeof(vrsave));
+		vrsave.word = target->thread.vrsave;
+		ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf, &vrsave,
+					 33 * sizeof(vector128), -1);
+		if (!ret)
+			target->thread.vrsave = vrsave.word;
+	}
+
+	return ret;
+}
+#endif /* CONFIG_ALTIVEC */
+
+#ifdef CONFIG_VSX
 /*
- * Write contents of AltiVec register state into task TASK.
+ * Currently to set and and get all the vsx state, you need to call
+ * the fp and VMX calls aswell.  This only get/sets the lower 32
+ * 128bit VSX registers.
  */
-static inline int set_vrregs(struct task_struct *task, unsigned long __user *data)
+
+static int vsr_active(struct task_struct *target,
+		      const struct user_regset *regset)
 {
-	int i, j;
-
-	if (!access_ok(VERIFY_READ, data, 133 * sizeof(unsigned long)))
-		return -EFAULT;
-
-	/* copy AltiVec registers VR[0] .. VR[31] */
-	for (i = 0; i < 32; i++)
-		for (j = 0; j < 4; j++, data++)
-			if (__get_user(task->thread.vr[i].u[j], data))
-				return -EFAULT;
-
-	/* copy VSCR */
-	for (i = 0; i < 4; i++, data++)
-		if (__get_user(task->thread.vscr.u[i], data))
-			return -EFAULT;
-
-	/* copy VRSAVE */
-	if (__get_user(task->thread.vrsave, data))
-		return -EFAULT;
-
-	return 0;
+	flush_vsx_to_thread(target);
+	return target->thread.used_vsr ? regset->n : 0;
 }
-#endif
+
+static int vsr_get(struct task_struct *target, const struct user_regset *regset,
+		   unsigned int pos, unsigned int count,
+		   void *kbuf, void __user *ubuf)
+{
+	double buf[32];
+	int ret, i;
+
+	flush_vsx_to_thread(target);
+
+	for (i = 0; i < 32 ; i++)
+		buf[i] = target->thread.fpr[i][TS_VSRLOWOFFSET];
+	ret = user_regset_copyout(&pos, &count, &kbuf, &ubuf,
+				  buf, 0, 32 * sizeof(double));
+
+	return ret;
+}
+
+static int vsr_set(struct task_struct *target, const struct user_regset *regset,
+		   unsigned int pos, unsigned int count,
+		   const void *kbuf, const void __user *ubuf)
+{
+	double buf[32];
+	int ret,i;
+
+	flush_vsx_to_thread(target);
+
+	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf,
+				 buf, 0, 32 * sizeof(double));
+	for (i = 0; i < 32 ; i++)
+		target->thread.fpr[i][TS_VSRLOWOFFSET] = buf[i];
+
+
+	return ret;
+}
+#endif /* CONFIG_VSX */
 
 #ifdef CONFIG_SPE
 
@@ -153,66 +413,298 @@ static inline int set_vrregs(struct task_struct *task, unsigned long __user *dat
  * }
  */
 
-/*
- * Get contents of SPE register state in task TASK.
- */
-static inline int get_evrregs(unsigned long *data, struct task_struct *task)
+static int evr_active(struct task_struct *target,
+		      const struct user_regset *regset)
 {
-	int i;
-
-	if (!access_ok(VERIFY_WRITE, data, 35 * sizeof(unsigned long)))
-		return -EFAULT;
-
-	/* copy SPEFSCR */
-	if (__put_user(task->thread.spefscr, &data[34]))
-		return -EFAULT;
-
-	/* copy SPE registers EVR[0] .. EVR[31] */
-	for (i = 0; i < 32; i++, data++)
-		if (__put_user(task->thread.evr[i], data))
-			return -EFAULT;
-
-	/* copy ACC */
-	if (__put_user64(task->thread.acc, (unsigned long long *)data))
-		return -EFAULT;
-
-	return 0;
+	flush_spe_to_thread(target);
+	return target->thread.used_spe ? regset->n : 0;
 }
 
-/*
- * Write contents of SPE register state into task TASK.
- */
-static inline int set_evrregs(struct task_struct *task, unsigned long *data)
+static int evr_get(struct task_struct *target, const struct user_regset *regset,
+		   unsigned int pos, unsigned int count,
+		   void *kbuf, void __user *ubuf)
 {
-	int i;
+	int ret;
 
-	if (!access_ok(VERIFY_READ, data, 35 * sizeof(unsigned long)))
-		return -EFAULT;
+	flush_spe_to_thread(target);
 
-	/* copy SPEFSCR */
-	if (__get_user(task->thread.spefscr, &data[34]))
-		return -EFAULT;
+	ret = user_regset_copyout(&pos, &count, &kbuf, &ubuf,
+				  &target->thread.evr,
+				  0, sizeof(target->thread.evr));
 
-	/* copy SPE registers EVR[0] .. EVR[31] */
-	for (i = 0; i < 32; i++, data++)
-		if (__get_user(task->thread.evr[i], data))
-			return -EFAULT;
-	/* copy ACC */
-	if (__get_user64(task->thread.acc, (unsigned long long*)data))
-		return -EFAULT;
+	BUILD_BUG_ON(offsetof(struct thread_struct, acc) + sizeof(u64) !=
+		     offsetof(struct thread_struct, spefscr));
 
-	return 0;
+	if (!ret)
+		ret = user_regset_copyout(&pos, &count, &kbuf, &ubuf,
+					  &target->thread.acc,
+					  sizeof(target->thread.evr), -1);
+
+	return ret;
+}
+
+static int evr_set(struct task_struct *target, const struct user_regset *regset,
+		   unsigned int pos, unsigned int count,
+		   const void *kbuf, const void __user *ubuf)
+{
+	int ret;
+
+	flush_spe_to_thread(target);
+
+	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf,
+				 &target->thread.evr,
+				 0, sizeof(target->thread.evr));
+
+	BUILD_BUG_ON(offsetof(struct thread_struct, acc) + sizeof(u64) !=
+		     offsetof(struct thread_struct, spefscr));
+
+	if (!ret)
+		ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf,
+					 &target->thread.acc,
+					 sizeof(target->thread.evr), -1);
+
+	return ret;
 }
 #endif /* CONFIG_SPE */
 
-static inline void
-set_single_step(struct task_struct *task)
+
+/*
+ * These are our native regset flavors.
+ */
+enum powerpc_regset {
+	REGSET_GPR,
+	REGSET_FPR,
+#ifdef CONFIG_ALTIVEC
+	REGSET_VMX,
+#endif
+#ifdef CONFIG_VSX
+	REGSET_VSX,
+#endif
+#ifdef CONFIG_SPE
+	REGSET_SPE,
+#endif
+};
+
+static const struct user_regset native_regsets[] = {
+	[REGSET_GPR] = {
+		.core_note_type = NT_PRSTATUS, .n = ELF_NGREG,
+		.size = sizeof(long), .align = sizeof(long),
+		.get = gpr_get, .set = gpr_set
+	},
+	[REGSET_FPR] = {
+		.core_note_type = NT_PRFPREG, .n = ELF_NFPREG,
+		.size = sizeof(double), .align = sizeof(double),
+		.get = fpr_get, .set = fpr_set
+	},
+#ifdef CONFIG_ALTIVEC
+	[REGSET_VMX] = {
+		.core_note_type = NT_PPC_VMX, .n = 34,
+		.size = sizeof(vector128), .align = sizeof(vector128),
+		.active = vr_active, .get = vr_get, .set = vr_set
+	},
+#endif
+#ifdef CONFIG_VSX
+	[REGSET_VSX] = {
+		.core_note_type = NT_PPC_VSX, .n = 32,
+		.size = sizeof(double), .align = sizeof(double),
+		.active = vsr_active, .get = vsr_get, .set = vsr_set
+	},
+#endif
+#ifdef CONFIG_SPE
+	[REGSET_SPE] = {
+		.n = 35,
+		.size = sizeof(u32), .align = sizeof(u32),
+		.active = evr_active, .get = evr_get, .set = evr_set
+	},
+#endif
+};
+
+static const struct user_regset_view user_ppc_native_view = {
+	.name = UTS_MACHINE, .e_machine = ELF_ARCH, .ei_osabi = ELF_OSABI,
+	.regsets = native_regsets, .n = ARRAY_SIZE(native_regsets)
+};
+
+#ifdef CONFIG_PPC64
+#include <linux/compat.h>
+
+static int gpr32_get(struct task_struct *target,
+		     const struct user_regset *regset,
+		     unsigned int pos, unsigned int count,
+		     void *kbuf, void __user *ubuf)
+{
+	const unsigned long *regs = &target->thread.regs->gpr[0];
+	compat_ulong_t *k = kbuf;
+	compat_ulong_t __user *u = ubuf;
+	compat_ulong_t reg;
+
+	if (target->thread.regs == NULL)
+		return -EIO;
+
+	CHECK_FULL_REGS(target->thread.regs);
+
+	pos /= sizeof(reg);
+	count /= sizeof(reg);
+
+	if (kbuf)
+		for (; count > 0 && pos < PT_MSR; --count)
+			*k++ = regs[pos++];
+	else
+		for (; count > 0 && pos < PT_MSR; --count)
+			if (__put_user((compat_ulong_t) regs[pos++], u++))
+				return -EFAULT;
+
+	if (count > 0 && pos == PT_MSR) {
+		reg = get_user_msr(target);
+		if (kbuf)
+			*k++ = reg;
+		else if (__put_user(reg, u++))
+			return -EFAULT;
+		++pos;
+		--count;
+	}
+
+	if (kbuf)
+		for (; count > 0 && pos < PT_REGS_COUNT; --count)
+			*k++ = regs[pos++];
+	else
+		for (; count > 0 && pos < PT_REGS_COUNT; --count)
+			if (__put_user((compat_ulong_t) regs[pos++], u++))
+				return -EFAULT;
+
+	kbuf = k;
+	ubuf = u;
+	pos *= sizeof(reg);
+	count *= sizeof(reg);
+	return user_regset_copyout_zero(&pos, &count, &kbuf, &ubuf,
+					PT_REGS_COUNT * sizeof(reg), -1);
+}
+
+static int gpr32_set(struct task_struct *target,
+		     const struct user_regset *regset,
+		     unsigned int pos, unsigned int count,
+		     const void *kbuf, const void __user *ubuf)
+{
+	unsigned long *regs = &target->thread.regs->gpr[0];
+	const compat_ulong_t *k = kbuf;
+	const compat_ulong_t __user *u = ubuf;
+	compat_ulong_t reg;
+
+	if (target->thread.regs == NULL)
+		return -EIO;
+
+	CHECK_FULL_REGS(target->thread.regs);
+
+	pos /= sizeof(reg);
+	count /= sizeof(reg);
+
+	if (kbuf)
+		for (; count > 0 && pos < PT_MSR; --count)
+			regs[pos++] = *k++;
+	else
+		for (; count > 0 && pos < PT_MSR; --count) {
+			if (__get_user(reg, u++))
+				return -EFAULT;
+			regs[pos++] = reg;
+		}
+
+
+	if (count > 0 && pos == PT_MSR) {
+		if (kbuf)
+			reg = *k++;
+		else if (__get_user(reg, u++))
+			return -EFAULT;
+		set_user_msr(target, reg);
+		++pos;
+		--count;
+	}
+
+	if (kbuf) {
+		for (; count > 0 && pos <= PT_MAX_PUT_REG; --count)
+			regs[pos++] = *k++;
+		for (; count > 0 && pos < PT_TRAP; --count, ++pos)
+			++k;
+	} else {
+		for (; count > 0 && pos <= PT_MAX_PUT_REG; --count) {
+			if (__get_user(reg, u++))
+				return -EFAULT;
+			regs[pos++] = reg;
+		}
+		for (; count > 0 && pos < PT_TRAP; --count, ++pos)
+			if (__get_user(reg, u++))
+				return -EFAULT;
+	}
+
+	if (count > 0 && pos == PT_TRAP) {
+		if (kbuf)
+			reg = *k++;
+		else if (__get_user(reg, u++))
+			return -EFAULT;
+		set_user_trap(target, reg);
+		++pos;
+		--count;
+	}
+
+	kbuf = k;
+	ubuf = u;
+	pos *= sizeof(reg);
+	count *= sizeof(reg);
+	return user_regset_copyin_ignore(&pos, &count, &kbuf, &ubuf,
+					 (PT_TRAP + 1) * sizeof(reg), -1);
+}
+
+/*
+ * These are the regset flavors matching the CONFIG_PPC32 native set.
+ */
+static const struct user_regset compat_regsets[] = {
+	[REGSET_GPR] = {
+		.core_note_type = NT_PRSTATUS, .n = ELF_NGREG,
+		.size = sizeof(compat_long_t), .align = sizeof(compat_long_t),
+		.get = gpr32_get, .set = gpr32_set
+	},
+	[REGSET_FPR] = {
+		.core_note_type = NT_PRFPREG, .n = ELF_NFPREG,
+		.size = sizeof(double), .align = sizeof(double),
+		.get = fpr_get, .set = fpr_set
+	},
+#ifdef CONFIG_ALTIVEC
+	[REGSET_VMX] = {
+		.core_note_type = NT_PPC_VMX, .n = 34,
+		.size = sizeof(vector128), .align = sizeof(vector128),
+		.active = vr_active, .get = vr_get, .set = vr_set
+	},
+#endif
+#ifdef CONFIG_SPE
+	[REGSET_SPE] = {
+		.core_note_type = NT_PPC_SPE, .n = 35,
+		.size = sizeof(u32), .align = sizeof(u32),
+		.active = evr_active, .get = evr_get, .set = evr_set
+	},
+#endif
+};
+
+static const struct user_regset_view user_ppc_compat_view = {
+	.name = "ppc", .e_machine = EM_PPC, .ei_osabi = ELF_OSABI,
+	.regsets = compat_regsets, .n = ARRAY_SIZE(compat_regsets)
+};
+#endif	/* CONFIG_PPC64 */
+
+const struct user_regset_view *task_user_regset_view(struct task_struct *task)
+{
+#ifdef CONFIG_PPC64
+	if (test_tsk_thread_flag(task, TIF_32BIT))
+		return &user_ppc_compat_view;
+#endif
+	return &user_ppc_native_view;
+}
+
+
+void user_enable_single_step(struct task_struct *task)
 {
 	struct pt_regs *regs = task->thread.regs;
 
 	if (regs != NULL) {
 #if defined(CONFIG_40x) || defined(CONFIG_BOOKE)
-		task->thread.dbcr0 = DBCR0_IDM | DBCR0_IC;
+		task->thread.dbcr0 |= DBCR0_IDM | DBCR0_IC;
 		regs->msr |= MSR_DE;
 #else
 		regs->msr |= MSR_SE;
@@ -221,14 +713,20 @@ set_single_step(struct task_struct *task)
 	set_tsk_thread_flag(task, TIF_SINGLESTEP);
 }
 
-static inline void
-clear_single_step(struct task_struct *task)
+void user_disable_single_step(struct task_struct *task)
 {
 	struct pt_regs *regs = task->thread.regs;
 
+
+#if defined(CONFIG_BOOKE)
+	/* If DAC then do not single step, skip */
+	if (task->thread.dabr)
+		return;
+#endif
+
 	if (regs != NULL) {
 #if defined(CONFIG_40x) || defined(CONFIG_BOOKE)
-		task->thread.dbcr0 = 0;
+		task->thread.dbcr0 &= ~(DBCR0_IC | DBCR0_IDM);
 		regs->msr &= ~MSR_DE;
 #else
 		regs->msr &= ~MSR_SE;
@@ -236,7 +734,79 @@ clear_single_step(struct task_struct *task)
 	}
 	clear_tsk_thread_flag(task, TIF_SINGLESTEP);
 }
-#endif /* CONFIG_PPC32 */
+
+int ptrace_set_debugreg(struct task_struct *task, unsigned long addr,
+			       unsigned long data)
+{
+	/* For ppc64 we support one DABR and no IABR's at the moment (ppc64).
+	 *  For embedded processors we support one DAC and no IAC's at the
+	 *  moment.
+	 */
+	if (addr > 0)
+		return -EINVAL;
+
+	/* The bottom 3 bits in dabr are flags */
+	if ((data & ~0x7UL) >= TASK_SIZE)
+		return -EIO;
+
+#ifndef CONFIG_BOOKE
+
+	/* For processors using DABR (i.e. 970), the bottom 3 bits are flags.
+	 *  It was assumed, on previous implementations, that 3 bits were
+	 *  passed together with the data address, fitting the design of the
+	 *  DABR register, as follows:
+	 *
+	 *  bit 0: Read flag
+	 *  bit 1: Write flag
+	 *  bit 2: Breakpoint translation
+	 *
+	 *  Thus, we use them here as so.
+	 */
+
+	/* Ensure breakpoint translation bit is set */
+	if (data && !(data & DABR_TRANSLATION))
+		return -EIO;
+
+	/* Move contents to the DABR register */
+	task->thread.dabr = data;
+
+#endif
+#if defined(CONFIG_BOOKE)
+
+	/* As described above, it was assumed 3 bits were passed with the data
+	 *  address, but we will assume only the mode bits will be passed
+	 *  as to not cause alignment restrictions for DAC-based processors.
+	 */
+
+	/* DAC's hold the whole address without any mode flags */
+	task->thread.dabr = data & ~0x3UL;
+
+	if (task->thread.dabr == 0) {
+		task->thread.dbcr0 &= ~(DBSR_DAC1R | DBSR_DAC1W | DBCR0_IDM);
+		task->thread.regs->msr &= ~MSR_DE;
+		return 0;
+	}
+
+	/* Read or Write bits must be set */
+
+	if (!(data & 0x3UL))
+		return -EINVAL;
+
+	/* Set the Internal Debugging flag (IDM bit 1) for the DBCR0
+	   register */
+	task->thread.dbcr0 = DBCR0_IDM;
+
+	/* Check for write and read flags and set DBCR0
+	   accordingly */
+	if (data & 0x1UL)
+		task->thread.dbcr0 |= DBSR_DAC1R;
+	if (data & 0x2UL)
+		task->thread.dbcr0 |= DBSR_DAC1W;
+
+	task->thread.regs->msr |= MSR_DE;
+#endif
+	return 0;
+}
 
 /*
  * Called by kernel/ptrace.c when detaching..
@@ -246,7 +816,39 @@ clear_single_step(struct task_struct *task)
 void ptrace_disable(struct task_struct *child)
 {
 	/* make sure the single step bit is not set. */
-	clear_single_step(child);
+	user_disable_single_step(child);
+}
+
+/*
+ * Here are the old "legacy" powerpc specific getregs/setregs ptrace calls,
+ * we mark them as obsolete now, they will be removed in a future version
+ */
+static long arch_ptrace_old(struct task_struct *child, long request, long addr,
+			    long data)
+{
+	switch (request) {
+	case PPC_PTRACE_GETREGS:	/* Get GPRs 0 - 31. */
+		return copy_regset_to_user(child, &user_ppc_native_view,
+					   REGSET_GPR, 0, 32 * sizeof(long),
+					   (void __user *) data);
+
+	case PPC_PTRACE_SETREGS:	/* Set GPRs 0 - 31. */
+		return copy_regset_from_user(child, &user_ppc_native_view,
+					     REGSET_GPR, 0, 32 * sizeof(long),
+					     (const void __user *) data);
+
+	case PPC_PTRACE_GETFPREGS:	/* Get FPRs 0 - 31. */
+		return copy_regset_to_user(child, &user_ppc_native_view,
+					   REGSET_FPR, 0, 32 * sizeof(double),
+					   (void __user *) data);
+
+	case PPC_PTRACE_SETFPREGS:	/* Set FPRs 0 - 31. */
+		return copy_regset_from_user(child, &user_ppc_native_view,
+					     REGSET_FPR, 0, 32 * sizeof(double),
+					     (const void __user *) data);
+	}
+
+	return -EPERM;
 }
 
 long arch_ptrace(struct task_struct *child, long request, long addr, long data)
@@ -254,20 +856,6 @@ long arch_ptrace(struct task_struct *child, long request, long addr, long data)
 	int ret = -EPERM;
 
 	switch (request) {
-	/* when I and D space are separate, these will need to be fixed. */
-	case PTRACE_PEEKTEXT: /* read word at location addr. */
-	case PTRACE_PEEKDATA: {
-		unsigned long tmp;
-		int copied;
-
-		copied = access_process_vm(child, addr, &tmp, sizeof(tmp), 0);
-		ret = -EIO;
-		if (copied != sizeof(tmp))
-			break;
-		ret = put_user(tmp,(unsigned long __user *) data);
-		break;
-	}
-
 	/* read the word at location addr in the USER area. */
 	case PTRACE_PEEKUSR: {
 		unsigned long index, tmp;
@@ -284,28 +872,17 @@ long arch_ptrace(struct task_struct *child, long request, long addr, long data)
 #endif
 			break;
 
-#ifdef CONFIG_PPC32
 		CHECK_FULL_REGS(child->thread.regs);
-#endif
 		if (index < PT_FPR0) {
-			tmp = get_reg(child, (int) index);
+			tmp = ptrace_get_reg(child, (int) index);
 		} else {
 			flush_fp_to_thread(child);
-			tmp = ((unsigned long *)child->thread.fpr)[index - PT_FPR0];
+			tmp = ((unsigned long *)child->thread.fpr)
+				[TS_FPRWIDTH * (index - PT_FPR0)];
 		}
 		ret = put_user(tmp,(unsigned long __user *) data);
 		break;
 	}
-
-	/* If I and D space are separate, this will have to be fixed. */
-	case PTRACE_POKETEXT: /* write the word at location addr. */
-	case PTRACE_POKEDATA:
-		ret = 0;
-		if (access_process_vm(child, addr, &data, sizeof(data), 1)
-				== sizeof(data))
-			break;
-		ret = -EIO;
-		break;
 
 	/* write the word at location addr in the USER area */
 	case PTRACE_POKEUSR: {
@@ -323,68 +900,18 @@ long arch_ptrace(struct task_struct *child, long request, long addr, long data)
 #endif
 			break;
 
-#ifdef CONFIG_PPC32
 		CHECK_FULL_REGS(child->thread.regs);
-#endif
-		if (index == PT_ORIG_R3)
-			break;
 		if (index < PT_FPR0) {
-			ret = put_reg(child, index, data);
+			ret = ptrace_put_reg(child, index, data);
 		} else {
 			flush_fp_to_thread(child);
-			((unsigned long *)child->thread.fpr)[index - PT_FPR0] = data;
+			((unsigned long *)child->thread.fpr)
+				[TS_FPRWIDTH * (index - PT_FPR0)] = data;
 			ret = 0;
 		}
 		break;
 	}
 
-	case PTRACE_SYSCALL: /* continue and stop at next (return from) syscall */
-	case PTRACE_CONT: { /* restart after signal. */
-		ret = -EIO;
-		if (!valid_signal(data))
-			break;
-		if (request == PTRACE_SYSCALL)
-			set_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
-		else
-			clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
-		child->exit_code = data;
-		/* make sure the single step bit is not set. */
-		clear_single_step(child);
-		wake_up_process(child);
-		ret = 0;
-		break;
-	}
-
-/*
- * make the child exit.  Best I can do is send it a sigkill.
- * perhaps it should be put in the status that it wants to
- * exit.
- */
-	case PTRACE_KILL: {
-		ret = 0;
-		if (child->exit_state == EXIT_ZOMBIE)	/* already dead */
-			break;
-		child->exit_code = SIGKILL;
-		/* make sure the single step bit is not set. */
-		clear_single_step(child);
-		wake_up_process(child);
-		break;
-	}
-
-	case PTRACE_SINGLESTEP: {  /* set the trap flag. */
-		ret = -EIO;
-		if (!valid_signal(data))
-			break;
-		clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
-		set_single_step(child);
-		child->exit_code = data;
-		/* give it a chance to run. */
-		wake_up_process(child);
-		ret = 0;
-		break;
-	}
-
-#ifdef CONFIG_PPC64
 	case PTRACE_GET_DEBUGREG: {
 		ret = -EINVAL;
 		/* We only support one DABR and no IABRS at the moment */
@@ -398,140 +925,112 @@ long arch_ptrace(struct task_struct *child, long request, long addr, long data)
 	case PTRACE_SET_DEBUGREG:
 		ret = ptrace_set_debugreg(child, addr, data);
 		break;
+
+#ifdef CONFIG_PPC64
+	case PTRACE_GETREGS64:
 #endif
+	case PTRACE_GETREGS:	/* Get all pt_regs from the child. */
+		return copy_regset_to_user(child, &user_ppc_native_view,
+					   REGSET_GPR,
+					   0, sizeof(struct pt_regs),
+					   (void __user *) data);
 
-	case PTRACE_DETACH:
-		ret = ptrace_detach(child, data);
-		break;
+#ifdef CONFIG_PPC64
+	case PTRACE_SETREGS64:
+#endif
+	case PTRACE_SETREGS:	/* Set all gp regs in the child. */
+		return copy_regset_from_user(child, &user_ppc_native_view,
+					     REGSET_GPR,
+					     0, sizeof(struct pt_regs),
+					     (const void __user *) data);
 
-	case PPC_PTRACE_GETREGS: { /* Get GPRs 0 - 31. */
-		int i;
-		unsigned long *reg = &((unsigned long *)child->thread.regs)[0];
-		unsigned long __user *tmp = (unsigned long __user *)addr;
+	case PTRACE_GETFPREGS: /* Get the child FPU state (FPR0...31 + FPSCR) */
+		return copy_regset_to_user(child, &user_ppc_native_view,
+					   REGSET_FPR,
+					   0, sizeof(elf_fpregset_t),
+					   (void __user *) data);
 
-		for (i = 0; i < 32; i++) {
-			ret = put_user(*reg, tmp);
-			if (ret)
-				break;
-			reg++;
-			tmp++;
-		}
-		break;
-	}
-
-	case PPC_PTRACE_SETREGS: { /* Set GPRs 0 - 31. */
-		int i;
-		unsigned long *reg = &((unsigned long *)child->thread.regs)[0];
-		unsigned long __user *tmp = (unsigned long __user *)addr;
-
-		for (i = 0; i < 32; i++) {
-			ret = get_user(*reg, tmp);
-			if (ret)
-				break;
-			reg++;
-			tmp++;
-		}
-		break;
-	}
-
-	case PPC_PTRACE_GETFPREGS: { /* Get FPRs 0 - 31. */
-		int i;
-		unsigned long *reg = &((unsigned long *)child->thread.fpr)[0];
-		unsigned long __user *tmp = (unsigned long __user *)addr;
-
-		flush_fp_to_thread(child);
-
-		for (i = 0; i < 32; i++) {
-			ret = put_user(*reg, tmp);
-			if (ret)
-				break;
-			reg++;
-			tmp++;
-		}
-		break;
-	}
-
-	case PPC_PTRACE_SETFPREGS: { /* Get FPRs 0 - 31. */
-		int i;
-		unsigned long *reg = &((unsigned long *)child->thread.fpr)[0];
-		unsigned long __user *tmp = (unsigned long __user *)addr;
-
-		flush_fp_to_thread(child);
-
-		for (i = 0; i < 32; i++) {
-			ret = get_user(*reg, tmp);
-			if (ret)
-				break;
-			reg++;
-			tmp++;
-		}
-		break;
-	}
+	case PTRACE_SETFPREGS: /* Set the child FPU state (FPR0...31 + FPSCR) */
+		return copy_regset_from_user(child, &user_ppc_native_view,
+					     REGSET_FPR,
+					     0, sizeof(elf_fpregset_t),
+					     (const void __user *) data);
 
 #ifdef CONFIG_ALTIVEC
 	case PTRACE_GETVRREGS:
-		/* Get the child altivec register state. */
-		flush_altivec_to_thread(child);
-		ret = get_vrregs((unsigned long __user *)data, child);
-		break;
+		return copy_regset_to_user(child, &user_ppc_native_view,
+					   REGSET_VMX,
+					   0, (33 * sizeof(vector128) +
+					       sizeof(u32)),
+					   (void __user *) data);
 
 	case PTRACE_SETVRREGS:
-		/* Set the child altivec register state. */
-		flush_altivec_to_thread(child);
-		ret = set_vrregs(child, (unsigned long __user *)data);
-		break;
+		return copy_regset_from_user(child, &user_ppc_native_view,
+					     REGSET_VMX,
+					     0, (33 * sizeof(vector128) +
+						 sizeof(u32)),
+					     (const void __user *) data);
+#endif
+#ifdef CONFIG_VSX
+	case PTRACE_GETVSRREGS:
+		return copy_regset_to_user(child, &user_ppc_native_view,
+					   REGSET_VSX,
+					   0, 32 * sizeof(double),
+					   (void __user *) data);
+
+	case PTRACE_SETVSRREGS:
+		return copy_regset_from_user(child, &user_ppc_native_view,
+					     REGSET_VSX,
+					     0, 32 * sizeof(double),
+					     (const void __user *) data);
 #endif
 #ifdef CONFIG_SPE
 	case PTRACE_GETEVRREGS:
 		/* Get the child spe register state. */
-		if (child->thread.regs->msr & MSR_SPE)
-			giveup_spe(child);
-		ret = get_evrregs((unsigned long __user *)data, child);
-		break;
+		return copy_regset_to_user(child, &user_ppc_native_view,
+					   REGSET_SPE, 0, 35 * sizeof(u32),
+					   (void __user *) data);
 
 	case PTRACE_SETEVRREGS:
 		/* Set the child spe register state. */
-		/* this is to clear the MSR_SPE bit to force a reload
-		 * of register state from memory */
-		if (child->thread.regs->msr & MSR_SPE)
-			giveup_spe(child);
-		ret = set_evrregs(child, (unsigned long __user *)data);
-		break;
+		return copy_regset_from_user(child, &user_ppc_native_view,
+					     REGSET_SPE, 0, 35 * sizeof(u32),
+					     (const void __user *) data);
 #endif
+
+	/* Old reverse args ptrace callss */
+	case PPC_PTRACE_GETREGS: /* Get GPRs 0 - 31. */
+	case PPC_PTRACE_SETREGS: /* Set GPRs 0 - 31. */
+	case PPC_PTRACE_GETFPREGS: /* Get FPRs 0 - 31. */
+	case PPC_PTRACE_SETFPREGS: /* Get FPRs 0 - 31. */
+		ret = arch_ptrace_old(child, request, addr, data);
+		break;
 
 	default:
 		ret = ptrace_request(child, request, addr, data);
 		break;
 	}
-
 	return ret;
 }
 
-static void do_syscall_trace(void)
+/*
+ * We must return the syscall number to actually look up in the table.
+ * This can be -1L to skip running any syscall at all.
+ */
+long do_syscall_trace_enter(struct pt_regs *regs)
 {
-	/* the 0x80 provides a way for the tracing parent to distinguish
-	   between a syscall stop and SIGTRAP delivery */
-	ptrace_notify(SIGTRAP | ((current->ptrace & PT_TRACESYSGOOD)
-				 ? 0x80 : 0));
+	long ret = 0;
 
-	/*
-	 * this isn't the same as continuing with a signal, but it will do
-	 * for normal use.  strace only continues with a signal if the
-	 * stopping signal is not SIGTRAP.  -brl
-	 */
-	if (current->exit_code) {
-		send_sig(current->exit_code, current, 1);
-		current->exit_code = 0;
-	}
-}
-
-void do_syscall_trace_enter(struct pt_regs *regs)
-{
 	secure_computing(regs->gpr[0]);
 
-	if (test_thread_flag(TIF_SYSCALL_TRACE)
-	    && (current->ptrace & PT_PTRACED))
-		do_syscall_trace();
+	if (test_thread_flag(TIF_SYSCALL_TRACE) &&
+	    tracehook_report_syscall_entry(regs))
+		/*
+		 * Tracing decided this syscall should not happen.
+		 * We'll return a bogus call number to get an ENOSYS
+		 * error, but leave the original number in regs->gpr[0].
+		 */
+		ret = -1L;
 
 	if (unlikely(current->audit_context)) {
 #ifdef CONFIG_PPC64
@@ -549,16 +1048,19 @@ void do_syscall_trace_enter(struct pt_regs *regs)
 					    regs->gpr[5] & 0xffffffff,
 					    regs->gpr[6] & 0xffffffff);
 	}
+
+	return ret ?: regs->gpr[0];
 }
 
 void do_syscall_trace_leave(struct pt_regs *regs)
 {
+	int step;
+
 	if (unlikely(current->audit_context))
 		audit_syscall_exit((regs->ccr&0x10000000)?AUDITSC_FAILURE:AUDITSC_SUCCESS,
 				   regs->result);
 
-	if ((test_thread_flag(TIF_SYSCALL_TRACE)
-	     || test_thread_flag(TIF_SINGLESTEP))
-	    && (current->ptrace & PT_PTRACED))
-		do_syscall_trace();
+	step = test_thread_flag(TIF_SINGLESTEP);
+	if (step || test_thread_flag(TIF_SYSCALL_TRACE))
+		tracehook_report_syscall_exit(regs, step);
 }

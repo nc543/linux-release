@@ -28,10 +28,10 @@
  */
 
 #include <linux/module.h>
+#include <linux/irq.h>
 #include <asm/blackfin.h>
-#include <asm/irq.h>
 
-void program_IAR(void)
+void __init program_IAR(void)
 {
 	/* Program the IAR0 Register with the configured priority */
 	bfin_write_SIC_IAR0(((CONFIG_PLLWAKE_ERROR - 7) << PLLWAKE_ERROR_POS) |

@@ -4,7 +4,7 @@
  * This file is released under the GPL.
  */
 
-#include "dm.h"
+#include <linux/device-mapper.h>
 
 #include <linux/module.h>
 #include <linux/init.h>
@@ -43,7 +43,7 @@ static int zero_map(struct dm_target *ti, struct bio *bio,
 		break;
 	}
 
-	bio_endio(bio, bio->bi_size, 0);
+	bio_endio(bio, 0);
 
 	/* accepted bio, don't make new request */
 	return DM_MAPIO_SUBMITTED;

@@ -32,8 +32,10 @@ const struct file_operations afs_file_operations = {
 	.aio_read	= generic_file_aio_read,
 	.aio_write	= afs_file_write,
 	.mmap		= generic_file_readonly_mmap,
-	.sendfile	= generic_file_sendfile,
+	.splice_read	= generic_file_splice_read,
 	.fsync		= afs_fsync,
+	.lock		= afs_lock,
+	.flock		= afs_flock,
 };
 
 const struct inode_operations afs_file_inode_operations = {
@@ -48,8 +50,8 @@ const struct address_space_operations afs_fs_aops = {
 	.launder_page	= afs_launder_page,
 	.releasepage	= afs_releasepage,
 	.invalidatepage	= afs_invalidatepage,
-	.prepare_write	= afs_prepare_write,
-	.commit_write	= afs_commit_write,
+	.write_begin	= afs_write_begin,
+	.write_end	= afs_write_end,
 	.writepage	= afs_writepage,
 	.writepages	= afs_writepages,
 };

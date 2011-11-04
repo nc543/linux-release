@@ -17,11 +17,11 @@
 #include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/init.h>
+#include <linux/of_device.h>
 
 #include <asm/hypervisor.h>
 #include <asm/spitfire.h>
 #include <asm/prom.h>
-#include <asm/of_device.h>
 #include <asm/irq.h>
 
 #if defined(CONFIG_MAGIC_SYSRQ)
@@ -185,7 +185,7 @@ static struct tty_struct *receive_chars(struct uart_port *port)
 	struct tty_struct *tty = NULL;
 
 	if (port->info != NULL)		/* Unopened serial console */
-		tty = port->info->tty;
+		tty = port->info->port.tty;
 
 	if (sunhv_ops->receive_chars(port, tty))
 		sun_do_break();
@@ -258,17 +258,7 @@ static void sunhv_stop_tx(struct uart_port *port)
 /* port->lock held by caller.  */
 static void sunhv_start_tx(struct uart_port *port)
 {
-	struct circ_buf *xmit = &port->info->xmit;
-
-	while (!uart_circ_empty(xmit)) {
-		long status = sun4v_con_putchar(xmit->buf[xmit->tail]);
-
-		if (status != HV_EOK)
-			break;
-
-		xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
-		port->icount.tx++;
-	}
+	transmit_chars(port);
 }
 
 /* port->lock is not held.  */
@@ -402,7 +392,7 @@ static struct uart_ops sunhv_pops = {
 
 static struct uart_driver sunhv_reg = {
 	.owner			= THIS_MODULE,
-	.driver_name		= "serial",
+	.driver_name		= "sunhv",
 	.dev_name		= "ttyS",
 	.major			= TTY_MAJOR,
 };
@@ -440,8 +430,16 @@ static void sunhv_console_write_paged(struct console *con, const char *s, unsign
 {
 	struct uart_port *port = sunhv_port;
 	unsigned long flags;
+	int locked = 1;
 
-	spin_lock_irqsave(&port->lock, flags);
+	local_irq_save(flags);
+	if (port->sysrq) {
+		locked = 0;
+	} else if (oops_in_progress) {
+		locked = spin_trylock(&port->lock);
+	} else
+		spin_lock(&port->lock);
+
 	while (n > 0) {
 		unsigned long ra = __pa(con_write_page);
 		unsigned long page_bytes;
@@ -469,7 +467,10 @@ static void sunhv_console_write_paged(struct console *con, const char *s, unsign
 			ra += written;
 		}
 	}
-	spin_unlock_irqrestore(&port->lock, flags);
+
+	if (locked)
+		spin_unlock(&port->lock);
+	local_irq_restore(flags);
 }
 
 static inline void sunhv_console_putchar(struct uart_port *port, char c)
@@ -488,15 +489,25 @@ static void sunhv_console_write_bychar(struct console *con, const char *s, unsig
 {
 	struct uart_port *port = sunhv_port;
 	unsigned long flags;
-	int i;
+	int i, locked = 1;
 
-	spin_lock_irqsave(&port->lock, flags);
+	local_irq_save(flags);
+	if (port->sysrq) {
+		locked = 0;
+	} else if (oops_in_progress) {
+		locked = spin_trylock(&port->lock);
+	} else
+		spin_lock(&port->lock);
+
 	for (i = 0; i < n; i++) {
 		if (*s == '\n')
 			sunhv_console_putchar(port, '\r');
 		sunhv_console_putchar(port, *s++);
 	}
-	spin_unlock_irqrestore(&port->lock, flags);
+
+	if (locked)
+		spin_unlock(&port->lock);
+	local_irq_restore(flags);
 }
 
 static struct console sunhv_console = {
@@ -507,16 +518,6 @@ static struct console sunhv_console = {
 	.index	=	-1,
 	.data	=	&sunhv_reg,
 };
-
-static inline struct console *SUNHV_CONSOLE(void)
-{
-	if (con_is_present())
-		return NULL;
-
-	sunhv_console.index = 0;
-
-	return &sunhv_console;
-}
 
 static int __devinit hv_probe(struct of_device *op, const struct of_device_id *match)
 {
@@ -560,17 +561,12 @@ static int __devinit hv_probe(struct of_device *op, const struct of_device_id *m
 
 	port->dev = &op->dev;
 
-	sunhv_reg.minor = sunserial_current_minor;
-	sunhv_reg.nr = 1;
-
-	err = uart_register_driver(&sunhv_reg);
+	err = sunserial_register_minors(&sunhv_reg, 1);
 	if (err)
 		goto out_free_con_read_page;
 
-	sunhv_reg.tty_driver->name_base = sunhv_reg.minor - 64;
-	sunserial_current_minor += 1;
-
-	sunhv_reg.cons = SUNHV_CONSOLE();
+	sunserial_console_match(&sunhv_console, op->node,
+				&sunhv_reg, port->line);
 
 	err = uart_add_one_port(&sunhv_reg, port);
 	if (err)
@@ -588,8 +584,7 @@ out_remove_port:
 	uart_remove_one_port(&sunhv_reg, port);
 
 out_unregister_driver:
-	sunserial_current_minor -= 1;
-	uart_unregister_driver(&sunhv_reg);
+	sunserial_unregister_minors(&sunhv_reg, 1);
 
 out_free_con_read_page:
 	kfree(con_read_page);
@@ -611,8 +606,7 @@ static int __devexit hv_remove(struct of_device *dev)
 
 	uart_remove_one_port(&sunhv_reg, port);
 
-	sunserial_current_minor -= 1;
-	uart_unregister_driver(&sunhv_reg);
+	sunserial_unregister_minors(&sunhv_reg, 1);
 
 	kfree(port);
 	sunhv_port = NULL;
@@ -622,7 +616,7 @@ static int __devexit hv_remove(struct of_device *dev)
 	return 0;
 }
 
-static struct of_device_id hv_match[] = {
+static const struct of_device_id hv_match[] = {
 	{
 		.name = "console",
 		.compatible = "qcn",

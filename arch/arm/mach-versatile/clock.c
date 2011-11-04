@@ -17,7 +17,6 @@
 #include <linux/clk.h>
 #include <linux/mutex.h>
 
-#include <asm/semaphore.h>
 #include <asm/hardware/icst307.h>
 
 #include "clock.h"
@@ -106,7 +105,7 @@ static struct clk uart_clk = {
 
 static struct clk mmci_clk = {
 	.name	= "MCLK",
-	.rate	= 33000000,
+	.rate	= 24000000,
 };
 
 int clk_register(struct clk *clk)

@@ -1,5 +1,7 @@
 #include <linux/suspend.h>
+#include <linux/suspend_ioctls.h>
 #include <linux/utsname.h>
+#include <linux/freezer.h>
 
 struct swsusp_info {
 	struct new_utsname	uts;
@@ -11,29 +13,48 @@ struct swsusp_info {
 	unsigned long		size;
 } __attribute__((aligned(PAGE_SIZE)));
 
+#ifdef CONFIG_HIBERNATION
+#ifdef CONFIG_ARCH_HIBERNATION_HEADER
+/* Maximum size of architecture specific data in a hibernation header */
+#define MAX_ARCH_HEADER_SIZE	(sizeof(struct new_utsname) + 4)
 
+extern int arch_hibernation_header_save(void *addr, unsigned int max_size);
+extern int arch_hibernation_header_restore(void *addr);
 
-#ifdef CONFIG_SOFTWARE_SUSPEND
+static inline int init_header_complete(struct swsusp_info *info)
+{
+	return arch_hibernation_header_save(info, MAX_ARCH_HEADER_SIZE);
+}
+
+static inline char *check_image_kernel(struct swsusp_info *info)
+{
+	return arch_hibernation_header_restore(info) ?
+			"architecture specific data" : NULL;
+}
+#endif /* CONFIG_ARCH_HIBERNATION_HEADER */
+
 /*
  * Keep some memory free so that I/O operations can succeed without paging
  * [Might this be more than 4 MB?]
  */
 #define PAGES_FOR_IO	((4096 * 1024) >> PAGE_SHIFT)
+
 /*
  * Keep 1 MB of memory free so that device drivers can allocate some pages in
  * their .suspend() routines without breaking the suspend to disk.
  */
 #define SPARE_PAGES	((1024 * 1024) >> PAGE_SHIFT)
 
-extern struct hibernation_ops *hibernation_ops;
+/* kernel/power/disk.c */
+extern int hibernation_snapshot(int platform_mode);
+extern int hibernation_restore(int platform_mode);
+extern int hibernation_platform_enter(void);
 #endif
 
 extern int pfn_is_nosave(unsigned long);
 
-extern struct mutex pm_mutex;
-
 #define power_attr(_name) \
-static struct subsys_attribute _name##_attr = {	\
+static struct kobj_attribute _name##_attr = {	\
 	.attr	= {				\
 		.name = __stringify(_name),	\
 		.mode = 0644,			\
@@ -41,8 +62,6 @@ static struct subsys_attribute _name##_attr = {	\
 	.show	= _name##_show,			\
 	.store	= _name##_store,		\
 }
-
-extern struct kset power_subsys;
 
 /* Preferred image size in bytes (default 500 MB) */
 extern unsigned long image_size;
@@ -109,41 +128,11 @@ struct snapshot_handle {
 #define data_of(handle)	((handle).buffer + (handle).buf_offset)
 
 extern unsigned int snapshot_additional_pages(struct zone *zone);
+extern unsigned long snapshot_get_image_size(void);
 extern int snapshot_read_next(struct snapshot_handle *handle, size_t count);
 extern int snapshot_write_next(struct snapshot_handle *handle, size_t count);
 extern void snapshot_write_finalize(struct snapshot_handle *handle);
 extern int snapshot_image_loaded(struct snapshot_handle *handle);
-
-/*
- * This structure is used to pass the values needed for the identification
- * of the resume swap area from a user space to the kernel via the
- * SNAPSHOT_SET_SWAP_AREA ioctl
- */
-struct resume_swap_area {
-	loff_t offset;
-	u_int32_t dev;
-} __attribute__((packed));
-
-#define SNAPSHOT_IOC_MAGIC	'3'
-#define SNAPSHOT_FREEZE			_IO(SNAPSHOT_IOC_MAGIC, 1)
-#define SNAPSHOT_UNFREEZE		_IO(SNAPSHOT_IOC_MAGIC, 2)
-#define SNAPSHOT_ATOMIC_SNAPSHOT	_IOW(SNAPSHOT_IOC_MAGIC, 3, void *)
-#define SNAPSHOT_ATOMIC_RESTORE		_IO(SNAPSHOT_IOC_MAGIC, 4)
-#define SNAPSHOT_FREE			_IO(SNAPSHOT_IOC_MAGIC, 5)
-#define SNAPSHOT_SET_IMAGE_SIZE		_IOW(SNAPSHOT_IOC_MAGIC, 6, unsigned long)
-#define SNAPSHOT_AVAIL_SWAP		_IOR(SNAPSHOT_IOC_MAGIC, 7, void *)
-#define SNAPSHOT_GET_SWAP_PAGE		_IOR(SNAPSHOT_IOC_MAGIC, 8, void *)
-#define SNAPSHOT_FREE_SWAP_PAGES	_IO(SNAPSHOT_IOC_MAGIC, 9)
-#define SNAPSHOT_SET_SWAP_FILE		_IOW(SNAPSHOT_IOC_MAGIC, 10, unsigned int)
-#define SNAPSHOT_S2RAM			_IO(SNAPSHOT_IOC_MAGIC, 11)
-#define SNAPSHOT_PMOPS			_IOW(SNAPSHOT_IOC_MAGIC, 12, unsigned int)
-#define SNAPSHOT_SET_SWAP_AREA		_IOW(SNAPSHOT_IOC_MAGIC, 13, \
-							struct resume_swap_area)
-#define SNAPSHOT_IOC_MAXNR	13
-
-#define PMOPS_PREPARE	1
-#define PMOPS_ENTER	2
-#define PMOPS_FINISH	3
 
 /* If unset, the snapshot device cannot be open. */
 extern atomic_t snapshot_device_available;
@@ -152,16 +141,85 @@ extern sector_t alloc_swapdev_block(int swap);
 extern void free_all_swap_pages(int swap);
 extern int swsusp_swap_in_use(void);
 
+/*
+ * Flags that can be passed from the hibernatig hernel to the "boot" kernel in
+ * the image header.
+ */
+#define SF_PLATFORM_MODE	1
+
+/* kernel/power/disk.c */
 extern int swsusp_check(void);
 extern int swsusp_shrink_memory(void);
 extern void swsusp_free(void);
-extern int swsusp_suspend(void);
-extern int swsusp_resume(void);
-extern int swsusp_read(void);
-extern int swsusp_write(void);
-extern void swsusp_close(void);
-extern int suspend_enter(suspend_state_t state);
+extern int swsusp_read(unsigned int *flags_p);
+extern int swsusp_write(unsigned int flags);
+extern void swsusp_close(fmode_t);
 
 struct timeval;
+/* kernel/power/swsusp.c */
 extern void swsusp_show_speed(struct timeval *, struct timeval *,
 				unsigned int, char *);
+
+#ifdef CONFIG_SUSPEND
+/* kernel/power/main.c */
+extern int suspend_devices_and_enter(suspend_state_t state);
+#else /* !CONFIG_SUSPEND */
+static inline int suspend_devices_and_enter(suspend_state_t state)
+{
+	return -ENOSYS;
+}
+#endif /* !CONFIG_SUSPEND */
+
+#ifdef CONFIG_PM_SLEEP
+/* kernel/power/main.c */
+extern int pm_notifier_call_chain(unsigned long val);
+#endif
+
+#ifdef CONFIG_HIGHMEM
+unsigned int count_highmem_pages(void);
+int restore_highmem(void);
+#else
+static inline unsigned int count_highmem_pages(void) { return 0; }
+static inline int restore_highmem(void) { return 0; }
+#endif
+
+/*
+ * Suspend test levels
+ */
+enum {
+	/* keep first */
+	TEST_NONE,
+	TEST_CORE,
+	TEST_CPUS,
+	TEST_PLATFORM,
+	TEST_DEVICES,
+	TEST_FREEZER,
+	/* keep last */
+	__TEST_AFTER_LAST
+};
+
+#define TEST_FIRST	TEST_NONE
+#define TEST_MAX	(__TEST_AFTER_LAST - 1)
+
+extern int pm_test_level;
+
+#ifdef CONFIG_SUSPEND_FREEZER
+static inline int suspend_freeze_processes(void)
+{
+	return freeze_processes();
+}
+
+static inline void suspend_thaw_processes(void)
+{
+	thaw_processes();
+}
+#else
+static inline int suspend_freeze_processes(void)
+{
+	return 0;
+}
+
+static inline void suspend_thaw_processes(void)
+{
+}
+#endif

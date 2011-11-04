@@ -142,9 +142,6 @@ enum StirCtrl2Mask {
 };
 
 enum StirFifoCtlMask {
-	FIFOCTL_EOF = 0x80,
-	FIFOCTL_UNDER = 0x40,
-	FIFOCTL_OVER = 0x20,
 	FIFOCTL_DIR = 0x10,
 	FIFOCTL_CLR = 0x08,
 	FIFOCTL_EMPTY = 0x04,
@@ -332,7 +329,7 @@ static void fir_eof(struct stir_cb *stir)
 	}
 
 	fcs = ~(crc32_le(~0, rx_buff->data, len));
-	if (fcs != le32_to_cpu(get_unaligned((u32 *)(rx_buff->data+len)))) {
+	if (fcs != get_unaligned_le32(rx_buff->data + len)) {
 		pr_debug("crc error calc 0x%x len %d\n", fcs, len);
 		stir->stats.rx_errors++;
 		stir->stats.rx_crc_errors++;
@@ -509,7 +506,7 @@ static int change_speed(struct stir_cb *stir, unsigned speed)
 			goto found;
 	}
 
-	warn("%s: invalid speed %d", stir->netdev->name, speed);
+	dev_warn(&stir->netdev->dev, "invalid speed %d\n", speed);
 	return -EINVAL;
 
  found:
@@ -594,14 +591,15 @@ static int fifo_txwait(struct stir_cb *stir, int space)
 {
 	int err;
 	unsigned long count, status;
+	unsigned long prev_count = 0x1fff;
 
 	/* Read FIFO status and count */
-	for(;;) {
+	for (;; prev_count = count) {
 		err = read_reg(stir, REG_FIFOCTL, stir->fifo_status, 
 				   FIFO_REGS_SIZE);
 		if (unlikely(err != FIFO_REGS_SIZE)) {
-			warn("%s: FIFO register read error: %d", 
-			     stir->netdev->name, err);
+			dev_warn(&stir->netdev->dev,
+				 "FIFO register read error: %d\n", err);
 
 			return err;
 		}
@@ -628,6 +626,10 @@ static int fifo_txwait(struct stir_cb *stir, int space)
 		/* only waiting for some space */
 		if (space >= 0 && STIR_FIFO_SIZE - 4 > space + count)
 			return 0;
+
+		/* queue confused */
+		if (prev_count < count)
+			break;
 
 		/* estimate transfer time for remaining chars */
 		msleep((count * 8000) / stir->speed);
@@ -781,8 +783,9 @@ static int stir_transmit_thread(void *arg)
 
 			if (unlikely(receive_start(stir))) {
 				if (net_ratelimit())
-					info("%s: receive usb submit failed",
-					     stir->netdev->name);
+					dev_info(&dev->dev,
+						 "%s: receive usb submit failed\n",
+						 stir->netdev->name);
 				stir->receiving = 0;
 				msleep(10);
 				continue;
@@ -834,8 +837,8 @@ static void stir_rcv_irq(struct urb *urb)
 
 	/* in case of error, the kernel thread will restart us */
 	if (err) {
-		warn("%s: usb receive submit error: %d",
-			stir->netdev->name, err);
+		dev_warn(&stir->netdev->dev, "usb receive submit error: %d\n",
+			 err);
 		stir->receiving = 0;
 		wake_up_process(stir->thread);
 	}
@@ -1034,7 +1037,6 @@ static int stir_probe(struct usb_interface *intf,
 	if(!net)
 		goto err_out1;
 
-	SET_MODULE_OWNER(net);
 	SET_NETDEV_DEV(net, &intf->dev);
 	stir = netdev_priv(net);
 	stir->netdev = net;
@@ -1072,7 +1074,8 @@ static int stir_probe(struct usb_interface *intf,
 	if (ret != 0)
 		goto err_out2;
 
-	info("IrDA: Registered SigmaTel device %s", net->name);
+	dev_info(&intf->dev, "IrDA: Registered SigmaTel device %s\n",
+		 net->name);
 
 	usb_set_intfdata(intf, stir);
 

@@ -23,6 +23,7 @@
 #include <linux/smp.h>
 #include <linux/profile.h>
 #include <linux/clocksource.h>
+#include <linux/platform_device.h>
 
 #include <asm/uaccess.h>
 #include <asm/io.h>
@@ -189,16 +190,14 @@ static struct clocksource clocksource_cr16 = {
 #ifdef CONFIG_SMP
 int update_cr16_clocksource(void)
 {
-	int change = 0;
-
 	/* since the cr16 cycle counters are not synchronized across CPUs,
 	   we'll check if we should switch to a safe clocksource: */
 	if (clocksource_cr16.rating != 0 && num_online_cpus() > 1) {
 		clocksource_change_rating(&clocksource_cr16, 0);
-		change = 1;
+		return 1;
 	}
 
-	return change;
+	return 0;
 }
 #else
 int update_cr16_clocksource(void)
@@ -216,6 +215,24 @@ void __init start_cpu_itimer(void)
 
 	cpu_data[cpu].it_value = next_tick;
 }
+
+struct platform_device rtc_parisc_dev = {
+	.name = "rtc-parisc",
+	.id = -1,
+};
+
+static int __init rtc_init(void)
+{
+	int ret;
+
+	ret = platform_device_register(&rtc_parisc_dev);
+	if (ret < 0)
+		printk(KERN_ERR "unable to register rtc device...\n");
+
+	/* not necessarily an error */
+	return 0;
+}
+module_init(rtc_init);
 
 void __init time_init(void)
 {
@@ -247,4 +264,3 @@ void __init time_init(void)
 		xtime.tv_nsec = 0;
 	}
 }
-

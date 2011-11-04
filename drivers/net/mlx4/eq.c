@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005 Mellanox Technologies. All rights reserved.
+ * Copyright (c) 2005, 2006, 2007, 2008 Mellanox Technologies. All rights reserved.
  * Copyright (c) 2005, 2006, 2007 Cisco Systems, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
@@ -33,6 +33,7 @@
 
 #include <linux/init.h>
 #include <linux/interrupt.h>
+#include <linux/mm.h>
 #include <linux/dma-mapping.h>
 
 #include <linux/mlx4/cmd.h>
@@ -89,14 +90,12 @@ struct mlx4_eq_context {
 			       (1ull << MLX4_EVENT_TYPE_PATH_MIG_FAILED)    | \
 			       (1ull << MLX4_EVENT_TYPE_WQ_INVAL_REQ_ERROR) | \
 			       (1ull << MLX4_EVENT_TYPE_WQ_ACCESS_ERROR)    | \
-			       (1ull << MLX4_EVENT_TYPE_LOCAL_CATAS_ERROR)  | \
 			       (1ull << MLX4_EVENT_TYPE_PORT_CHANGE)	    | \
 			       (1ull << MLX4_EVENT_TYPE_ECC_DETECT)	    | \
 			       (1ull << MLX4_EVENT_TYPE_SRQ_CATAS_ERROR)    | \
 			       (1ull << MLX4_EVENT_TYPE_SRQ_QP_LAST_WQE)    | \
 			       (1ull << MLX4_EVENT_TYPE_SRQ_LIMIT)	    | \
 			       (1ull << MLX4_EVENT_TYPE_CMD))
-#define MLX4_CATAS_EVENT_MASK  (1ull << MLX4_EVENT_TYPE_LOCAL_CATAS_ERROR)
 
 struct mlx4_eqe {
 	u8			reserved1;
@@ -204,7 +203,10 @@ static int mlx4_eq_int(struct mlx4_dev *dev, struct mlx4_eq *eq)
 			break;
 
 		case MLX4_EVENT_TYPE_PORT_CHANGE:
-			mlx4_dispatch_event(dev, eqe->type, eqe->subtype,
+			mlx4_dispatch_event(dev,
+					    eqe->subtype == MLX4_PORT_CHANGE_SUBTYPE_ACTIVE ?
+					    MLX4_DEV_EVENT_PORT_UP :
+					    MLX4_DEV_EVENT_PORT_DOWN,
 					    be32_to_cpu(eqe->event.port_change.port) >> 28);
 			break;
 
@@ -264,7 +266,7 @@ static irqreturn_t mlx4_interrupt(int irq, void *dev_ptr)
 
 	writel(priv->eq_table.clr_mask, priv->eq_table.clr_int);
 
-	for (i = 0; i < MLX4_EQ_CATAS; ++i)
+	for (i = 0; i < MLX4_NUM_EQ; ++i)
 		work |= mlx4_eq_int(dev, &priv->eq_table.eq[i]);
 
 	return IRQ_RETVAL(work);
@@ -276,14 +278,6 @@ static irqreturn_t mlx4_msi_x_interrupt(int irq, void *eq_ptr)
 	struct mlx4_dev *dev = eq->dev;
 
 	mlx4_eq_int(dev, eq);
-
-	/* MSI-X vectors always belong to us */
-	return IRQ_HANDLED;
-}
-
-static irqreturn_t mlx4_catas_interrupt(int irq, void *dev_ptr)
-{
-	mlx4_handle_catas_err(dev_ptr);
 
 	/* MSI-X vectors always belong to us */
 	return IRQ_HANDLED;
@@ -310,8 +304,7 @@ static int mlx4_HW2SW_EQ(struct mlx4_dev *dev, struct mlx4_cmd_mailbox *mailbox,
 			    MLX4_CMD_TIME_CLASS_A);
 }
 
-static void __devinit __iomem *mlx4_get_eq_uar(struct mlx4_dev *dev,
-					       struct mlx4_eq *eq)
+static void __iomem *mlx4_get_eq_uar(struct mlx4_dev *dev, struct mlx4_eq *eq)
 {
 	struct mlx4_priv *priv = mlx4_priv(dev);
 	int index;
@@ -333,8 +326,8 @@ static void __devinit __iomem *mlx4_get_eq_uar(struct mlx4_dev *dev,
 	return priv->eq_table.uar_map[index] + 0x800 + 8 * (eq->eqn % 4);
 }
 
-static int __devinit mlx4_create_eq(struct mlx4_dev *dev, int nent,
-				    u8 intr, struct mlx4_eq *eq)
+static int mlx4_create_eq(struct mlx4_dev *dev, int nent,
+			  u8 intr, struct mlx4_eq *eq)
 {
 	struct mlx4_priv *priv = mlx4_priv(dev);
 	struct mlx4_cmd_mailbox *mailbox;
@@ -490,14 +483,12 @@ static void mlx4_free_irqs(struct mlx4_dev *dev)
 
 	if (eq_table->have_irq)
 		free_irq(dev->pdev->irq, dev);
-	for (i = 0; i < MLX4_EQ_CATAS; ++i)
+	for (i = 0; i < MLX4_NUM_EQ; ++i)
 		if (eq_table->eq[i].have_irq)
 			free_irq(eq_table->eq[i].irq, eq_table->eq + i);
-	if (eq_table->eq[MLX4_EQ_CATAS].have_irq)
-		free_irq(eq_table->eq[MLX4_EQ_CATAS].irq, dev);
 }
 
-static int __devinit mlx4_map_clr_int(struct mlx4_dev *dev)
+static int mlx4_map_clr_int(struct mlx4_dev *dev)
 {
 	struct mlx4_priv *priv = mlx4_priv(dev);
 
@@ -518,7 +509,7 @@ static void mlx4_unmap_clr_int(struct mlx4_dev *dev)
 	iounmap(priv->clr_base);
 }
 
-int __devinit mlx4_map_eq_icm(struct mlx4_dev *dev, u64 icm_virt)
+int mlx4_map_eq_icm(struct mlx4_dev *dev, u64 icm_virt)
 {
 	struct mlx4_priv *priv = mlx4_priv(dev);
 	int ret;
@@ -535,7 +526,7 @@ int __devinit mlx4_map_eq_icm(struct mlx4_dev *dev, u64 icm_virt)
 		return -ENOMEM;
 	priv->eq_table.icm_dma  = pci_map_page(dev->pdev, priv->eq_table.icm_page, 0,
 					       PAGE_SIZE, PCI_DMA_BIDIRECTIONAL);
-	if (pci_dma_mapping_error(priv->eq_table.icm_dma)) {
+	if (pci_dma_mapping_error(dev->pdev, priv->eq_table.icm_dma)) {
 		__free_page(priv->eq_table.icm_page);
 		return -ENOMEM;
 	}
@@ -560,14 +551,14 @@ void mlx4_unmap_eq_icm(struct mlx4_dev *dev)
 	__free_page(priv->eq_table.icm_page);
 }
 
-int __devinit mlx4_init_eq_table(struct mlx4_dev *dev)
+int mlx4_init_eq_table(struct mlx4_dev *dev)
 {
 	struct mlx4_priv *priv = mlx4_priv(dev);
 	int err;
 	int i;
 
 	err = mlx4_bitmap_init(&priv->eq_table.bitmap, dev->caps.num_eqs,
-			       dev->caps.num_eqs - 1, dev->caps.reserved_eqs);
+			       dev->caps.num_eqs - 1, dev->caps.reserved_eqs, 0);
 	if (err)
 		return err;
 
@@ -598,32 +589,19 @@ int __devinit mlx4_init_eq_table(struct mlx4_dev *dev)
 	if (dev->flags & MLX4_FLAG_MSI_X) {
 		static const char *eq_name[] = {
 			[MLX4_EQ_COMP]  = DRV_NAME " (comp)",
-			[MLX4_EQ_ASYNC] = DRV_NAME " (async)",
-			[MLX4_EQ_CATAS] = DRV_NAME " (catas)"
+			[MLX4_EQ_ASYNC] = DRV_NAME " (async)"
 		};
 
-		err = mlx4_create_eq(dev, 1, MLX4_EQ_CATAS,
-				     &priv->eq_table.eq[MLX4_EQ_CATAS]);
-		if (err)
-			goto err_out_async;
-
-		for (i = 0; i < MLX4_EQ_CATAS; ++i) {
+		for (i = 0; i < MLX4_NUM_EQ; ++i) {
 			err = request_irq(priv->eq_table.eq[i].irq,
 					  mlx4_msi_x_interrupt,
 					  0, eq_name[i], priv->eq_table.eq + i);
 			if (err)
-				goto err_out_catas;
+				goto err_out_async;
 
 			priv->eq_table.eq[i].have_irq = 1;
 		}
 
-		err = request_irq(priv->eq_table.eq[MLX4_EQ_CATAS].irq,
-				  mlx4_catas_interrupt, 0,
-				  eq_name[MLX4_EQ_CATAS], dev);
-		if (err)
-			goto err_out_catas;
-
-		priv->eq_table.eq[MLX4_EQ_CATAS].have_irq = 1;
 	} else {
 		err = request_irq(dev->pdev->irq, mlx4_interrupt,
 				  IRQF_SHARED, DRV_NAME, dev);
@@ -639,21 +617,10 @@ int __devinit mlx4_init_eq_table(struct mlx4_dev *dev)
 		mlx4_warn(dev, "MAP_EQ for async EQ %d failed (%d)\n",
 			   priv->eq_table.eq[MLX4_EQ_ASYNC].eqn, err);
 
-	for (i = 0; i < MLX4_EQ_CATAS; ++i)
+	for (i = 0; i < MLX4_NUM_EQ; ++i)
 		eq_set_ci(&priv->eq_table.eq[i], 1);
 
-	if (dev->flags & MLX4_FLAG_MSI_X) {
-		err = mlx4_MAP_EQ(dev, MLX4_CATAS_EVENT_MASK, 0,
-				  priv->eq_table.eq[MLX4_EQ_CATAS].eqn);
-		if (err)
-			mlx4_warn(dev, "MAP_EQ for catas EQ %d failed (%d)\n",
-				  priv->eq_table.eq[MLX4_EQ_CATAS].eqn, err);
-	}
-
 	return 0;
-
-err_out_catas:
-	mlx4_free_eq(dev, &priv->eq_table.eq[MLX4_EQ_CATAS]);
 
 err_out_async:
 	mlx4_free_eq(dev, &priv->eq_table.eq[MLX4_EQ_ASYNC]);
@@ -675,19 +642,13 @@ void mlx4_cleanup_eq_table(struct mlx4_dev *dev)
 	struct mlx4_priv *priv = mlx4_priv(dev);
 	int i;
 
-	if (dev->flags & MLX4_FLAG_MSI_X)
-		mlx4_MAP_EQ(dev, MLX4_CATAS_EVENT_MASK, 1,
-			    priv->eq_table.eq[MLX4_EQ_CATAS].eqn);
-
 	mlx4_MAP_EQ(dev, MLX4_ASYNC_EVENT_MASK, 1,
 		    priv->eq_table.eq[MLX4_EQ_ASYNC].eqn);
 
 	mlx4_free_irqs(dev);
 
-	for (i = 0; i < MLX4_EQ_CATAS; ++i)
+	for (i = 0; i < MLX4_NUM_EQ; ++i)
 		mlx4_free_eq(dev, &priv->eq_table.eq[i]);
-	if (dev->flags & MLX4_FLAG_MSI_X)
-		mlx4_free_eq(dev, &priv->eq_table.eq[MLX4_EQ_CATAS]);
 
 	mlx4_unmap_clr_int(dev);
 

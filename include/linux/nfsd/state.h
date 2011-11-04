@@ -67,7 +67,7 @@ struct nfs4_cb_recall {
 	int			cbr_trunc;
 	stateid_t		cbr_stateid;
 	u32			cbr_fhlen;
-	u32			cbr_fhval[NFS4_FHSIZE];
+	char			cbr_fhval[NFS4_FHSIZE];
 	struct nfs4_delegation	*cbr_dp;
 };
 
@@ -98,8 +98,6 @@ struct nfs4_callback {
 	u32                     cb_ident;
 	/* RPC client info */
 	atomic_t		cb_set;     /* successful CB_NULL call */
-	struct rpc_program      cb_program;
-	struct rpc_stat         cb_stat;
 	struct rpc_clnt *       cb_client;
 };
 
@@ -224,6 +222,7 @@ struct nfs4_file {
 	struct inode		*fi_inode;
 	u32                     fi_id;      /* used with stateowner->so_id 
 					     * for stateid_hashtbl hash */
+	bool			fi_had_conflict;
 };
 
 /*

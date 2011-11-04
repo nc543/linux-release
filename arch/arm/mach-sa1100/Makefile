@@ -3,7 +3,7 @@
 #
 
 # Common support
-obj-y := clock.o generic.o irq.o dma.o time.o #nmi-oopser.o
+obj-y := clock.o generic.o gpio.o irq.o dma.o time.o #nmi-oopser.o
 obj-m :=
 obj-n :=
 obj-  :=
@@ -31,6 +31,7 @@ obj-$(CONFIG_SA1100_HACKKIT)		+= hackkit.o
 led-$(CONFIG_SA1100_HACKKIT)		+= leds-hackkit.o
 
 obj-$(CONFIG_SA1100_JORNADA720)		+= jornada720.o
+obj-$(CONFIG_SA1100_JORNADA720_SSP)	+= jornada720_ssp.o
 
 obj-$(CONFIG_SA1100_LART)		+= lart.o
 led-$(CONFIG_SA1100_LART)		+= leds-lart.o
@@ -45,9 +46,7 @@ led-$(CONFIG_SA1100_SIMPAD)		+= leds-simpad.o
 # LEDs support
 obj-$(CONFIG_LEDS) += $(led-y)
 
-# SA1110 USB client support
-#obj-$(CONFIG_SA1100_USB)		+= usb/
-
 # Miscelaneous functions
 obj-$(CONFIG_PM)			+= pm.o sleep.o
 obj-$(CONFIG_SA1100_SSP)		+= ssp.o
+

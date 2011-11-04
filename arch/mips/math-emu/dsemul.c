@@ -18,7 +18,6 @@
 #include <asm/fpu_emulator.h>
 
 #include "ieee754.h"
-#include "dsemul.h"
 
 /* Strap kernel emulator for full MIPS IV emulation */
 
@@ -54,8 +53,7 @@ struct emuframe {
 int mips_dsemul(struct pt_regs *regs, mips_instruction ir, unsigned long cpc)
 {
 	extern asmlinkage void handle_dsemulret(void);
-	mips_instruction *dsemul_insns;
-	struct emuframe *fr;
+	struct emuframe __user *fr;
 	int err;
 
 	if (ir == 0) {		/* a nop is easy */
@@ -87,15 +85,15 @@ int mips_dsemul(struct pt_regs *regs, mips_instruction ir, unsigned long cpc)
 	 */
 
 	/* Ensure that the two instructions are in the same cache line */
-	dsemul_insns = (mips_instruction *) ((regs->regs[29] - sizeof(struct emuframe)) & ~0x7);
-	fr = (struct emuframe *) dsemul_insns;
+	fr = (struct emuframe __user *)
+		((regs->regs[29] - sizeof(struct emuframe)) & ~0x7);
 
 	/* Verify that the stack pointer is not competely insane */
 	if (unlikely(!access_ok(VERIFY_WRITE, fr, sizeof(struct emuframe))))
 		return SIGBUS;
 
 	err = __put_user(ir, &fr->emul);
-	err |= __put_user((mips_instruction)BADINST, &fr->badinst);
+	err |= __put_user((mips_instruction)BREAK_MATH, &fr->badinst);
 	err |= __put_user((mips_instruction)BD_COOKIE, &fr->cookie);
 	err |= __put_user(cpc, &fr->epc);
 
@@ -113,12 +111,13 @@ int mips_dsemul(struct pt_regs *regs, mips_instruction ir, unsigned long cpc)
 
 int do_dsemulret(struct pt_regs *xcp)
 {
-	struct emuframe *fr;
+	struct emuframe __user *fr;
 	unsigned long epc;
 	u32 insn, cookie;
 	int err = 0;
 
-	fr = (struct emuframe *) (xcp->cp0_epc - sizeof(mips_instruction));
+	fr = (struct emuframe __user *)
+		(xcp->cp0_epc - sizeof(mips_instruction));
 
 	/*
 	 * If we can't even access the area, something is very wrong, but we'll
@@ -130,13 +129,13 @@ int do_dsemulret(struct pt_regs *xcp)
 	/*
 	 * Do some sanity checking on the stackframe:
 	 *
-	 *  - Is the instruction pointed to by the EPC an BADINST?
+	 *  - Is the instruction pointed to by the EPC an BREAK_MATH?
 	 *  - Is the following memory word the BD_COOKIE?
 	 */
 	err = __get_user(insn, &fr->badinst);
 	err |= __get_user(cookie, &fr->cookie);
 
-	if (unlikely(err || (insn != BADINST) || (cookie != BD_COOKIE))) {
+	if (unlikely(err || (insn != BREAK_MATH) || (cookie != BD_COOKIE))) {
 		fpuemustats.errors++;
 		return 0;
 	}

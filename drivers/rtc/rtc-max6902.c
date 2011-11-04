@@ -13,15 +13,13 @@
  *
  * 24-May-2006: Raphael Assenat <raph@8d.com>
  *                - Major rework
- *   				Converted to rtc_device and uses the SPI layer.
+ *				Converted to rtc_device and uses the SPI layer.
  *
  * ??-???-2005: Someone at Compulab
  *                - Initial driver creation.
  */
 
 #include <linux/module.h>
-#include <linux/version.h>
-
 #include <linux/kernel.h>
 #include <linux/platform_device.h>
 #include <linux/init.h>
@@ -89,13 +87,9 @@ static int max6902_get_reg(struct device *dev, unsigned char address,
 
 	/* do the i/o */
 	status = spi_sync(spi, &message);
+
 	if (status == 0)
-		status = message.status;
-	else
-		return status;
-
-	*data = chip->rx_buf[1];
-
+		*data = chip->rx_buf[1];
 	return status;
 }
 
@@ -125,28 +119,26 @@ static int max6902_get_datetime(struct device *dev, struct rtc_time *dt)
 
 	/* do the i/o */
 	status = spi_sync(spi, &message);
-	if (status == 0)
-		status = message.status;
-	else
+	if (status)
 		return status;
 
 	/* The chip sends data in this order:
 	 * Seconds, Minutes, Hours, Date, Month, Day, Year */
-	dt->tm_sec	= BCD2BIN(chip->buf[1]);
-	dt->tm_min	= BCD2BIN(chip->buf[2]);
-	dt->tm_hour	= BCD2BIN(chip->buf[3]);
-	dt->tm_mday	= BCD2BIN(chip->buf[4]);
-	dt->tm_mon	= BCD2BIN(chip->buf[5]) - 1;
-	dt->tm_wday	= BCD2BIN(chip->buf[6]);
-	dt->tm_year = BCD2BIN(chip->buf[7]);
+	dt->tm_sec	= bcd2bin(chip->buf[1]);
+	dt->tm_min	= bcd2bin(chip->buf[2]);
+	dt->tm_hour	= bcd2bin(chip->buf[3]);
+	dt->tm_mday	= bcd2bin(chip->buf[4]);
+	dt->tm_mon	= bcd2bin(chip->buf[5]) - 1;
+	dt->tm_wday	= bcd2bin(chip->buf[6]);
+	dt->tm_year = bcd2bin(chip->buf[7]);
 
-	century = BCD2BIN(tmp) * 100;
+	century = bcd2bin(tmp) * 100;
 
 	dt->tm_year += century;
 	dt->tm_year -= 1900;
 
 #ifdef MAX6902_DEBUG
-	printk("\n%s : Read RTC values\n",__FUNCTION__);
+	printk("\n%s : Read RTC values\n",__func__);
 	printk("tm_hour: %i\n",dt->tm_hour);
 	printk("tm_min : %i\n",dt->tm_min);
 	printk("tm_sec : %i\n",dt->tm_sec);
@@ -164,7 +156,7 @@ static int max6902_set_datetime(struct device *dev, struct rtc_time *dt)
 	dt->tm_year = dt->tm_year+1900;
 
 #ifdef MAX6902_DEBUG
-	printk("\n%s : Setting RTC values\n",__FUNCTION__);
+	printk("\n%s : Setting RTC values\n",__func__);
 	printk("tm_sec : %i\n",dt->tm_sec);
 	printk("tm_min : %i\n",dt->tm_min);
 	printk("tm_hour: %i\n",dt->tm_hour);
@@ -176,15 +168,15 @@ static int max6902_set_datetime(struct device *dev, struct rtc_time *dt)
 	/* Remove write protection */
 	max6902_set_reg(dev, 0xF, 0);
 
-	max6902_set_reg(dev, 0x01, BIN2BCD(dt->tm_sec));
-	max6902_set_reg(dev, 0x03, BIN2BCD(dt->tm_min));
-	max6902_set_reg(dev, 0x05, BIN2BCD(dt->tm_hour));
+	max6902_set_reg(dev, 0x01, bin2bcd(dt->tm_sec));
+	max6902_set_reg(dev, 0x03, bin2bcd(dt->tm_min));
+	max6902_set_reg(dev, 0x05, bin2bcd(dt->tm_hour));
 
-	max6902_set_reg(dev, 0x07, BIN2BCD(dt->tm_mday));
-	max6902_set_reg(dev, 0x09, BIN2BCD(dt->tm_mon+1));
-	max6902_set_reg(dev, 0x0B, BIN2BCD(dt->tm_wday));
-	max6902_set_reg(dev, 0x0D, BIN2BCD(dt->tm_year%100));
-	max6902_set_reg(dev, 0x13, BIN2BCD(dt->tm_year/100));
+	max6902_set_reg(dev, 0x07, bin2bcd(dt->tm_mday));
+	max6902_set_reg(dev, 0x09, bin2bcd(dt->tm_mon+1));
+	max6902_set_reg(dev, 0x0B, bin2bcd(dt->tm_wday));
+	max6902_set_reg(dev, 0x0D, bin2bcd(dt->tm_year%100));
+	max6902_set_reg(dev, 0x13, bin2bcd(dt->tm_year/100));
 
 	/* Compulab used a delay here. However, the datasheet
 	 * does not mention a delay being required anywhere... */
@@ -259,11 +251,11 @@ static int __devexit max6902_remove(struct spi_device *spi)
 
 static struct spi_driver max6902_driver = {
 	.driver = {
-		.name 	= "max6902",
+		.name	= "rtc-max6902",
 		.bus	= &spi_bus_type,
 		.owner	= THIS_MODULE,
 	},
-	.probe 	= max6902_probe,
+	.probe	= max6902_probe,
 	.remove = __devexit_p(max6902_remove),
 };
 

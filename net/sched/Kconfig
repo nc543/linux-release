@@ -2,9 +2,7 @@
 # Traffic control configuration.
 # 
 
-menu "QoS and/or fair queueing"
-
-config NET_SCHED
+menuconfig NET_SCHED
 	bool "QoS and/or fair queueing"
 	select NET_SCH_FIFO
 	---help---
@@ -40,9 +38,6 @@ config NET_SCHED
 
 	  The available schedulers are listed in the following questions; you
 	  can say Y to as many as you like. If unsure, say N now.
-
-config NET_SCH_FIFO
-	bool
 
 if NET_SCHED
 
@@ -97,7 +92,7 @@ config NET_SCH_ATM
 	  select classes of this queuing discipline.  Each class maps
 	  the flow(s) it is handling to a given virtual circuit.
 
-	  See the top of <file:net/sched/sch_atm.c>) for more details.
+	  See the top of <file:net/sched/sch_atm.c> for more details.
 
 	  To compile this code as a module, choose M here: the
 	  module will be called sch_atm.
@@ -110,6 +105,15 @@ config NET_SCH_PRIO
 
 	  To compile this code as a module, choose M here: the
 	  module will be called sch_prio.
+
+config NET_SCH_MULTIQ
+	tristate "Hardware Multiqueue-aware Multi Band Queuing (MULTIQ)"
+	---help---
+	  Say Y here if you want to use an n-band queue packet scheduler
+	  to support devices that have multiple hardware transmit queues.
+
+	  To compile this code as a module, choose M here: the
+	  module will be called sch_multiq.
 
 config NET_SCH_RED
 	tristate "Random Early Detection (RED)"
@@ -126,7 +130,7 @@ config NET_SCH_SFQ
 	tristate "Stochastic Fairness Queueing (SFQ)"
 	---help---
 	  Say Y here if you want to use the Stochastic Fairness Queueing (SFQ)
-	  packet scheduling algorithm .
+	  packet scheduling algorithm.
 
 	  See the top of <file:net/sched/sch_sfq.c> for more details.
 
@@ -192,6 +196,7 @@ config NET_SCH_NETEM
 
 config NET_SCH_INGRESS
 	tristate "Ingress Qdisc"
+	depends on NET_CLS_ACT
 	---help---
 	  Say Y here if you want to use classifiers for incoming packets.
 	  If unsure, say Y.
@@ -275,7 +280,6 @@ config CLS_U32_MARK
 config NET_CLS_RSVP
 	tristate "IPv4 Resource Reservation Protocol (RSVP)"
 	select NET_CLS
-	select NET_ESTIMATOR
 	---help---
 	  The Resource Reservation Protocol (RSVP) permits end systems to
 	  request a minimum and maximum data flow rate for a connection; this
@@ -290,17 +294,27 @@ config NET_CLS_RSVP
 config NET_CLS_RSVP6
 	tristate "IPv6 Resource Reservation Protocol (RSVP6)"
 	select NET_CLS
-	select NET_ESTIMATOR
 	---help---
 	  The Resource Reservation Protocol (RSVP) permits end systems to
 	  request a minimum and maximum data flow rate for a connection; this
 	  is important for real time data such as streaming sound or video.
 
 	  Say Y here if you want to be able to classify outgoing packets based
-	  on their RSVP requests and you are using the IPv6.
+	  on their RSVP requests and you are using the IPv6 protocol.
 
 	  To compile this code as a module, choose M here: the
 	  module will be called cls_rsvp6.
+
+config NET_CLS_FLOW
+	tristate "Flow classifier"
+	select NET_CLS
+	---help---
+	  If you say Y here, you will be able to classify packets based on
+	  a configurable combination of packet keys. This is mostly useful
+	  in combination with SFQ.
+
+	  To compile this code as a module, choose M here: the
+	  module will be called cls_flow.
 
 config NET_EMATCH
 	bool "Extended Matches"
@@ -382,7 +396,6 @@ config NET_EMATCH_TEXT
 
 config NET_CLS_ACT
 	bool "Actions"
-	select NET_ESTIMATOR
 	---help---
 	  Say Y here if you want to use traffic control actions. Actions
 	  get attached to classifiers and are invoked after a successful
@@ -439,6 +452,16 @@ config NET_ACT_IPT
 	  To compile this code as a module, choose M here: the
 	  module will be called ipt.
 
+config NET_ACT_NAT
+        tristate "Stateless NAT"
+        depends on NET_CLS_ACT
+        ---help---
+	  Say Y here to do stateless NAT on IPv4 packets.  You should use
+	  netfilter for NAT unless you know what you are doing.
+
+	  To compile this code as a module, choose M here: the
+	  module will be called nat.
+
 config NET_ACT_PEDIT
         tristate "Packet Editing"
         depends on NET_CLS_ACT
@@ -462,15 +485,16 @@ config NET_ACT_SIMP
 	  To compile this code as a module, choose M here: the
 	  module will be called simple.
 
-config NET_CLS_POLICE
-	bool "Traffic Policing (obsolete)"
-	depends on NET_CLS_ACT!=y
-	select NET_ESTIMATOR
-	---help---
-	  Say Y here if you want to do traffic policing, i.e. strict
-	  bandwidth limiting. This option is obsoleted by the traffic
-	  policer implemented as action, it stays here for compatibility
-	  reasons.
+config NET_ACT_SKBEDIT
+        tristate "SKB Editing"
+        depends on NET_CLS_ACT
+        ---help---
+	  Say Y here to change skb priority or queue_mapping settings.
+
+	  If unsure, say N.
+
+	  To compile this code as a module, choose M here: the
+	  module will be called skbedit.
 
 config NET_CLS_IND
 	bool "Incoming device classification"
@@ -480,14 +504,7 @@ config NET_CLS_IND
 	  classification based on the incoming device. This option is
 	  likely to disappear in favour of the metadata ematch.
 
-config NET_ESTIMATOR
-	bool "Rate estimator"
-	---help---
-	  Say Y here to allow using rate estimators to estimate the current
-	  rate-of-flow for network devices, queues, etc. This module is
-	  automatically selected if needed but can be selected manually for
-	  statistical purposes.
-
 endif # NET_SCHED
 
-endmenu
+config NET_SCH_FIFO
+	bool

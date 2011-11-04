@@ -91,7 +91,6 @@ static inline void matrox_cfb4_pal(u_int32_t* pal) {
 	for (i = 0; i < 16; i++) {
 		pal[i] = i * 0x11111111U;
 	}
-	pal[i] = 0xFFFFFFFF;
 }
 
 static inline void matrox_cfb8_pal(u_int32_t* pal) {
@@ -100,7 +99,6 @@ static inline void matrox_cfb8_pal(u_int32_t* pal) {
 	for (i = 0; i < 16; i++) {
 		pal[i] = i * 0x01010101U;
 	}
-	pal[i] = 0x0F0F0F0F;
 }
 
 static void matroxfb_copyarea(struct fb_info* info, const struct fb_copyarea* area);
@@ -115,7 +113,7 @@ void matrox_cfbX_init(WPMINFO2) {
 	u_int32_t mopmode;
 	int accel;
 
-	DBG(__FUNCTION__)
+	DBG(__func__)
 
 	mpitch = ACCESS_FBINFO(fbcon).var.xres_virtual;
 
@@ -145,13 +143,10 @@ void matrox_cfbX_init(WPMINFO2) {
 					ACCESS_FBINFO(fbops).fb_imageblit = matroxfb_imageblit;
 				}
 				break;
-		case 16:	if (ACCESS_FBINFO(fbcon).var.green.length == 5) {
+		case 16:	if (ACCESS_FBINFO(fbcon).var.green.length == 5)
 					maccess = 0xC0000001;
-					ACCESS_FBINFO(cmap[16]) = 0x7FFF7FFF;
-				} else {
+				else
 					maccess = 0x40000001;
-					ACCESS_FBINFO(cmap[16]) = 0xFFFFFFFF;
-				}
 				mopmode = M_OPMODE_16BPP;
 				if (accel) {
 					ACCESS_FBINFO(fbops).fb_copyarea = matroxfb_copyarea;
@@ -161,7 +156,6 @@ void matrox_cfbX_init(WPMINFO2) {
 				break;
 		case 24:	maccess = 0x00000003;
 				mopmode = M_OPMODE_24BPP;
-				ACCESS_FBINFO(cmap[16]) = 0xFFFFFFFF;
 				if (accel) {
 					ACCESS_FBINFO(fbops).fb_copyarea = matroxfb_copyarea;
 					ACCESS_FBINFO(fbops).fb_fillrect = matroxfb_fillrect;
@@ -170,7 +164,6 @@ void matrox_cfbX_init(WPMINFO2) {
 				break;
 		case 32:	maccess = 0x00000002;
 				mopmode = M_OPMODE_32BPP;
-				ACCESS_FBINFO(cmap[16]) = 0xFFFFFFFF;
 				if (accel) {
 					ACCESS_FBINFO(fbops).fb_copyarea = matroxfb_copyarea;
 					ACCESS_FBINFO(fbops).fb_fillrect = matroxfb_fillrect;
@@ -206,7 +199,7 @@ static void matrox_accel_bmove(WPMINFO int vxres, int sy, int sx, int dy, int dx
 	int start, end;
 	CRITFLAGS
 
-	DBG(__FUNCTION__)
+	DBG(__func__)
 
 	CRITBEGIN
 
@@ -242,7 +235,7 @@ static void matrox_accel_bmove_lin(WPMINFO int vxres, int sy, int sx, int dy, in
 	int start, end;
 	CRITFLAGS
 
-	DBG(__FUNCTION__)
+	DBG(__func__)
 
 	CRITBEGIN
 
@@ -294,7 +287,7 @@ static void matroxfb_accel_clear(WPMINFO u_int32_t color, int sy, int sx, int he
 		int width) {
 	CRITFLAGS
 
-	DBG(__FUNCTION__)
+	DBG(__func__)
 
 	CRITBEGIN
 
@@ -322,7 +315,7 @@ static void matroxfb_cfb4_clear(WPMINFO u_int32_t bgx, int sy, int sx, int heigh
 	int whattodo;
 	CRITFLAGS
 
-	DBG(__FUNCTION__)
+	DBG(__func__)
 
 	CRITBEGIN
 
@@ -395,7 +388,7 @@ static void matroxfb_1bpp_imageblit(WPMINFO u_int32_t fgx, u_int32_t bgx,
 	int easy;
 	CRITFLAGS
 
-	DBG_HEAVY(__FUNCTION__);
+	DBG_HEAVY(__func__);
 
 	step = (width + 7) >> 3;
 	charcell = height * step;
@@ -476,7 +469,7 @@ static void matroxfb_1bpp_imageblit(WPMINFO u_int32_t fgx, u_int32_t bgx,
 static void matroxfb_imageblit(struct fb_info* info, const struct fb_image* image) {
 	MINFO_FROM_INFO(info);
 
-	DBG_HEAVY(__FUNCTION__);
+	DBG_HEAVY(__func__);
 
 	if (image->depth == 1) {
 		u_int32_t fgx, bgx;

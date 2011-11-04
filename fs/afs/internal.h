@@ -351,10 +351,18 @@ struct afs_vnode {
 #define AFS_VNODE_ZAP_DATA	3		/* set if vnode's data should be invalidated */
 #define AFS_VNODE_DELETED	4		/* set if vnode deleted on server */
 #define AFS_VNODE_MOUNTPOINT	5		/* set if vnode is a mountpoint symlink */
+#define AFS_VNODE_LOCKING	6		/* set if waiting for lock on vnode */
+#define AFS_VNODE_READLOCKED	7		/* set if vnode is read-locked on the server */
+#define AFS_VNODE_WRITELOCKED	8		/* set if vnode is write-locked on the server */
+#define AFS_VNODE_UNLOCKING	9		/* set if vnode is being unlocked on the server */
 
 	long			acl_order;	/* ACL check count (callback break count) */
 
 	struct list_head	writebacks;	/* alterations in pagecache that need writing */
+	struct list_head	pending_locks;	/* locks waiting to be granted */
+	struct list_head	granted_locks;	/* locks granted on this file */
+	struct delayed_work	lock_work;	/* work to be done in locking */
+	struct key		*unlock_key;	/* key to be used in unlocking */
 
 	/* outstanding callback notification on this file */
 	struct rb_node		server_rb;	/* link in server->fs_vnodes */
@@ -461,8 +469,6 @@ extern bool afs_cm_incoming_call(struct afs_call *);
 extern const struct inode_operations afs_dir_inode_operations;
 extern const struct file_operations afs_dir_file_operations;
 
-extern int afs_permission(struct inode *, int, struct nameidata *);
-
 /*
  * file.c
  */
@@ -472,6 +478,15 @@ extern const struct file_operations afs_file_operations;
 
 extern int afs_open(struct inode *, struct file *);
 extern int afs_release(struct inode *, struct file *);
+
+/*
+ * flock.c
+ */
+extern void __exit afs_kill_lock_manager(void);
+extern void afs_lock_work(struct work_struct *);
+extern void afs_lock_may_be_available(struct afs_vnode *);
+extern int afs_lock(struct file *, int, struct file_lock *);
+extern int afs_flock(struct file *, int, struct file_lock *);
 
 /*
  * fsclient.c
@@ -513,6 +528,15 @@ extern int afs_fs_get_volume_status(struct afs_server *, struct key *,
 				    struct afs_vnode *,
 				    struct afs_volume_status *,
 				    const struct afs_wait_mode *);
+extern int afs_fs_set_lock(struct afs_server *, struct key *,
+			   struct afs_vnode *, afs_lock_type_t,
+			   const struct afs_wait_mode *);
+extern int afs_fs_extend_lock(struct afs_server *, struct key *,
+			      struct afs_vnode *,
+			      const struct afs_wait_mode *);
+extern int afs_fs_release_lock(struct afs_server *, struct key *,
+			       struct afs_vnode *,
+			       const struct afs_wait_mode *);
 
 /*
  * inode.c
@@ -544,11 +568,9 @@ extern int afs_abort_to_error(u32);
  */
 extern const struct inode_operations afs_mntpt_inode_operations;
 extern const struct file_operations afs_mntpt_file_operations;
-extern unsigned long afs_mntpt_expiry_timeout;
 
 extern int afs_mntpt_check_symlink(struct afs_vnode *, struct key *);
 extern void afs_mntpt_kill_timer(void);
-extern void afs_umount_begin(struct vfsmount *, int);
 
 /*
  * proc.c
@@ -581,7 +603,7 @@ extern void afs_clear_permits(struct afs_vnode *);
 extern void afs_cache_permit(struct afs_vnode *, struct key *, long);
 extern void afs_zap_permits(struct rcu_head *);
 extern struct key *afs_request_key(struct afs_cell *);
-extern int afs_permission(struct inode *, int, struct nameidata *);
+extern int afs_permission(struct inode *, int);
 
 /*
  * server.c
@@ -681,6 +703,10 @@ extern int afs_vnode_store_data(struct afs_writeback *, pgoff_t, pgoff_t,
 extern int afs_vnode_setattr(struct afs_vnode *, struct key *, struct iattr *);
 extern int afs_vnode_get_volume_status(struct afs_vnode *, struct key *,
 				       struct afs_volume_status *);
+extern int afs_vnode_set_lock(struct afs_vnode *, struct key *,
+			      afs_lock_type_t);
+extern int afs_vnode_extend_lock(struct afs_vnode *, struct key *);
+extern int afs_vnode_release_lock(struct afs_vnode *, struct key *);
 
 /*
  * volume.c
@@ -702,8 +728,12 @@ extern int afs_volume_release_fileserver(struct afs_vnode *,
  */
 extern int afs_set_page_dirty(struct page *);
 extern void afs_put_writeback(struct afs_writeback *);
-extern int afs_prepare_write(struct file *, struct page *, unsigned, unsigned);
-extern int afs_commit_write(struct file *, struct page *, unsigned, unsigned);
+extern int afs_write_begin(struct file *file, struct address_space *mapping,
+			loff_t pos, unsigned len, unsigned flags,
+			struct page **pagep, void **fsdata);
+extern int afs_write_end(struct file *file, struct address_space *mapping,
+			loff_t pos, unsigned len, unsigned copied,
+			struct page *page, void *fsdata);
 extern int afs_writepage(struct page *, struct writeback_control *);
 extern int afs_writepages(struct address_space *, struct writeback_control *);
 extern int afs_write_inode(struct inode *, int);
@@ -721,7 +751,7 @@ extern int afs_fsync(struct file *, struct dentry *, int);
 extern unsigned afs_debug;
 
 #define dbgprintk(FMT,...) \
-	printk("[%x%-6.6s] "FMT"\n", smp_processor_id(), current->comm ,##__VA_ARGS__)
+	printk("[%-6.6s] "FMT"\n", current->comm ,##__VA_ARGS__)
 
 /* make sure we maintain the format strings, even when debugging is disabled */
 static inline __attribute__((format(printf,1,2)))
@@ -729,8 +759,8 @@ void _dbprintk(const char *fmt, ...)
 {
 }
 
-#define kenter(FMT,...)	dbgprintk("==> %s("FMT")",__FUNCTION__ ,##__VA_ARGS__)
-#define kleave(FMT,...)	dbgprintk("<== %s()"FMT"",__FUNCTION__ ,##__VA_ARGS__)
+#define kenter(FMT,...)	dbgprintk("==> %s("FMT")",__func__ ,##__VA_ARGS__)
+#define kleave(FMT,...)	dbgprintk("<== %s()"FMT"",__func__ ,##__VA_ARGS__)
 #define kdebug(FMT,...)	dbgprintk("    "FMT ,##__VA_ARGS__)
 
 
@@ -763,8 +793,8 @@ do {							\
 } while (0)
 
 #else
-#define _enter(FMT,...)	_dbprintk("==> %s("FMT")",__FUNCTION__ ,##__VA_ARGS__)
-#define _leave(FMT,...)	_dbprintk("<== %s()"FMT"",__FUNCTION__ ,##__VA_ARGS__)
+#define _enter(FMT,...)	_dbprintk("==> %s("FMT")",__func__ ,##__VA_ARGS__)
+#define _leave(FMT,...)	_dbprintk("<== %s()"FMT"",__func__ ,##__VA_ARGS__)
 #define _debug(FMT,...)	_dbprintk("    "FMT ,##__VA_ARGS__)
 #endif
 

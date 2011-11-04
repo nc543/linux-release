@@ -1,7 +1,7 @@
 /*
  *	SNAP data link layer. Derived from 802.2
  *
- *		Alan Cox <Alan.Cox@linux.org>,
+ *		Alan Cox <alan@lxorguk.ukuu.org.uk>,
  *		from the 802.2 layer by Greg Page.
  *		Merged in additions from Greg Page's psnap.c.
  *
@@ -20,6 +20,7 @@
 #include <linux/mm.h>
 #include <linux/in.h>
 #include <linux/init.h>
+#include <linux/rculist.h>
 
 static LIST_HEAD(snap_list);
 static DEFINE_SPINLOCK(snap_lock);
@@ -30,11 +31,9 @@ static struct llc_sap *snap_sap;
  */
 static struct datalink_proto *find_snap_client(unsigned char *desc)
 {
-	struct list_head *entry;
 	struct datalink_proto *proto = NULL, *p;
 
-	list_for_each_rcu(entry, &snap_list) {
-		p = list_entry(entry, struct datalink_proto, node);
+	list_for_each_entry_rcu(p, &snap_list, node) {
 		if (!memcmp(p->type, desc, 5)) {
 			proto = p;
 			break;
@@ -55,6 +54,9 @@ static int snap_rcv(struct sk_buff *skb, struct net_device *dev,
 		.type = __constant_htons(ETH_P_SNAP),
 	};
 
+	if (unlikely(!pskb_may_pull(skb, 5)))
+		goto drop;
+
 	rcu_read_lock();
 	proto = find_snap_client(skb_transport_header(skb));
 	if (proto) {
@@ -62,14 +64,18 @@ static int snap_rcv(struct sk_buff *skb, struct net_device *dev,
 		skb->transport_header += 5;
 		skb_pull_rcsum(skb, 5);
 		rc = proto->rcvfunc(skb, dev, &snap_packet_type, orig_dev);
-	} else {
-		skb->sk = NULL;
-		kfree_skb(skb);
-		rc = 1;
 	}
-
 	rcu_read_unlock();
+
+	if (unlikely(!proto))
+		goto drop;
+
+out:
 	return rc;
+
+drop:
+	kfree_skb(skb);
+	goto out;
 }
 
 /*

@@ -23,7 +23,6 @@
 #include <asm/irq.h>
 #include <asm/sizes.h>
 
-#include <sound/driver.h>
 #include <sound/core.h>
 #include <sound/initval.h>
 #include <sound/ac97_codec.h>
@@ -209,7 +208,7 @@ static void aaci_fifo_irq(struct aaci *aaci, int channel, u32 mask)
 		void *ptr;
 
 		if (!aacirun->substream || !aacirun->start) {
-			dev_warn(&aaci->dev->dev, "RX interrupt???");
+			dev_warn(&aaci->dev->dev, "RX interrupt???\n");
 			writel(0, aacirun->base + AACI_IE);
 			return;
 		}
@@ -263,7 +262,7 @@ static void aaci_fifo_irq(struct aaci *aaci, int channel, u32 mask)
 		void *ptr;
 
 		if (!aacirun->substream || !aacirun->start) {
-			dev_warn(&aaci->dev->dev, "TX interrupt???");
+			dev_warn(&aaci->dev->dev, "TX interrupt???\n");
 			writel(0, aacirun->base + AACI_IE);
 			return;
 		}
@@ -1000,7 +999,7 @@ static struct aaci * __devinit aaci_init_card(struct amba_device *dev)
 	card = snd_card_new(SNDRV_DEFAULT_IDX1, SNDRV_DEFAULT_STR1,
 			    THIS_MODULE, sizeof(struct aaci));
 	if (card == NULL)
-		return ERR_PTR(-ENOMEM);
+		return NULL;
 
 	card->private_free = aaci_free_card;
 
@@ -1084,8 +1083,8 @@ static int __devinit aaci_probe(struct amba_device *dev, void *id)
 		return ret;
 
 	aaci = aaci_init_card(dev);
-	if (IS_ERR(aaci)) {
-		ret = PTR_ERR(aaci);
+	if (!aaci) {
+		ret = -ENOMEM;
 		goto out;
 	}
 

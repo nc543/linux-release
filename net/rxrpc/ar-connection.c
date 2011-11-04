@@ -71,7 +71,7 @@ struct rxrpc_conn_bundle *rxrpc_get_bundle(struct rxrpc_sock *rx,
 	struct rb_node *p, *parent, **pp;
 
 	_enter("%p{%x},%x,%hx,",
-	       rx, key_serial(key), trans->debug_id, ntohl(service_id));
+	       rx, key_serial(key), trans->debug_id, ntohs(service_id));
 
 	if (rx->trans == trans && rx->bundle) {
 		atomic_inc(&rx->bundle->usage);
@@ -651,7 +651,7 @@ rxrpc_incoming_connection(struct rxrpc_transport *trans,
 
 	candidate->trans = trans;
 	candidate->epoch = hdr->epoch;
-	candidate->cid = hdr->cid & __constant_cpu_to_be32(RXRPC_CIDMASK);
+	candidate->cid = hdr->cid & cpu_to_be32(RXRPC_CIDMASK);
 	candidate->service_id = hdr->serviceId;
 	candidate->security_ix = hdr->securityIndex;
 	candidate->in_clientflag = RXRPC_CLIENT_INITIATED;
@@ -791,7 +791,7 @@ void rxrpc_put_connection(struct rxrpc_connection *conn)
 
 	ASSERTCMP(atomic_read(&conn->usage), >, 0);
 
-	conn->put_time = xtime.tv_sec;
+	conn->put_time = get_seconds();
 	if (atomic_dec_and_test(&conn->usage)) {
 		_debug("zombie");
 		rxrpc_queue_delayed_work(&rxrpc_connection_reap, 0);
@@ -835,7 +835,7 @@ void rxrpc_connection_reaper(struct work_struct *work)
 
 	_enter("");
 
-	now = xtime.tv_sec;
+	now = get_seconds();
 	earliest = ULONG_MAX;
 
 	write_lock_bh(&rxrpc_connection_lock);

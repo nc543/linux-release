@@ -61,7 +61,7 @@ static int set_motor(struct motorcontrol *mc, int motor)
 
 	buffer = kzalloc(8, GFP_KERNEL);
 	if (!buffer) {
-		dev_err(&mc->intf->dev, "%s - out of memory\n", __FUNCTION__);
+		dev_err(&mc->intf->dev, "%s - out of memory\n", __func__);
 		return -ENOMEM;
 	}
 
@@ -95,9 +95,10 @@ static void motorcontrol_irq(struct urb *urb)
 	struct motorcontrol *mc = urb->context;
 	unsigned char *buffer = mc->data;
 	int i, level;
-	int status;
+	int retval;
+	int status = urb->status;;
 
-	switch (urb->status) {
+	switch (status) {
 	case 0:			/* success */
 		break;
 	case -ECONNRESET:	/* unlink */
@@ -151,12 +152,12 @@ static void motorcontrol_irq(struct urb *urb)
 		schedule_delayed_work(&mc->do_notify, 0);
 
 resubmit:
-	status = usb_submit_urb(urb, GFP_ATOMIC);
-	if (status)
+	retval = usb_submit_urb(urb, GFP_ATOMIC);
+	if (retval)
 		dev_err(&mc->intf->dev,
-			"can't resubmit intr, %s-%s/motorcontrol0, status %d",
+			"can't resubmit intr, %s-%s/motorcontrol0, retval %d\n",
 			mc->udev->bus->bus_name,
-			mc->udev->devpath, status);
+			mc->udev->devpath, retval);
 }
 
 static void do_notify(struct work_struct *work)
@@ -364,15 +365,13 @@ static int motorcontrol_probe(struct usb_interface *intf, const struct usb_devic
 	} while(value);
 	mc->dev_no = bit;
 
-	mc->dev = device_create(phidget_class, &mc->udev->dev, 0,
+	mc->dev = device_create(phidget_class, &mc->udev->dev, MKDEV(0, 0), mc,
 				"motorcontrol%d", mc->dev_no);
 	if (IS_ERR(mc->dev)) {
 		rc = PTR_ERR(mc->dev);
 		mc->dev = NULL;
 		goto out;
 	}
-
-	dev_set_drvdata(mc->dev, mc);
 
 	if (usb_submit_urb(mc->irq, GFP_KERNEL)) {
 		rc = -EIO;

@@ -1,9 +1,10 @@
 /* arch/sparc64/mm/tsb.c
  *
- * Copyright (C) 2006 David S. Miller <davem@davemloft.net>
+ * Copyright (C) 2006, 2008 David S. Miller <davem@davemloft.net>
  */
 
 #include <linux/kernel.h>
+#include <linux/preempt.h>
 #include <asm/system.h>
 #include <asm/page.h>
 #include <asm/tlbflush.h>
@@ -96,12 +97,6 @@ void flush_tsb_user(struct mmu_gather *mp)
 #elif defined(CONFIG_SPARC64_PAGE_SIZE_64KB)
 #define HV_PGSZ_IDX_BASE	HV_PGSZ_IDX_64K
 #define HV_PGSZ_MASK_BASE	HV_PGSZ_MASK_64K
-#elif defined(CONFIG_SPARC64_PAGE_SIZE_512KB)
-#define HV_PGSZ_IDX_BASE	HV_PGSZ_IDX_512K
-#define HV_PGSZ_MASK_BASE	HV_PGSZ_MASK_512K
-#elif defined(CONFIG_SPARC64_PAGE_SIZE_4MB)
-#define HV_PGSZ_IDX_BASE	HV_PGSZ_IDX_4MB
-#define HV_PGSZ_MASK_BASE	HV_PGSZ_MASK_4MB
 #else
 #error Broken base page size setting...
 #endif
@@ -182,7 +177,9 @@ static void setup_tsb_params(struct mm_struct *mm, unsigned long tsb_idx, unsign
 		break;
 
 	default:
-		BUG();
+		printk(KERN_ERR "TSB[%s:%d]: Impossible TSB size %lu, killing process.\n",
+		       current->comm, current->pid, tsb_bytes);
+		do_exit(SIGSEGV);
 	};
 	tte |= pte_sz_bits(page_sz);
 
@@ -262,8 +259,7 @@ void __init pgtable_cache_init(void)
 
 		tsb_caches[i] = kmem_cache_create(name,
 						  size, size,
-						  0,
-						  NULL, NULL);
+						  0, NULL);
 		if (!tsb_caches[i]) {
 			prom_printf("Could not create %s cache\n", name);
 			prom_halt();
@@ -320,7 +316,8 @@ retry_tsb_alloc:
 	if (new_size > (PAGE_SIZE * 2))
 		gfp_flags = __GFP_NOWARN | __GFP_NORETRY;
 
-	new_tsb = kmem_cache_alloc(tsb_caches[new_cache_index], gfp_flags);
+	new_tsb = kmem_cache_alloc_node(tsb_caches[new_cache_index],
+					gfp_flags, numa_node_id());
 	if (unlikely(!new_tsb)) {
 		/* Not being able to fork due to a high-order TSB
 		 * allocation failure is very bad behavior.  Just back
@@ -419,7 +416,9 @@ retry_tsb_alloc:
 		tsb_context_switch(mm);
 
 		/* Now force other processors to do the same.  */
+		preempt_disable();
 		smp_tsb_sync(mm);
+		preempt_enable();
 
 		/* Now it is safe to free the old tsb.  */
 		kmem_cache_free(tsb_caches[old_cache_index], old_tsb);

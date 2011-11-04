@@ -110,7 +110,8 @@ static int ali_configure(void)
 
 		nlvm_addr+= agp_bridge->gart_bus_addr;
 		nlvm_addr|=(agp_bridge->gart_bus_addr>>12);
-		printk(KERN_INFO PFX "nlvm top &base = %8x\n",nlvm_addr);
+		dev_info(&agp_bridge->dev->dev, "nlvm top &base = %8x\n",
+			 nlvm_addr);
 	}
 #endif
 
@@ -145,7 +146,6 @@ static void *m1541_alloc_page(struct agp_bridge_data *bridge)
 	void *addr = agp_generic_alloc_page(agp_bridge);
 	u32 temp;
 
-	global_flush_tlb();
 	if (!addr)
 		return NULL;
 
@@ -156,29 +156,33 @@ static void *m1541_alloc_page(struct agp_bridge_data *bridge)
 	return addr;
 }
 
-static void ali_destroy_page(void * addr)
+static void ali_destroy_page(void * addr, int flags)
 {
 	if (addr) {
-		global_cache_flush();	/* is this really needed?  --hch */
-		agp_generic_destroy_page(addr);
-		global_flush_tlb();
+		if (flags & AGP_PAGE_DESTROY_UNMAP) {
+			global_cache_flush();	/* is this really needed?  --hch */
+			agp_generic_destroy_page(addr, flags);
+		} else
+			agp_generic_destroy_page(addr, flags);
 	}
 }
 
-static void m1541_destroy_page(void * addr)
+static void m1541_destroy_page(void * addr, int flags)
 {
 	u32 temp;
 
 	if (addr == NULL)
 		return;
 
-	global_cache_flush();
+	if (flags & AGP_PAGE_DESTROY_UNMAP) {
+		global_cache_flush();
 
-	pci_read_config_dword(agp_bridge->dev, ALI_CACHE_FLUSH_CTRL, &temp);
-	pci_write_config_dword(agp_bridge->dev, ALI_CACHE_FLUSH_CTRL,
-			(((temp & ALI_CACHE_FLUSH_ADDR_MASK) |
-			  virt_to_gart(addr)) | ALI_CACHE_FLUSH_EN));
-	agp_generic_destroy_page(addr);
+		pci_read_config_dword(agp_bridge->dev, ALI_CACHE_FLUSH_CTRL, &temp);
+		pci_write_config_dword(agp_bridge->dev, ALI_CACHE_FLUSH_CTRL,
+				       (((temp & ALI_CACHE_FLUSH_ADDR_MASK) |
+					 virt_to_gart(addr)) | ALI_CACHE_FLUSH_EN));
+	}
+	agp_generic_destroy_page(addr, flags);
 }
 
 
@@ -312,8 +316,8 @@ static int __devinit agp_ali_probe(struct pci_dev *pdev,
 			goto found;
 	}
 
-	printk(KERN_ERR PFX "Unsupported ALi chipset (device id: %04x)\n",
-	     pdev->device);
+	dev_err(&pdev->dev, "unsupported ALi chipset [%04x/%04x])\n",
+		pdev->vendor, pdev->device);
 	return -ENODEV;
 
 
@@ -358,8 +362,7 @@ found:
 		bridge->driver = &ali_generic_bridge;
 	}
 
-	printk(KERN_INFO PFX "Detected ALi %s chipset\n",
-			devs[j].chipset_name);
+	dev_info(&pdev->dev, "ALi %s chipset\n", devs[j].chipset_name);
 
 	/* Fill in the mode register */
 	pci_read_config_dword(pdev,
@@ -414,6 +417,6 @@ static void __exit agp_ali_cleanup(void)
 module_init(agp_ali_init);
 module_exit(agp_ali_cleanup);
 
-MODULE_AUTHOR("Dave Jones <davej@codemonkey.org.uk>");
+MODULE_AUTHOR("Dave Jones <davej@redhat.com>");
 MODULE_LICENSE("GPL and additional rights");
 

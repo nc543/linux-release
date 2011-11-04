@@ -269,7 +269,7 @@ int av7110_pes_play(void *dest, struct dvb_ringbuffer *buf, int dlen)
 		return -1;
 	}
 
-	dvb_ringbuffer_read(buf, dest, (size_t) blen, 0);
+	dvb_ringbuffer_read(buf, dest, (size_t) blen);
 
 	dprintk(2, "pread=0x%08lx, pwrite=0x%08lx\n",
 	       (unsigned long) buf->pread, (unsigned long) buf->pwrite);
@@ -329,7 +329,7 @@ int av7110_set_volume(struct av7110 *av7110, int volleft, int volright)
 	return 0;
 }
 
-int av7110_set_vidmode(struct av7110 *av7110, int mode)
+int av7110_set_vidmode(struct av7110 *av7110, enum av7110_video_mode mode)
 {
 	int ret;
 	dprintk(2, "av7110:%p, \n", av7110);
@@ -348,11 +348,15 @@ int av7110_set_vidmode(struct av7110 *av7110, int mode)
 }
 
 
-static int sw2mode[16] = {
-	VIDEO_MODE_PAL, VIDEO_MODE_NTSC, VIDEO_MODE_NTSC, VIDEO_MODE_PAL,
-	VIDEO_MODE_NTSC, VIDEO_MODE_NTSC, VIDEO_MODE_PAL, VIDEO_MODE_NTSC,
-	VIDEO_MODE_PAL, VIDEO_MODE_PAL, VIDEO_MODE_PAL, VIDEO_MODE_PAL,
-	VIDEO_MODE_PAL, VIDEO_MODE_PAL, VIDEO_MODE_PAL, VIDEO_MODE_PAL,
+static enum av7110_video_mode sw2mode[16] = {
+	AV7110_VIDEO_MODE_PAL, AV7110_VIDEO_MODE_NTSC,
+	AV7110_VIDEO_MODE_NTSC, AV7110_VIDEO_MODE_PAL,
+	AV7110_VIDEO_MODE_NTSC, AV7110_VIDEO_MODE_NTSC,
+	AV7110_VIDEO_MODE_PAL, AV7110_VIDEO_MODE_NTSC,
+	AV7110_VIDEO_MODE_PAL, AV7110_VIDEO_MODE_PAL,
+	AV7110_VIDEO_MODE_PAL, AV7110_VIDEO_MODE_PAL,
+	AV7110_VIDEO_MODE_PAL, AV7110_VIDEO_MODE_PAL,
+	AV7110_VIDEO_MODE_PAL, AV7110_VIDEO_MODE_PAL,
 };
 
 static int get_video_format(struct av7110 *av7110, u8 *buf, int count)
@@ -391,7 +395,7 @@ static int get_video_format(struct av7110 *av7110, u8 *buf, int count)
  ****************************************************************************/
 
 static inline long aux_ring_buffer_write(struct dvb_ringbuffer *rbuf,
-					 const char *buf, unsigned long count)
+					 const u8 *buf, unsigned long count)
 {
 	unsigned long todo = count;
 	int free;
@@ -436,7 +440,7 @@ static void play_audio_cb(u8 *buf, int count, void *priv)
 #define FREE_COND (dvb_ringbuffer_free(&av7110->avout) >= 20 * 1024 && \
 		   dvb_ringbuffer_free(&av7110->aout) >= 20 * 1024)
 
-static ssize_t dvb_play(struct av7110 *av7110, const u8 __user *buf,
+static ssize_t dvb_play(struct av7110 *av7110, const char __user *buf,
 			unsigned long count, int nonblock, int type)
 {
 	unsigned long todo = count, n;
@@ -499,7 +503,7 @@ static ssize_t dvb_play_kernel(struct av7110 *av7110, const u8 *buf,
 	return count - todo;
 }
 
-static ssize_t dvb_aplay(struct av7110 *av7110, const u8 __user *buf,
+static ssize_t dvb_aplay(struct av7110 *av7110, const char __user *buf,
 			 unsigned long count, int nonblock, int type)
 {
 	unsigned long todo = count, n;
@@ -784,6 +788,9 @@ int av7110_write_to_decoder(struct dvb_demux_feed *feed, const u8 *buf, size_t l
 
 	dprintk(2, "av7110:%p, \n", av7110);
 
+	if (av7110->full_ts && demux->dmx.frontend->source != DMX_MEMORY_FE)
+		return 0;
+
 	switch (feed->pes_type) {
 	case 0:
 		if (av7110->audiostate.stream_source == AUDIO_SOURCE_MEMORY)
@@ -959,15 +966,44 @@ static u8 iframe_header[] = { 0x00, 0x00, 0x01, 0xe0, 0x00, 0x00, 0x80, 0x00, 0x
 
 #define MIN_IFRAME 400000
 
-static int play_iframe(struct av7110 *av7110, u8 __user *buf, unsigned int len, int nonblock)
+static int play_iframe(struct av7110 *av7110, char __user *buf, unsigned int len, int nonblock)
 {
-	int i, n;
+	unsigned i, n;
+	int progressive = 0;
+	int match = 0;
 
 	dprintk(2, "av7110:%p, \n", av7110);
 
 	if (!(av7110->playing & RP_VIDEO)) {
 		if (av7110_av_start_play(av7110, RP_VIDEO) < 0)
 			return -EBUSY;
+	}
+
+	/* search in buf for instances of 00 00 01 b5 1? */
+	for (i = 0; i < len; i++) {
+		unsigned char c;
+		if (get_user(c, buf + i))
+			return -EFAULT;
+		if (match == 5) {
+			progressive = c & 0x08;
+			match = 0;
+		}
+		if (c == 0x00) {
+			match = (match == 1 || match == 2) ? 2 : 1;
+			continue;
+		}
+		switch (match++) {
+		case 2: if (c == 0x01)
+				continue;
+			break;
+		case 3: if (c == 0xb5)
+				continue;
+			break;
+		case 4: if ((c & 0xf0) == 0x10)
+				continue;
+			break;
+		}
+		match = 0;
 	}
 
 	/* setting n always > 1, fixes problems when playing stillframes
@@ -981,7 +1017,11 @@ static int play_iframe(struct av7110 *av7110, u8 __user *buf, unsigned int len, 
 		dvb_play(av7110, buf, len, 0, 1);
 
 	av7110_ipack_flush(&av7110->ipack[1]);
-	return 0;
+
+	if (progressive)
+		return vidcom(av7110, AV_VIDEO_CMD_FREEZE, 1);
+	else
+		return 0;
 }
 
 
@@ -1082,19 +1122,18 @@ static int dvb_video_ioctl(struct inode *inode, struct file *file,
 	case VIDEO_SET_DISPLAY_FORMAT:
 	{
 		video_displayformat_t format = (video_displayformat_t) arg;
-		u16 val = 0;
 
 		switch (format) {
 		case VIDEO_PAN_SCAN:
-			val = VID_PAN_SCAN_PREF;
+			av7110->display_panscan = VID_PAN_SCAN_PREF;
 			break;
 
 		case VIDEO_LETTER_BOX:
-			val = VID_VC_AND_PS_PREF;
+			av7110->display_panscan = VID_VC_AND_PS_PREF;
 			break;
 
 		case VIDEO_CENTER_CUT_OUT:
-			val = VID_CENTRE_CUT_PREF;
+			av7110->display_panscan = VID_CENTRE_CUT_PREF;
 			break;
 
 		default:
@@ -1104,7 +1143,7 @@ static int dvb_video_ioctl(struct inode *inode, struct file *file,
 			break;
 		av7110->videostate.display_format = format;
 		ret = av7110_fw_cmd(av7110, COMTYPE_ENCODER, SetPanScanType,
-				    1, (u16) val);
+				    1, av7110->display_panscan);
 		break;
 	}
 
@@ -1466,8 +1505,9 @@ int av7110_av_register(struct av7110 *av7110)
 	av7110->videostate.play_state = VIDEO_STOPPED;
 	av7110->videostate.stream_source = VIDEO_SOURCE_DEMUX;
 	av7110->videostate.video_format = VIDEO_FORMAT_4_3;
-	av7110->videostate.display_format = VIDEO_CENTER_CUT_OUT;
+	av7110->videostate.display_format = VIDEO_LETTER_BOX;
 	av7110->display_ar = VIDEO_FORMAT_4_3;
+	av7110->display_panscan = VID_VC_AND_PS_PREF;
 
 	init_waitqueue_head(&av7110->video_events.wait_queue);
 	spin_lock_init(&av7110->video_events.lock);

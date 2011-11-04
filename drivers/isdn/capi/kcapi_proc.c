@@ -114,6 +114,7 @@ static int seq_contrstats_open(struct inode *inode, struct file *file)
 }
 
 static const struct file_operations proc_controller_ops = {
+	.owner		= THIS_MODULE,
 	.open		= seq_controller_open,
 	.read		= seq_read,
 	.llseek		= seq_lseek,
@@ -121,6 +122,7 @@ static const struct file_operations proc_controller_ops = {
 };
 
 static const struct file_operations proc_contrstats_ops = {
+	.owner		= THIS_MODULE,
 	.open		= seq_contrstats_open,
 	.read		= seq_read,
 	.llseek		= seq_lseek,
@@ -219,6 +221,7 @@ seq_applstats_open(struct inode *inode, struct file *file)
 }
 
 static const struct file_operations proc_applications_ops = {
+	.owner		= THIS_MODULE,
 	.open		= seq_applications_open,
 	.read		= seq_read,
 	.llseek		= seq_lseek,
@@ -226,53 +229,24 @@ static const struct file_operations proc_applications_ops = {
 };
 
 static const struct file_operations proc_applstats_ops = {
+	.owner		= THIS_MODULE,
 	.open		= seq_applstats_open,
 	.read		= seq_read,
 	.llseek		= seq_lseek,
 	.release	= seq_release,
 };
 
-static void
-create_seq_entry(char *name, mode_t mode, const struct file_operations *f)
-{
-	struct proc_dir_entry *entry;
-	entry = create_proc_entry(name, mode, NULL);
-	if (entry)
-		entry->proc_fops = f;
-}
-
 // ---------------------------------------------------------------------------
-
-
-static __inline__ struct capi_driver *capi_driver_get_idx(loff_t pos)
-{
-	struct capi_driver *drv = NULL;
-	struct list_head *l;
-	loff_t i;
-
-	i = 0;
-	list_for_each(l, &capi_drivers) {
-		drv = list_entry(l, struct capi_driver, list);
-		if (i++ == pos)
-			return drv;
-	}
-	return NULL;
-}
 
 static void *capi_driver_start(struct seq_file *seq, loff_t *pos)
 {
-	struct capi_driver *drv;
 	read_lock(&capi_drivers_list_lock);
-	drv = capi_driver_get_idx(*pos);
-	return drv;
+	return seq_list_start(&capi_drivers, *pos);
 }
 
 static void *capi_driver_next(struct seq_file *seq, void *v, loff_t *pos)
 {
-	struct capi_driver *drv = (struct capi_driver *)v;
-	++*pos;
-	if (drv->list.next == &capi_drivers) return NULL;
-	return list_entry(drv->list.next, struct capi_driver, list);
+	return seq_list_next(v, &capi_drivers, pos);
 }
 
 static void capi_driver_stop(struct seq_file *seq, void *v)
@@ -282,7 +256,8 @@ static void capi_driver_stop(struct seq_file *seq, void *v)
 
 static int capi_driver_show(struct seq_file *seq, void *v)
 {
-	struct capi_driver *drv = (struct capi_driver *)v;
+	struct capi_driver *drv = list_entry(v, struct capi_driver, list);
+
 	seq_printf(seq, "%-32s %s\n", drv->name, drv->revision);
 	return 0;
 }
@@ -303,6 +278,7 @@ seq_capi_driver_open(struct inode *inode, struct file *file)
 }
 
 static const struct file_operations proc_driver_ops = {
+	.owner		= THIS_MODULE,
 	.open		= seq_capi_driver_open,
 	.read		= seq_read,
 	.llseek		= seq_lseek,
@@ -316,11 +292,11 @@ kcapi_proc_init(void)
 {
 	proc_mkdir("capi",             NULL);
 	proc_mkdir("capi/controllers", NULL);
-	create_seq_entry("capi/controller",   0, &proc_controller_ops);
-	create_seq_entry("capi/contrstats",   0, &proc_contrstats_ops);
-	create_seq_entry("capi/applications", 0, &proc_applications_ops);
-	create_seq_entry("capi/applstats",    0, &proc_applstats_ops);
-	create_seq_entry("capi/driver",       0, &proc_driver_ops);
+	proc_create("capi/controller",   0, NULL, &proc_controller_ops);
+	proc_create("capi/contrstats",   0, NULL, &proc_contrstats_ops);
+	proc_create("capi/applications", 0, NULL, &proc_applications_ops);
+	proc_create("capi/applstats",    0, NULL, &proc_applstats_ops);
+	proc_create("capi/driver",       0, NULL, &proc_driver_ops);
 }
 
 void __exit

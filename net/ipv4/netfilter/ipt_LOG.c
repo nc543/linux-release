@@ -22,16 +22,11 @@
 #include <linux/netfilter.h>
 #include <linux/netfilter/x_tables.h>
 #include <linux/netfilter_ipv4/ipt_LOG.h>
+#include <net/netfilter/nf_log.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
-MODULE_DESCRIPTION("iptables syslog logging module");
-
-#if 0
-#define DEBUGP printk
-#else
-#define DEBUGP(format, args...)
-#endif
+MODULE_DESCRIPTION("Xtables: IPv4 packet logging to syslog");
 
 /* Use lock to serialize, so printks don't overlap */
 static DEFINE_SPINLOCK(log_lock);
@@ -41,7 +36,8 @@ static void dump_packet(const struct nf_loginfo *info,
 			const struct sk_buff *skb,
 			unsigned int iphoff)
 {
-	struct iphdr _iph, *ih;
+	struct iphdr _iph;
+	const struct iphdr *ih;
 	unsigned int logflags;
 
 	if (info->type == NF_LOG_TYPE_LOG)
@@ -80,7 +76,8 @@ static void dump_packet(const struct nf_loginfo *info,
 
 	if ((logflags & IPT_LOG_IPOPT)
 	    && ih->ihl * 4 > sizeof(struct iphdr)) {
-		unsigned char _opt[4 * 15 - sizeof(struct iphdr)], *op;
+		const unsigned char *op;
+		unsigned char _opt[4 * 15 - sizeof(struct iphdr)];
 		unsigned int i, optsize;
 
 		optsize = ih->ihl * 4 - sizeof(struct iphdr);
@@ -100,7 +97,8 @@ static void dump_packet(const struct nf_loginfo *info,
 
 	switch (ih->protocol) {
 	case IPPROTO_TCP: {
-		struct tcphdr _tcph, *th;
+		struct tcphdr _tcph;
+		const struct tcphdr *th;
 
 		/* Max length: 10 "PROTO=TCP " */
 		printk("PROTO=TCP ");
@@ -151,7 +149,7 @@ static void dump_packet(const struct nf_loginfo *info,
 		if ((logflags & IPT_LOG_TCPOPT)
 		    && th->doff * 4 > sizeof(struct tcphdr)) {
 			unsigned char _opt[4 * 15 - sizeof(struct tcphdr)];
-			unsigned char *op;
+			const unsigned char *op;
 			unsigned int i, optsize;
 
 			optsize = th->doff * 4 - sizeof(struct tcphdr);
@@ -173,7 +171,8 @@ static void dump_packet(const struct nf_loginfo *info,
 	}
 	case IPPROTO_UDP:
 	case IPPROTO_UDPLITE: {
-		struct udphdr _udph, *uh;
+		struct udphdr _udph;
+		const struct udphdr *uh;
 
 		if (ih->protocol == IPPROTO_UDP)
 			/* Max length: 10 "PROTO=UDP "     */
@@ -200,7 +199,8 @@ static void dump_packet(const struct nf_loginfo *info,
 		break;
 	}
 	case IPPROTO_ICMP: {
-		struct icmphdr _icmph, *ich;
+		struct icmphdr _icmph;
+		const struct icmphdr *ich;
 		static const size_t required_len[NR_ICMP_TYPES+1]
 			= { [ICMP_ECHOREPLY] = 4,
 			    [ICMP_DEST_UNREACH]
@@ -285,7 +285,8 @@ static void dump_packet(const struct nf_loginfo *info,
 	}
 	/* Max Length */
 	case IPPROTO_AH: {
-		struct ip_auth_hdr _ahdr, *ah;
+		struct ip_auth_hdr _ahdr;
+		const struct ip_auth_hdr *ah;
 
 		if (ntohs(ih->frag_off) & IP_OFFSET)
 			break;
@@ -307,7 +308,8 @@ static void dump_packet(const struct nf_loginfo *info,
 		break;
 	}
 	case IPPROTO_ESP: {
-		struct ip_esp_hdr _esph, *eh;
+		struct ip_esp_hdr _esph;
+		const struct ip_esp_hdr *eh;
 
 		/* Max length: 10 "PROTO=ESP " */
 		printk("PROTO=ESP ");
@@ -337,9 +339,15 @@ static void dump_packet(const struct nf_loginfo *info,
 	if ((logflags & IPT_LOG_UID) && !iphoff && skb->sk) {
 		read_lock_bh(&skb->sk->sk_callback_lock);
 		if (skb->sk->sk_socket && skb->sk->sk_socket->file)
-			printk("UID=%u ", skb->sk->sk_socket->file->f_uid);
+			printk("UID=%u GID=%u ",
+				skb->sk->sk_socket->file->f_uid,
+				skb->sk->sk_socket->file->f_gid);
 		read_unlock_bh(&skb->sk->sk_callback_lock);
 	}
+
+	/* Max length: 16 "MARK=0xFFFFFFFF " */
+	if (!iphoff && skb->mark)
+		printk("MARK=0x%x ", skb->mark);
 
 	/* Proto    Max log string length */
 	/* IP:      40+46+6+11+127 = 230 */
@@ -367,7 +375,7 @@ static struct nf_loginfo default_loginfo = {
 };
 
 static void
-ipt_log_packet(unsigned int pf,
+ipt_log_packet(u_int8_t pf,
 	       unsigned int hooknum,
 	       const struct sk_buff *skb,
 	       const struct net_device *in,
@@ -385,11 +393,13 @@ ipt_log_packet(unsigned int pf,
 	       out ? out->name : "");
 #ifdef CONFIG_BRIDGE_NETFILTER
 	if (skb->nf_bridge) {
-		struct net_device *physindev = skb->nf_bridge->physindev;
-		struct net_device *physoutdev = skb->nf_bridge->physoutdev;
+		const struct net_device *physindev;
+		const struct net_device *physoutdev;
 
+		physindev = skb->nf_bridge->physindev;
 		if (physindev && in != physindev)
 			printk("PHYSIN=%s ", physindev->name);
+		physoutdev = skb->nf_bridge->physoutdev;
 		if (physoutdev && out != physoutdev)
 			printk("PHYSOUT=%s ", physoutdev->name);
 	}
@@ -416,78 +426,67 @@ ipt_log_packet(unsigned int pf,
 }
 
 static unsigned int
-ipt_log_target(struct sk_buff **pskb,
-	       const struct net_device *in,
-	       const struct net_device *out,
-	       unsigned int hooknum,
-	       const struct xt_target *target,
-	       const void *targinfo)
+log_tg(struct sk_buff *skb, const struct xt_target_param *par)
 {
-	const struct ipt_log_info *loginfo = targinfo;
+	const struct ipt_log_info *loginfo = par->targinfo;
 	struct nf_loginfo li;
 
 	li.type = NF_LOG_TYPE_LOG;
 	li.u.log.level = loginfo->level;
 	li.u.log.logflags = loginfo->logflags;
 
-	ipt_log_packet(PF_INET, hooknum, *pskb, in, out, &li,
+	ipt_log_packet(NFPROTO_IPV4, par->hooknum, skb, par->in, par->out, &li,
 		       loginfo->prefix);
 	return XT_CONTINUE;
 }
 
-static int ipt_log_checkentry(const char *tablename,
-			      const void *e,
-			      const struct xt_target *target,
-			      void *targinfo,
-			      unsigned int hook_mask)
+static bool log_tg_check(const struct xt_tgchk_param *par)
 {
-	const struct ipt_log_info *loginfo = targinfo;
+	const struct ipt_log_info *loginfo = par->targinfo;
 
 	if (loginfo->level >= 8) {
-		DEBUGP("LOG: level %u >= 8\n", loginfo->level);
-		return 0;
+		pr_debug("LOG: level %u >= 8\n", loginfo->level);
+		return false;
 	}
 	if (loginfo->prefix[sizeof(loginfo->prefix)-1] != '\0') {
-		DEBUGP("LOG: prefix term %i\n",
-		       loginfo->prefix[sizeof(loginfo->prefix)-1]);
-		return 0;
+		pr_debug("LOG: prefix term %i\n",
+			 loginfo->prefix[sizeof(loginfo->prefix)-1]);
+		return false;
 	}
-	return 1;
+	return true;
 }
 
-static struct xt_target ipt_log_reg = {
+static struct xt_target log_tg_reg __read_mostly = {
 	.name		= "LOG",
-	.family		= AF_INET,
-	.target		= ipt_log_target,
+	.family		= NFPROTO_IPV4,
+	.target		= log_tg,
 	.targetsize	= sizeof(struct ipt_log_info),
-	.checkentry	= ipt_log_checkentry,
+	.checkentry	= log_tg_check,
 	.me		= THIS_MODULE,
 };
 
-static struct nf_logger ipt_log_logger ={
+static const struct nf_logger ipt_log_logger ={
 	.name		= "ipt_LOG",
 	.logfn		= &ipt_log_packet,
 	.me		= THIS_MODULE,
 };
 
-static int __init ipt_log_init(void)
+static int __init log_tg_init(void)
 {
 	int ret;
 
-	ret = xt_register_target(&ipt_log_reg);
+	ret = xt_register_target(&log_tg_reg);
 	if (ret < 0)
 		return ret;
-	ret = nf_log_register(PF_INET, &ipt_log_logger);
-	if (ret < 0 && ret != -EEXIST)
-		xt_unregister_target(&ipt_log_reg);
-	return ret;
+	nf_log_register(NFPROTO_IPV4, &ipt_log_logger);
+	return 0;
 }
 
-static void __exit ipt_log_fini(void)
+static void __exit log_tg_exit(void)
 {
 	nf_log_unregister(&ipt_log_logger);
-	xt_unregister_target(&ipt_log_reg);
+	xt_unregister_target(&log_tg_reg);
 }
 
-module_init(ipt_log_init);
-module_exit(ipt_log_fini);
+module_init(log_tg_init);
+module_exit(log_tg_exit);

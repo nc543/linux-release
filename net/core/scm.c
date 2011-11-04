@@ -24,6 +24,8 @@
 #include <linux/interrupt.h>
 #include <linux/netdevice.h>
 #include <linux/security.h>
+#include <linux/pid.h>
+#include <linux/nsproxy.h>
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
@@ -42,7 +44,7 @@
 
 static __inline__ int scm_check_creds(struct ucred *creds)
 {
-	if ((creds->pid == current->tgid || capable(CAP_SYS_ADMIN)) &&
+	if ((creds->pid == task_tgid_vnr(current) || capable(CAP_SYS_ADMIN)) &&
 	    ((creds->uid == current->uid || creds->uid == current->euid ||
 	      creds->uid == current->suid) || capable(CAP_SETUID)) &&
 	    ((creds->gid == current->gid || creds->gid == current->egid ||
@@ -104,9 +106,25 @@ void __scm_destroy(struct scm_cookie *scm)
 
 	if (fpl) {
 		scm->fp = NULL;
-		for (i=fpl->count-1; i>=0; i--)
-			fput(fpl->fp[i]);
-		kfree(fpl);
+		if (current->scm_work_list) {
+			list_add_tail(&fpl->list, current->scm_work_list);
+		} else {
+			LIST_HEAD(work_list);
+
+			current->scm_work_list = &work_list;
+
+			list_add(&fpl->list, &work_list);
+			while (!list_empty(&work_list)) {
+				fpl = list_first_entry(&work_list, struct scm_fp_list, list);
+
+				list_del(&fpl->list);
+				for (i=fpl->count-1; i>=0; i--)
+					fput(fpl->fp[i]);
+				kfree(fpl);
+			}
+
+			current->scm_work_list = NULL;
+		}
 	}
 }
 
@@ -167,7 +185,8 @@ error:
 
 int put_cmsg(struct msghdr * msg, int level, int type, int len, void *data)
 {
-	struct cmsghdr __user *cm = (struct cmsghdr __user *)msg->msg_control;
+	struct cmsghdr __user *cm
+		= (__force struct cmsghdr __user *)msg->msg_control;
 	struct cmsghdr cmhdr;
 	int cmlen = CMSG_LEN(len);
 	int err;
@@ -193,6 +212,8 @@ int put_cmsg(struct msghdr * msg, int level, int type, int len, void *data)
 	if (copy_to_user(CMSG_DATA(cm), data, cmlen - sizeof(struct cmsghdr)))
 		goto out;
 	cmlen = CMSG_SPACE(len);
+	if (msg->msg_controllen < cmlen)
+		cmlen = msg->msg_controllen;
 	msg->msg_control += cmlen;
 	msg->msg_controllen -= cmlen;
 	err = 0;
@@ -202,7 +223,8 @@ out:
 
 void scm_detach_fds(struct msghdr *msg, struct scm_cookie *scm)
 {
-	struct cmsghdr __user *cm = (struct cmsghdr __user*)msg->msg_control;
+	struct cmsghdr __user *cm
+		= (__force struct cmsghdr __user*)msg->msg_control;
 
 	int fdmax = 0;
 	int fdnum = scm->fp->count;
@@ -222,13 +244,15 @@ void scm_detach_fds(struct msghdr *msg, struct scm_cookie *scm)
 	if (fdnum < fdmax)
 		fdmax = fdnum;
 
-	for (i=0, cmfptr=(int __user *)CMSG_DATA(cm); i<fdmax; i++, cmfptr++)
+	for (i=0, cmfptr=(__force int __user *)CMSG_DATA(cm); i<fdmax;
+	     i++, cmfptr++)
 	{
 		int new_fd;
 		err = security_file_receive(fp[i]);
 		if (err)
 			break;
-		err = get_unused_fd();
+		err = get_unused_fd_flags(MSG_CMSG_CLOEXEC & msg->msg_flags
+					  ? O_CLOEXEC : 0);
 		if (err < 0)
 			break;
 		new_fd = err;

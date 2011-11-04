@@ -14,7 +14,8 @@
 static DEFINE_PER_CPU(struct hv_mmu_statistics, mmu_stats) __attribute__((aligned(64)));
 
 #define SHOW_MMUSTAT_ULONG(NAME) \
-static ssize_t show_##NAME(struct sys_device *dev, char *buf) \
+static ssize_t show_##NAME(struct sys_device *dev, \
+			struct sysdev_attribute *attr, char *buf) \
 { \
 	struct hv_mmu_statistics *p = &per_cpu(mmu_stats, dev->id); \
 	return sprintf(buf, "%lu\n", p->NAME); \
@@ -135,13 +136,16 @@ static unsigned long write_mmustat_enable(unsigned long val)
 	return sun4v_mmustat_conf(ra, &orig_ra);
 }
 
-static ssize_t show_mmustat_enable(struct sys_device *s, char *buf)
+static ssize_t show_mmustat_enable(struct sys_device *s,
+				struct sysdev_attribute *attr, char *buf)
 {
 	unsigned long val = run_on_cpu(s->id, read_mmustat_enable, 0);
 	return sprintf(buf, "%lx\n", val);
 }
 
-static ssize_t store_mmustat_enable(struct sys_device *s, const char *buf, size_t count)
+static ssize_t store_mmustat_enable(struct sys_device *s,
+			struct sysdev_attribute *attr, const char *buf,
+			size_t count)
 {
 	unsigned long val, err;
 	int ret = sscanf(buf, "%ld", &val);
@@ -179,21 +183,22 @@ static void unregister_mmu_stats(struct sys_device *s)
 #endif
 
 #define SHOW_CPUDATA_ULONG_NAME(NAME, MEMBER) \
-static ssize_t show_##NAME(struct sys_device *dev, char *buf) \
+static ssize_t show_##NAME(struct sys_device *dev, \
+		struct sysdev_attribute *attr, char *buf) \
 { \
 	cpuinfo_sparc *c = &cpu_data(dev->id); \
 	return sprintf(buf, "%lu\n", c->MEMBER); \
 }
 
 #define SHOW_CPUDATA_UINT_NAME(NAME, MEMBER) \
-static ssize_t show_##NAME(struct sys_device *dev, char *buf) \
+static ssize_t show_##NAME(struct sys_device *dev, \
+		struct sysdev_attribute *attr, char *buf) \
 { \
 	cpuinfo_sparc *c = &cpu_data(dev->id); \
 	return sprintf(buf, "%u\n", c->MEMBER); \
 }
 
 SHOW_CPUDATA_ULONG_NAME(clock_tick, clock_tick);
-SHOW_CPUDATA_ULONG_NAME(udelay_val, udelay_val);
 SHOW_CPUDATA_UINT_NAME(l1_dcache_size, dcache_size);
 SHOW_CPUDATA_UINT_NAME(l1_dcache_line_size, dcache_line_size);
 SHOW_CPUDATA_UINT_NAME(l1_icache_size, icache_size);
@@ -203,7 +208,6 @@ SHOW_CPUDATA_UINT_NAME(l2_cache_line_size, ecache_line_size);
 
 static struct sysdev_attribute cpu_core_attrs[] = {
 	_SYSDEV_ATTR(clock_tick,          0444, show_clock_tick, NULL),
-	_SYSDEV_ATTR(udelay_val,          0444, show_udelay_val, NULL),
 	_SYSDEV_ATTR(l1_dcache_size,      0444, show_l1_dcache_size, NULL),
 	_SYSDEV_ATTR(l1_dcache_line_size, 0444, show_l1_dcache_line_size, NULL),
 	_SYSDEV_ATTR(l1_icache_size,      0444, show_l1_icache_size, NULL),
@@ -275,9 +279,21 @@ static void __init check_mmu_stats(void)
 		mmu_stats_supported = 1;
 }
 
+static void register_nodes(void)
+{
+#ifdef CONFIG_NUMA
+	int i;
+
+	for (i = 0; i < MAX_NUMNODES; i++)
+		register_one_node(i);
+#endif
+}
+
 static int __init topology_init(void)
 {
 	int cpu;
+
+	register_nodes();
 
 	check_mmu_stats();
 

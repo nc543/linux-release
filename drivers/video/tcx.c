@@ -17,10 +17,9 @@
 #include <linux/init.h>
 #include <linux/fb.h>
 #include <linux/mm.h>
+#include <linux/of_device.h>
 
 #include <asm/io.h>
-#include <asm/prom.h>
-#include <asm/of_device.h>
 #include <asm/fbio.h>
 
 #include "sbuslib.h"
@@ -84,7 +83,7 @@ struct tcx_tec {
 
 struct tcx_thc {
 	u32 thc_rev;
-        u32 thc_pad0[511];
+	u32 thc_pad0[511];
 	u32 thc_hs;		/* hsync timing */
 	u32 thc_hsdvs;
 	u32 thc_hd;
@@ -126,10 +125,10 @@ struct tcx_par {
 };
 
 /* Reset control plane so that WID is 8-bit plane. */
-static void __tcx_set_control_plane (struct tcx_par *par)
+static void __tcx_set_control_plane(struct tcx_par *par)
 {
 	u32 __iomem *p, *pend;
-        
+
 	if (par->lowdepth)
 		return;
 
@@ -143,8 +142,8 @@ static void __tcx_set_control_plane (struct tcx_par *par)
 		sbus_writel(tmp, p);
 	}
 }
-                                                
-static void tcx_reset (struct fb_info *info)
+
+static void tcx_reset(struct fb_info *info)
 {
 	struct tcx_par *par = (struct tcx_par *) info->par;
 	unsigned long flags;
@@ -345,88 +344,83 @@ tcx_init_fix(struct fb_info *info, int linebytes)
 	info->fix.accel = FB_ACCEL_SUN_TCX;
 }
 
-struct all_info {
-	struct fb_info info;
-	struct tcx_par par;
-};
-
-static void tcx_unmap_regs(struct of_device *op, struct all_info *all)
+static void tcx_unmap_regs(struct of_device *op, struct fb_info *info,
+			   struct tcx_par *par)
 {
-	if (all->par.tec)
+	if (par->tec)
 		of_iounmap(&op->resource[7],
-			   all->par.tec, sizeof(struct tcx_tec));
-	if (all->par.thc)
+			   par->tec, sizeof(struct tcx_tec));
+	if (par->thc)
 		of_iounmap(&op->resource[9],
-			   all->par.thc, sizeof(struct tcx_thc));
-	if (all->par.bt)
+			   par->thc, sizeof(struct tcx_thc));
+	if (par->bt)
 		of_iounmap(&op->resource[8],
-			   all->par.bt, sizeof(struct bt_regs));
-	if (all->par.cplane)
+			   par->bt, sizeof(struct bt_regs));
+	if (par->cplane)
 		of_iounmap(&op->resource[4],
-			   all->par.cplane, all->par.fbsize * sizeof(u32));
-	if (all->info.screen_base)
+			   par->cplane, par->fbsize * sizeof(u32));
+	if (info->screen_base)
 		of_iounmap(&op->resource[0],
-			   all->info.screen_base, all->par.fbsize);
+			   info->screen_base, par->fbsize);
 }
 
-static int __devinit tcx_init_one(struct of_device *op)
+static int __devinit tcx_probe(struct of_device *op,
+			       const struct of_device_id *match)
 {
 	struct device_node *dp = op->node;
-	struct all_info *all;
+	struct fb_info *info;
+	struct tcx_par *par;
 	int linebytes, i, err;
 
-	all = kzalloc(sizeof(*all), GFP_KERNEL);
-	if (!all)
-		return -ENOMEM;
+	info = framebuffer_alloc(sizeof(struct tcx_par), &op->dev);
 
-	spin_lock_init(&all->par.lock);
+	err = -ENOMEM;
+	if (!info)
+		goto out_err;
+	par = info->par;
 
-	all->par.lowdepth =
+	spin_lock_init(&par->lock);
+
+	par->lowdepth =
 		(of_find_property(dp, "tcx-8-bit", NULL) != NULL);
 
-	sbusfb_fill_var(&all->info.var, dp->node, 8);
-	all->info.var.red.length = 8;
-	all->info.var.green.length = 8;
-	all->info.var.blue.length = 8;
+	sbusfb_fill_var(&info->var, dp, 8);
+	info->var.red.length = 8;
+	info->var.green.length = 8;
+	info->var.blue.length = 8;
 
 	linebytes = of_getintprop_default(dp, "linebytes",
-					  all->info.var.xres);
-	all->par.fbsize = PAGE_ALIGN(linebytes * all->info.var.yres);
+					  info->var.xres);
+	par->fbsize = PAGE_ALIGN(linebytes * info->var.yres);
 
-	all->par.tec = of_ioremap(&op->resource[7], 0,
+	par->tec = of_ioremap(&op->resource[7], 0,
 				  sizeof(struct tcx_tec), "tcx tec");
-	all->par.thc = of_ioremap(&op->resource[9], 0,
+	par->thc = of_ioremap(&op->resource[9], 0,
 				  sizeof(struct tcx_thc), "tcx thc");
-	all->par.bt = of_ioremap(&op->resource[8], 0,
+	par->bt = of_ioremap(&op->resource[8], 0,
 				 sizeof(struct bt_regs), "tcx dac");
-	all->info.screen_base = of_ioremap(&op->resource[0], 0,
-					   all->par.fbsize, "tcx ram");
-	if (!all->par.tec || !all->par.thc ||
-	    !all->par.bt || !all->info.screen_base) {
-		tcx_unmap_regs(op, all);
-		kfree(all);
-		return -ENOMEM;
-	}
+	info->screen_base = of_ioremap(&op->resource[0], 0,
+					   par->fbsize, "tcx ram");
+	if (!par->tec || !par->thc ||
+	    !par->bt || !info->screen_base)
+		goto out_unmap_regs;
 
-	memcpy(&all->par.mmap_map, &__tcx_mmap_map, sizeof(all->par.mmap_map));
-	if (!all->par.lowdepth) {
-		all->par.cplane = of_ioremap(&op->resource[4], 0,
-					     all->par.fbsize * sizeof(u32),
+	memcpy(&par->mmap_map, &__tcx_mmap_map, sizeof(par->mmap_map));
+	if (!par->lowdepth) {
+		par->cplane = of_ioremap(&op->resource[4], 0,
+					     par->fbsize * sizeof(u32),
 					     "tcx cplane");
-		if (!all->par.cplane) {
-			tcx_unmap_regs(op, all);
-			kfree(all);
-			return -ENOMEM;
-		}
+		if (!par->cplane)
+			goto out_unmap_regs;
 	} else {
-		all->par.mmap_map[1].size = SBUS_MMAP_EMPTY;
-		all->par.mmap_map[4].size = SBUS_MMAP_EMPTY;
-		all->par.mmap_map[5].size = SBUS_MMAP_EMPTY;
-		all->par.mmap_map[6].size = SBUS_MMAP_EMPTY;
+		par->mmap_map[1].size = SBUS_MMAP_EMPTY;
+		par->mmap_map[4].size = SBUS_MMAP_EMPTY;
+		par->mmap_map[5].size = SBUS_MMAP_EMPTY;
+		par->mmap_map[6].size = SBUS_MMAP_EMPTY;
 	}
 
-	all->par.physbase = 0;
-	all->par.which_io = op->resource[0].flags & IORESOURCE_BITS;
+	par->physbase = op->resource[0].start;
+	par->which_io = op->resource[0].flags & IORESOURCE_BITS;
 
 	for (i = 0; i < TCX_MMAP_ENTRIES; i++) {
 		int j;
@@ -444,79 +438,74 @@ static int __devinit tcx_init_one(struct of_device *op)
 			j = i;
 			break;
 		};
-		all->par.mmap_map[i].poff = op->resource[j].start;
+		par->mmap_map[i].poff = op->resource[j].start;
 	}
 
-	all->info.flags = FBINFO_DEFAULT;
-	all->info.fbops = &tcx_ops;
-	all->info.par = &all->par;
+	info->flags = FBINFO_DEFAULT;
+	info->fbops = &tcx_ops;
 
 	/* Initialize brooktree DAC. */
-	sbus_writel(0x04 << 24, &all->par.bt->addr);         /* color planes */
-	sbus_writel(0xff << 24, &all->par.bt->control);
-	sbus_writel(0x05 << 24, &all->par.bt->addr);
-	sbus_writel(0x00 << 24, &all->par.bt->control);
-	sbus_writel(0x06 << 24, &all->par.bt->addr);         /* overlay plane */
-	sbus_writel(0x73 << 24, &all->par.bt->control);
-	sbus_writel(0x07 << 24, &all->par.bt->addr);
-	sbus_writel(0x00 << 24, &all->par.bt->control);
+	sbus_writel(0x04 << 24, &par->bt->addr);         /* color planes */
+	sbus_writel(0xff << 24, &par->bt->control);
+	sbus_writel(0x05 << 24, &par->bt->addr);
+	sbus_writel(0x00 << 24, &par->bt->control);
+	sbus_writel(0x06 << 24, &par->bt->addr);         /* overlay plane */
+	sbus_writel(0x73 << 24, &par->bt->control);
+	sbus_writel(0x07 << 24, &par->bt->addr);
+	sbus_writel(0x00 << 24, &par->bt->control);
 
-	tcx_reset(&all->info);
+	tcx_reset(info);
 
-	tcx_blank(FB_BLANK_UNBLANK, &all->info);
+	tcx_blank(FB_BLANK_UNBLANK, info);
 
-	if (fb_alloc_cmap(&all->info.cmap, 256, 0)) {
-		tcx_unmap_regs(op, all);
-		kfree(all);
-		return -ENOMEM;
-	}
+	if (fb_alloc_cmap(&info->cmap, 256, 0))
+		goto out_unmap_regs;
 
-	fb_set_cmap(&all->info.cmap, &all->info);
-	tcx_init_fix(&all->info, linebytes);
+	fb_set_cmap(&info->cmap, info);
+	tcx_init_fix(info, linebytes);
 
-	err = register_framebuffer(&all->info);
-	if (err < 0) {
-		fb_dealloc_cmap(&all->info.cmap);
-		tcx_unmap_regs(op, all);
-		kfree(all);
-		return err;
-	}
+	err = register_framebuffer(info);
+	if (err < 0)
+		goto out_dealloc_cmap;
 
-	dev_set_drvdata(&op->dev, all);
+	dev_set_drvdata(&op->dev, info);
 
-	printk("%s: TCX at %lx:%lx, %s\n",
+	printk(KERN_INFO "%s: TCX at %lx:%lx, %s\n",
 	       dp->full_name,
-	       all->par.which_io,
-	       op->resource[0].start,
-	       all->par.lowdepth ? "8-bit only" : "24-bit depth");
+	       par->which_io,
+	       par->physbase,
+	       par->lowdepth ? "8-bit only" : "24-bit depth");
 
 	return 0;
-}
 
-static int __devinit tcx_probe(struct of_device *dev, const struct of_device_id *match)
-{
-	struct of_device *op = to_of_device(&dev->dev);
+out_dealloc_cmap:
+	fb_dealloc_cmap(&info->cmap);
 
-	return tcx_init_one(op);
+out_unmap_regs:
+	tcx_unmap_regs(op, info, par);
+
+out_err:
+	return err;
 }
 
 static int __devexit tcx_remove(struct of_device *op)
 {
-	struct all_info *all = dev_get_drvdata(&op->dev);
+	struct fb_info *info = dev_get_drvdata(&op->dev);
+	struct tcx_par *par = info->par;
 
-	unregister_framebuffer(&all->info);
-	fb_dealloc_cmap(&all->info.cmap);
+	unregister_framebuffer(info);
+	fb_dealloc_cmap(&info->cmap);
 
-	tcx_unmap_regs(op, all);
+	tcx_unmap_regs(op, info, par);
 
-	kfree(all);
+	framebuffer_release(info);
 
 	dev_set_drvdata(&op->dev, NULL);
 
 	return 0;
 }
 
-static struct of_device_id tcx_match[] = {
+static const struct of_device_id tcx_match[] = {
 	{
 		.name = "SUNW,tcx",
 	},
@@ -531,7 +520,7 @@ static struct of_platform_driver tcx_driver = {
 	.remove		= __devexit_p(tcx_remove),
 };
 
-int __init tcx_init(void)
+static int __init tcx_init(void)
 {
 	if (fb_get_options("tcxfb", NULL))
 		return -ENODEV;
@@ -539,7 +528,7 @@ int __init tcx_init(void)
 	return of_register_driver(&tcx_driver, &of_bus_type);
 }
 
-void __exit tcx_exit(void)
+static void __exit tcx_exit(void)
 {
 	of_unregister_driver(&tcx_driver);
 }

@@ -262,7 +262,7 @@ static int elo_setup_10(struct elo *elo)
 		input_set_abs_params(dev, ABS_PRESSURE, 0, 255, 0, 0);
 
 	printk(KERN_INFO "elo: %sTouch touchscreen, fw: %02x.%02x, "
-		"features: %x02x, controller: 0x%02x\n",
+		"features: 0x%02x, controller: 0x%02x\n",
 		elo_types[(packet[1] -'0') & 0x03],
 		packet[5], packet[4], packet[3], packet[7]);
 
@@ -320,8 +320,8 @@ static int elo_connect(struct serio *serio, struct serio_driver *drv)
 	input_dev->id.version = 0x0100;
 	input_dev->dev.parent = &serio->dev;
 
-	input_dev->evbit[0] = BIT(EV_KEY) | BIT(EV_ABS);
-	input_dev->keybit[LONG(BTN_TOUCH)] = BIT(BTN_TOUCH);
+	input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_ABS);
+	input_dev->keybit[BIT_WORD(BTN_TOUCH)] = BIT_MASK(BTN_TOUCH);
 
 	serio_set_drvdata(serio, elo);
 	err = serio_open(serio, drv);

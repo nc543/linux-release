@@ -13,9 +13,14 @@
 #include <linux/module.h>
 #include <linux/serial_core.h>
 #include <linux/serial_8250.h>
+#include <linux/of_platform.h>
 
-#include <asm/of_platform.h>
 #include <asm/prom.h>
+
+struct of_serial_info {
+	int type;
+	int line;
+};
 
 /*
  * Fill a struct uart_port for a given device node
@@ -26,7 +31,8 @@ static int __devinit of_platform_serial_setup(struct of_device *ofdev,
 	struct resource resource;
 	struct device_node *np = ofdev->node;
 	const unsigned int *clk, *spd;
-	int ret;
+	const u32 *prop;
+	int ret, prop_size;
 
 	memset(port, 0, sizeof *port);
 	spd = of_get_property(np, "current-speed", NULL);
@@ -44,6 +50,17 @@ static int __devinit of_platform_serial_setup(struct of_device *ofdev,
 
 	spin_lock_init(&port->lock);
 	port->mapbase = resource.start;
+
+	/* Check for shifted address mapping */
+	prop = of_get_property(np, "reg-offset", &prop_size);
+	if (prop && (prop_size == sizeof(u32)))
+		port->mapbase += *prop;
+
+	/* Check for registers offset within the devices address range */
+	prop = of_get_property(np, "reg-shift", &prop_size);
+	if (prop && (prop_size == sizeof(u32)))
+		port->regshift = *prop;
+
 	port->irq = irq_of_parse_and_map(np, 0);
 	port->iotype = UPIO_MEM;
 	port->type = type;
@@ -51,7 +68,9 @@ static int __devinit of_platform_serial_setup(struct of_device *ofdev,
 	port->flags = UPF_SHARE_IRQ | UPF_BOOT_AUTOCONF | UPF_IOREMAP
 		| UPF_FIXED_PORT;
 	port->dev = &ofdev->dev;
-	port->custom_divisor = *clk / (16 * (*spd));
+	/* If current-speed was set, then try not to change it. */
+	if (spd)
+		port->custom_divisor = *clk / (16 * (*spd));
 
 	return 0;
 }
@@ -62,6 +81,7 @@ static int __devinit of_platform_serial_setup(struct of_device *ofdev,
 static int __devinit of_platform_serial_probe(struct of_device *ofdev,
 						const struct of_device_id *id)
 {
+	struct of_serial_info *info;
 	struct uart_port port;
 	int port_type;
 	int ret;
@@ -69,30 +89,35 @@ static int __devinit of_platform_serial_probe(struct of_device *ofdev,
 	if (of_find_property(ofdev->node, "used-by-rtas", NULL))
 		return -EBUSY;
 
+	info = kmalloc(sizeof(*info), GFP_KERNEL);
+	if (info == NULL)
+		return -ENOMEM;
+
 	port_type = (unsigned long)id->data;
 	ret = of_platform_serial_setup(ofdev, port_type, &port);
 	if (ret)
 		goto out;
 
 	switch (port_type) {
-	case PORT_UNKNOWN:
-		dev_info(&ofdev->dev, "Unknown serial port found, "
-			"attempting to use 8250 driver\n");
-		/* fallthrough */
 	case PORT_8250 ... PORT_MAX_8250:
 		ret = serial8250_register_port(&port);
 		break;
 	default:
 		/* need to add code for these */
+	case PORT_UNKNOWN:
+		dev_info(&ofdev->dev, "Unknown serial port found, ignored\n");
 		ret = -ENODEV;
 		break;
 	}
 	if (ret < 0)
 		goto out;
 
-	ofdev->dev.driver_data = (void *)(unsigned long)ret;
+	info->type = port_type;
+	info->line = ret;
+	ofdev->dev.driver_data = info;
 	return 0;
 out:
+	kfree(info);
 	irq_dispose_mapping(port.irq);
 	return ret;
 }
@@ -102,8 +127,16 @@ out:
  */
 static int of_platform_serial_remove(struct of_device *ofdev)
 {
-	int line = (unsigned long)ofdev->dev.driver_data;
-	serial8250_unregister_port(line);
+	struct of_serial_info *info = ofdev->dev.driver_data;
+	switch (info->type) {
+	case PORT_8250 ... PORT_MAX_8250:
+		serial8250_unregister_port(info->line);
+		break;
+	default:
+		/* need to add code for these */
+		break;
+	}
+	kfree(info);
 	return 0;
 }
 
@@ -119,7 +152,7 @@ static struct of_device_id __devinitdata of_platform_serial_table[] = {
 	{ /* end of list */ },
 };
 
-static struct of_platform_driver __devinitdata of_platform_serial_driver = {
+static struct of_platform_driver of_platform_serial_driver = {
 	.owner = THIS_MODULE,
 	.name = "of_serial",
 	.probe = of_platform_serial_probe,

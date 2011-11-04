@@ -74,7 +74,7 @@ int gfs2_acl_validate_remove(struct gfs2_inode *ip, int access)
 {
 	if (!GFS2_SB(&ip->i_inode)->sd_args.ar_posix_acl)
 		return -EOPNOTSUPP;
-	if (current->fsuid != ip->i_inode.i_uid && !capable(CAP_FOWNER))
+	if (!is_owner_or_cap(&ip->i_inode))
 		return -EPERM;
 	if (S_ISLNK(ip->i_inode.i_mode))
 		return -EOPNOTSUPP;
@@ -116,7 +116,7 @@ static int acl_get(struct gfs2_inode *ip, int access, struct posix_acl **acl,
 		goto out;
 
 	er.er_data_len = GFS2_EA_DATA_LEN(el->el_ea);
-	er.er_data = kmalloc(er.er_data_len, GFP_KERNEL);
+	er.er_data = kmalloc(er.er_data_len, GFP_NOFS);
 	error = -ENOMEM;
 	if (!er.er_data)
 		goto out;
@@ -222,7 +222,7 @@ int gfs2_acl_create(struct gfs2_inode *dip, struct gfs2_inode *ip)
 		return error;
 	}
 
-	clone = posix_acl_clone(acl, GFP_KERNEL);
+	clone = posix_acl_clone(acl, GFP_NOFS);
 	error = -ENOMEM;
 	if (!clone)
 		goto out;
@@ -272,7 +272,7 @@ int gfs2_acl_chmod(struct gfs2_inode *ip, struct iattr *attr)
 	if (!acl)
 		return gfs2_setattr_simple(ip, attr);
 
-	clone = posix_acl_clone(acl, GFP_KERNEL);
+	clone = posix_acl_clone(acl, GFP_NOFS);
 	error = -ENOMEM;
 	if (!clone)
 		goto out;

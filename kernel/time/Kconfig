@@ -3,7 +3,6 @@
 #
 config TICK_ONESHOT
 	bool
-	default n
 
 config NO_HZ
 	bool "Tickless System (Dynamic Ticks)"
@@ -22,4 +21,9 @@ config HIGH_RES_TIMERS
 	  This option enables high resolution timer support. If your
 	  hardware is not capable then this option only increases
 	  the size of the kernel image.
+
+config GENERIC_CLOCKEVENTS_BUILD
+	bool
+	default y
+	depends on GENERIC_CLOCKEVENTS || GENERIC_CLOCKEVENTS_MIGR
 

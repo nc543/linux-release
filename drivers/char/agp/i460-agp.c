@@ -13,6 +13,7 @@
 #include <linux/string.h>
 #include <linux/slab.h>
 #include <linux/agp_backend.h>
+#include <linux/log2.h>
 
 #include "agp.h"
 
@@ -58,8 +59,6 @@
  * writes have taken effect
  */
 #define WR_FLUSH_GATT(index)	RD_GATT(index)
-
-#define log2(x)			ffz(~(x))
 
 static struct {
 	void *gatt;				/* ioremap'd GATT area */
@@ -148,7 +147,7 @@ static int i460_fetch_size (void)
 		 * values[i].size.
 		 */
 		values[i].num_entries = (values[i].size << 8) >> (I460_IO_PAGE_SHIFT - 12);
-		values[i].page_order = log2((sizeof(u32)*values[i].num_entries) >> PAGE_SHIFT);
+		values[i].page_order = ilog2((sizeof(u32)*values[i].num_entries) >> PAGE_SHIFT);
 	}
 
 	for (i = 0; i < agp_bridge->driver->num_aperture_sizes; i++) {
@@ -249,6 +248,10 @@ static int i460_create_gatt_table (struct agp_bridge_data *bridge)
 	num_entries = A_SIZE_8(temp)->num_entries;
 
 	i460.gatt = ioremap(INTEL_I460_ATTBASE, PAGE_SIZE << page_order);
+	if (!i460.gatt) {
+		printk(KERN_ERR PFX "ioremap failed\n");
+		return -ENOMEM;
+	}
 
 	/* These are no good, the should be removed from the agp_bridge strucure... */
 	agp_bridge->gatt_table_real = NULL;
@@ -524,7 +527,6 @@ static void *i460_alloc_page (struct agp_bridge_data *bridge)
 
 	if (I460_IO_PAGE_SHIFT <= PAGE_SHIFT) {
 		page = agp_generic_alloc_page(agp_bridge);
-		global_flush_tlb();
 	} else
 		/* Returning NULL would cause problems */
 		/* AK: really dubious code. */
@@ -532,11 +534,10 @@ static void *i460_alloc_page (struct agp_bridge_data *bridge)
 	return page;
 }
 
-static void i460_destroy_page (void *page)
+static void i460_destroy_page (void *page, int flags)
 {
 	if (I460_IO_PAGE_SHIFT <= PAGE_SHIFT) {
-		agp_generic_destroy_page(page);
-		global_flush_tlb();
+		agp_generic_destroy_page(page, flags);
 	}
 }
 
@@ -574,12 +575,14 @@ const struct agp_bridge_driver intel_i460_driver = {
 	.insert_memory		= i460_insert_memory_small_io_page,
 	.remove_memory		= i460_remove_memory_small_io_page,
 	.agp_alloc_page		= agp_generic_alloc_page,
+	.agp_alloc_pages	= agp_generic_alloc_pages,
 	.agp_destroy_page	= agp_generic_destroy_page,
+	.agp_destroy_pages	= agp_generic_destroy_pages,
 #endif
 	.alloc_by_type		= agp_generic_alloc_by_type,
 	.free_by_type		= agp_generic_free_by_type,
 	.agp_type_to_mask_type  = agp_generic_type_to_mask_type,
-	.cant_use_aperture	= 1,
+	.cant_use_aperture	= true,
 };
 
 static int __devinit agp_intel_i460_probe(struct pci_dev *pdev,

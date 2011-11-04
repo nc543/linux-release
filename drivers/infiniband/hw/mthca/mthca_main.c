@@ -30,8 +30,6 @@
  * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
  * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
- *
- * $Id: mthca_main.c 1396 2004-12-28 04:10:27Z roland $
  */
 
 #include <linux/module.h>
@@ -45,6 +43,7 @@
 #include "mthca_cmd.h"
 #include "mthca_profile.h"
 #include "mthca_memfree.h"
+#include "mthca_wqe.h"
 
 MODULE_AUTHOR("Roland Dreier");
 MODULE_DESCRIPTION("Mellanox InfiniBand HCA low-level driver");
@@ -61,18 +60,13 @@ MODULE_PARM_DESC(debug_level, "Enable debug tracing if > 0");
 
 #ifdef CONFIG_PCI_MSI
 
-static int msi_x = 0;
+static int msi_x = 1;
 module_param(msi_x, int, 0444);
 MODULE_PARM_DESC(msi_x, "attempt to use MSI-X if nonzero");
-
-static int msi = 0;
-module_param(msi, int, 0444);
-MODULE_PARM_DESC(msi, "attempt to use MSI if nonzero");
 
 #else /* CONFIG_PCI_MSI */
 
 #define msi_x (0)
-#define msi   (0)
 
 #endif /* CONFIG_PCI_MSI */
 
@@ -131,46 +125,29 @@ module_param_named(fmr_reserved_mtts, hca_profile.fmr_reserved_mtts, int, 0444);
 MODULE_PARM_DESC(fmr_reserved_mtts,
 		 "number of memory translation table segments reserved for FMR");
 
-static const char mthca_version[] __devinitdata =
+static char mthca_version[] __devinitdata =
 	DRV_NAME ": Mellanox InfiniBand HCA driver v"
 	DRV_VERSION " (" DRV_RELDATE ")\n";
 
 static int mthca_tune_pci(struct mthca_dev *mdev)
 {
-	int cap;
-	u16 val;
-
 	if (!tune_pci)
 		return 0;
 
 	/* First try to max out Read Byte Count */
-	cap = pci_find_capability(mdev->pdev, PCI_CAP_ID_PCIX);
-	if (cap) {
-		if (pci_read_config_word(mdev->pdev, cap + PCI_X_CMD, &val)) {
-			mthca_err(mdev, "Couldn't read PCI-X command register, "
-				  "aborting.\n");
-			return -ENODEV;
-		}
-		val = (val & ~PCI_X_CMD_MAX_READ) | (3 << 2);
-		if (pci_write_config_word(mdev->pdev, cap + PCI_X_CMD, val)) {
-			mthca_err(mdev, "Couldn't write PCI-X command register, "
-				  "aborting.\n");
+	if (pci_find_capability(mdev->pdev, PCI_CAP_ID_PCIX)) {
+		if (pcix_set_mmrbc(mdev->pdev, pcix_get_max_mmrbc(mdev->pdev))) {
+			mthca_err(mdev, "Couldn't set PCI-X max read count, "
+				"aborting.\n");
 			return -ENODEV;
 		}
 	} else if (!(mdev->mthca_flags & MTHCA_FLAG_PCIE))
 		mthca_info(mdev, "No PCI-X capability, not setting RBC.\n");
 
-	cap = pci_find_capability(mdev->pdev, PCI_CAP_ID_EXP);
-	if (cap) {
-		if (pci_read_config_word(mdev->pdev, cap + PCI_EXP_DEVCTL, &val)) {
-			mthca_err(mdev, "Couldn't read PCI Express device control "
-				  "register, aborting.\n");
-			return -ENODEV;
-		}
-		val = (val & ~PCI_EXP_DEVCTL_READRQ) | (5 << 12);
-		if (pci_write_config_word(mdev->pdev, cap + PCI_EXP_DEVCTL, val)) {
-			mthca_err(mdev, "Couldn't write PCI Express device control "
-				  "register, aborting.\n");
+	if (pci_find_capability(mdev->pdev, PCI_CAP_ID_EXP)) {
+		if (pcie_set_readrq(mdev->pdev, 4096)) {
+			mthca_err(mdev, "Couldn't write PCI Express read request, "
+				"aborting.\n");
 			return -ENODEV;
 		}
 	} else if (mdev->mthca_flags & MTHCA_FLAG_PCIE)
@@ -222,7 +199,18 @@ static int mthca_dev_lim(struct mthca_dev *mdev, struct mthca_dev_lim *dev_lim)
 	mdev->limits.gid_table_len  	= dev_lim->max_gids;
 	mdev->limits.pkey_table_len 	= dev_lim->max_pkeys;
 	mdev->limits.local_ca_ack_delay = dev_lim->local_ca_ack_delay;
-	mdev->limits.max_sg             = dev_lim->max_sg;
+	/*
+	 * Need to allow for worst case send WQE overhead and check
+	 * whether max_desc_sz imposes a lower limit than max_sg; UD
+	 * send has the biggest overhead.
+	 */
+	mdev->limits.max_sg		= min_t(int, dev_lim->max_sg,
+					      (dev_lim->max_desc_sz -
+					       sizeof (struct mthca_next_seg) -
+					       (mthca_is_memfree(mdev) ?
+						sizeof (struct mthca_arbel_ud_seg) :
+						sizeof (struct mthca_tavor_ud_seg))) /
+						sizeof (struct mthca_data_seg));
 	mdev->limits.max_wqes           = dev_lim->max_qp_sz;
 	mdev->limits.max_qp_init_rdma   = dev_lim->max_requester_per_qp;
 	mdev->limits.reserved_qps       = dev_lim->reserved_qps;
@@ -289,11 +277,16 @@ static int mthca_dev_lim(struct mthca_dev *mdev, struct mthca_dev_lim *dev_lim)
 	if (dev_lim->flags & DEV_LIM_FLAG_SRQ)
 		mdev->mthca_flags |= MTHCA_FLAG_SRQ;
 
+	if (mthca_is_memfree(mdev))
+		if (dev_lim->flags & DEV_LIM_FLAG_IPOIB_CSUM)
+			mdev->device_cap_flags |= IB_DEVICE_UD_IP_CSUM;
+
 	return 0;
 }
 
 static int mthca_init_tavor(struct mthca_dev *mdev)
 {
+	s64 size;
 	u8 status;
 	int err;
 	struct mthca_dev_lim        dev_lim;
@@ -346,9 +339,11 @@ static int mthca_init_tavor(struct mthca_dev *mdev)
 	if (mdev->mthca_flags & MTHCA_FLAG_SRQ)
 		profile.num_srq = dev_lim.max_srqs;
 
-	err = mthca_make_profile(mdev, &profile, &dev_lim, &init_hca);
-	if (err < 0)
+	size = mthca_make_profile(mdev, &profile, &dev_lim, &init_hca);
+	if (size < 0) {
+		err = size;
 		goto err_disable;
+	}
 
 	err = mthca_INIT_HCA(mdev, &init_hca, &status);
 	if (err) {
@@ -627,7 +622,7 @@ static int mthca_init_arbel(struct mthca_dev *mdev)
 	struct mthca_dev_lim        dev_lim;
 	struct mthca_profile        profile;
 	struct mthca_init_hca_param init_hca;
-	u64 icm_size;
+	s64 icm_size;
 	u8 status;
 	int err;
 
@@ -675,7 +670,7 @@ static int mthca_init_arbel(struct mthca_dev *mdev)
 		profile.num_srq = dev_lim.max_srqs;
 
 	icm_size = mthca_make_profile(mdev, &profile, &dev_lim, &init_hca);
-	if ((int) icm_size < 0) {
+	if (icm_size < 0) {
 		err = icm_size;
 		goto err_stop_fw;
 	}
@@ -757,7 +752,8 @@ static int mthca_init_hca(struct mthca_dev *mdev)
 	}
 
 	mdev->eq_table.inta_pin = adapter.inta_pin;
-	mdev->rev_id            = adapter.revision_id;
+	if (!mthca_is_memfree(mdev))
+		mdev->rev_id = adapter.revision_id;
 	memcpy(mdev->board_id, adapter.board_id, sizeof mdev->board_id);
 
 	return 0;
@@ -833,14 +829,17 @@ static int mthca_setup_hca(struct mthca_dev *dev)
 
 	err = mthca_NOP(dev, &status);
 	if (err || status) {
-		mthca_err(dev, "NOP command failed to generate interrupt (IRQ %d), aborting.\n",
-			  dev->mthca_flags & MTHCA_FLAG_MSI_X ?
-			  dev->eq_table.eq[MTHCA_EQ_CMD].msi_x_vector :
-			  dev->pdev->irq);
-		if (dev->mthca_flags & (MTHCA_FLAG_MSI | MTHCA_FLAG_MSI_X))
-			mthca_err(dev, "Try again with MSI/MSI-X disabled.\n");
-		else
+		if (dev->mthca_flags & MTHCA_FLAG_MSI_X) {
+			mthca_warn(dev, "NOP command failed to generate interrupt "
+				   "(IRQ %d).\n",
+				   dev->eq_table.eq[MTHCA_EQ_CMD].msi_x_vector);
+			mthca_warn(dev, "Trying again with MSI-X disabled.\n");
+		} else {
+			mthca_err(dev, "NOP command failed to generate interrupt "
+				  "(IRQ %d), aborting.\n",
+				  dev->pdev->irq);
 			mthca_err(dev, "BIOS or ACPI interrupt routing problem?\n");
+		}
 
 		goto err_cmd_poll;
 	}
@@ -922,58 +921,6 @@ err_uar_table_free:
 	return err;
 }
 
-static int mthca_request_regions(struct pci_dev *pdev, int ddr_hidden)
-{
-	int err;
-
-	/*
-	 * We can't just use pci_request_regions() because the MSI-X
-	 * table is right in the middle of the first BAR.  If we did
-	 * pci_request_region and grab all of the first BAR, then
-	 * setting up MSI-X would fail, since the PCI core wants to do
-	 * request_mem_region on the MSI-X vector table.
-	 *
-	 * So just request what we need right now, and request any
-	 * other regions we need when setting up EQs.
-	 */
-	if (!request_mem_region(pci_resource_start(pdev, 0) + MTHCA_HCR_BASE,
-				MTHCA_HCR_SIZE, DRV_NAME))
-		return -EBUSY;
-
-	err = pci_request_region(pdev, 2, DRV_NAME);
-	if (err)
-		goto err_bar2_failed;
-
-	if (!ddr_hidden) {
-		err = pci_request_region(pdev, 4, DRV_NAME);
-		if (err)
-			goto err_bar4_failed;
-	}
-
-	return 0;
-
-err_bar4_failed:
-	pci_release_region(pdev, 2);
-
-err_bar2_failed:
-	release_mem_region(pci_resource_start(pdev, 0) + MTHCA_HCR_BASE,
-			   MTHCA_HCR_SIZE);
-
-	return err;
-}
-
-static void mthca_release_regions(struct pci_dev *pdev,
-				  int ddr_hidden)
-{
-	if (!ddr_hidden)
-		pci_release_region(pdev, 4);
-
-	pci_release_region(pdev, 2);
-
-	release_mem_region(pci_resource_start(pdev, 0) + MTHCA_HCR_BASE,
-			   MTHCA_HCR_SIZE);
-}
-
 static int mthca_enable_msi_x(struct mthca_dev *mdev)
 {
 	struct msix_entry entries[3];
@@ -1017,7 +964,7 @@ static struct {
 			   .flags     = 0 },
 	[ARBEL_COMPAT] = { .latest_fw = MTHCA_FW_VER(4, 8, 200),
 			   .flags     = MTHCA_FLAG_PCIE },
-	[ARBEL_NATIVE] = { .latest_fw = MTHCA_FW_VER(5, 2, 0),
+	[ARBEL_NATIVE] = { .latest_fw = MTHCA_FW_VER(5, 3, 0),
 			   .flags     = MTHCA_FLAG_MEMFREE |
 					MTHCA_FLAG_PCIE },
 	[SINAI]        = { .latest_fw = MTHCA_FW_VER(1, 2, 0),
@@ -1060,7 +1007,7 @@ static int __mthca_init_one(struct pci_dev *pdev, int hca_type)
 	if (!(pci_resource_flags(pdev, 4) & IORESOURCE_MEM))
 		ddr_hidden = 1;
 
-	err = mthca_request_regions(pdev, ddr_hidden);
+	err = pci_request_regions(pdev, DRV_NAME);
 	if (err) {
 		dev_err(&pdev->dev, "Cannot obtain PCI resources, "
 			"aborting.\n");
@@ -1115,12 +1062,6 @@ static int __mthca_init_one(struct pci_dev *pdev, int hca_type)
 		goto err_free_dev;
 	}
 
-	if (msi_x && !mthca_enable_msi_x(mdev))
-		mdev->mthca_flags |= MTHCA_FLAG_MSI_X;
-	if (msi && !(mdev->mthca_flags & MTHCA_FLAG_MSI_X) &&
-	    !pci_enable_msi(pdev))
-		mdev->mthca_flags |= MTHCA_FLAG_MSI;
-
 	if (mthca_cmd_init(mdev)) {
 		mthca_err(mdev, "Failed to init command interface, aborting.\n");
 		goto err_free_dev;
@@ -1135,7 +1076,7 @@ static int __mthca_init_one(struct pci_dev *pdev, int hca_type)
 		goto err_cmd;
 
 	if (mdev->fw_ver < mthca_hca_table[hca_type].latest_fw) {
-		mthca_warn(mdev, "HCA FW version %d.%d.%3d is old (%d.%d.%3d is current).\n",
+		mthca_warn(mdev, "HCA FW version %d.%d.%03d is old (%d.%d.%03d is current).\n",
 			   (int) (mdev->fw_ver >> 32), (int) (mdev->fw_ver >> 16) & 0xffff,
 			   (int) (mdev->fw_ver & 0xffff),
 			   (int) (mthca_hca_table[hca_type].latest_fw >> 32),
@@ -1144,7 +1085,18 @@ static int __mthca_init_one(struct pci_dev *pdev, int hca_type)
 		mthca_warn(mdev, "If you have problems, try updating your HCA FW.\n");
 	}
 
+	if (msi_x && !mthca_enable_msi_x(mdev))
+		mdev->mthca_flags |= MTHCA_FLAG_MSI_X;
+
 	err = mthca_setup_hca(mdev);
+	if (err == -EBUSY && (mdev->mthca_flags & MTHCA_FLAG_MSI_X)) {
+		if (mdev->mthca_flags & MTHCA_FLAG_MSI_X)
+			pci_disable_msix(pdev);
+		mdev->mthca_flags &= ~MTHCA_FLAG_MSI_X;
+
+		err = mthca_setup_hca(mdev);
+	}
+
 	if (err)
 		goto err_close;
 
@@ -1180,21 +1132,19 @@ err_cleanup:
 	mthca_cleanup_uar_table(mdev);
 
 err_close:
+	if (mdev->mthca_flags & MTHCA_FLAG_MSI_X)
+		pci_disable_msix(pdev);
+
 	mthca_close_hca(mdev);
 
 err_cmd:
 	mthca_cmd_cleanup(mdev);
 
 err_free_dev:
-	if (mdev->mthca_flags & MTHCA_FLAG_MSI_X)
-		pci_disable_msix(pdev);
-	if (mdev->mthca_flags & MTHCA_FLAG_MSI)
-		pci_disable_msi(pdev);
-
 	ib_dealloc_device(&mdev->ib_dev);
 
 err_free_res:
-	mthca_release_regions(pdev, ddr_hidden);
+	pci_release_regions(pdev);
 
 err_disable_pdev:
 	pci_disable_device(pdev);
@@ -1236,12 +1186,9 @@ static void __mthca_remove_one(struct pci_dev *pdev)
 
 		if (mdev->mthca_flags & MTHCA_FLAG_MSI_X)
 			pci_disable_msix(pdev);
-		if (mdev->mthca_flags & MTHCA_FLAG_MSI)
-			pci_disable_msi(pdev);
 
 		ib_dealloc_device(&mdev->ib_dev);
-		mthca_release_regions(pdev, mdev->mthca_flags &
-				      MTHCA_FLAG_DDR_HIDDEN);
+		pci_release_regions(pdev);
 		pci_disable_device(pdev);
 		pci_set_drvdata(pdev, NULL);
 	}

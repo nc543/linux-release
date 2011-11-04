@@ -1,6 +1,6 @@
 /*
  *  Driver for S3 SonicVibes soundcard
- *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *
  *  BUGS:
  *    It looks like 86c617 rev 3 doesn't supports DDMA buffers above 16MB?
@@ -22,7 +22,6 @@
  *
  */
 
-#include <sound/driver.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -42,7 +41,7 @@
 
 #include <asm/io.h>
 
-MODULE_AUTHOR("Jaroslav Kysela <perex@suse.cz>");
+MODULE_AUTHOR("Jaroslav Kysela <perex@perex.cz>");
 MODULE_DESCRIPTION("S3 SonicVibes PCI");
 MODULE_LICENSE("GPL");
 MODULE_SUPPORTED_DEVICE("{{S3,SonicVibes PCI}}");
@@ -535,8 +534,8 @@ static int snd_sonicvibes_hw_constraint_dac_rate(struct snd_pcm_hw_params *param
 			params->rate_den = 1;
 		} else {
 			snd_sonicvibes_pll(rate, &r, &m, &n);
-			snd_assert((SV_REFFREQUENCY % 16) == 0, return -EINVAL);
-			snd_assert((SV_ADCMULT % 512) == 0, return -EINVAL);
+			snd_BUG_ON(SV_REFFREQUENCY % 16);
+			snd_BUG_ON(SV_ADCMULT % 512);
 			params->rate_num = (SV_REFFREQUENCY/16) * (n+2) * r;
 			params->rate_den = (SV_ADCMULT/512) * (m+2);
 		}
@@ -850,7 +849,8 @@ static int __devinit snd_sonicvibes_pcm(struct sonicvibes * sonic, int device, s
 
 	if ((err = snd_pcm_new(sonic->card, "s3_86c617", device, 1, 1, &pcm)) < 0)
 		return err;
-	snd_assert(pcm != NULL, return -EINVAL);
+	if (snd_BUG_ON(!pcm))
+		return -EINVAL;
 
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_sonicvibes_playback_ops);
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &snd_sonicvibes_capture_ops);
@@ -1090,7 +1090,8 @@ static int __devinit snd_sonicvibes_mixer(struct sonicvibes * sonic)
 	unsigned int idx;
 	int err;
 
-	snd_assert(sonic != NULL && sonic->card != NULL, return -EINVAL);
+	if (snd_BUG_ON(!sonic || !sonic->card))
+		return -EINVAL;
 	card = sonic->card;
 	strcpy(card->mixername, "S3 SonicVibes");
 

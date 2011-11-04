@@ -141,7 +141,7 @@ static void gscps2_flush(struct gscps2port *ps2port)
 /*
  * gscps2_writeb_output() - write a byte to the port
  *
- * returns 1 on sucess, 0 on error
+ * returns 1 on success, 0 on error
  */
 
 static inline int gscps2_writeb_output(struct gscps2port *ps2port, u8 data)
@@ -340,8 +340,8 @@ static int __init gscps2_probe(struct parisc_device *dev)
 	if (dev->id.sversion == 0x96)
 		hpa += GSC_DINO_OFFSET;
 
-	ps2port = kmalloc(sizeof(struct gscps2port), GFP_KERNEL);
-	serio = kmalloc(sizeof(struct serio), GFP_KERNEL);
+	ps2port = kzalloc(sizeof(struct gscps2port), GFP_KERNEL);
+	serio = kzalloc(sizeof(struct serio), GFP_KERNEL);
 	if (!ps2port || !serio) {
 		ret = -ENOMEM;
 		goto fail_nomem;
@@ -349,8 +349,6 @@ static int __init gscps2_probe(struct parisc_device *dev)
 
 	dev_set_drvdata(&dev->dev, ps2port);
 
-	memset(ps2port, 0, sizeof(struct gscps2port));
-	memset(serio, 0, sizeof(struct serio));
 	ps2port->port = serio;
 	ps2port->padev = dev;
 	ps2port->addr = ioremap_nocache(hpa, GSC_STATUS + 4);

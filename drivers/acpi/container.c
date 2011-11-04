@@ -41,7 +41,6 @@
 #define INSTALL_NOTIFY_HANDLER		1
 #define UNINSTALL_NOTIFY_HANDLER	2
 
-#define ACPI_CONTAINER_COMPONENT	0x01000000
 #define _COMPONENT			ACPI_CONTAINER_COMPONENT
 ACPI_MODULE_NAME("container");
 
@@ -52,10 +51,18 @@ MODULE_LICENSE("GPL");
 static int acpi_container_add(struct acpi_device *device);
 static int acpi_container_remove(struct acpi_device *device, int type);
 
+static const struct acpi_device_id container_device_ids[] = {
+	{"ACPI0004", 0},
+	{"PNP0A05", 0},
+	{"PNP0A06", 0},
+	{"", 0},
+};
+MODULE_DEVICE_TABLE(acpi, container_device_ids);
+
 static struct acpi_driver acpi_container_driver = {
 	.name = "container",
 	.class = ACPI_CONTAINER_CLASS,
-	.ids = "ACPI0004,PNP0A05,PNP0A06",
+	.ids = container_device_ids,
 	.ops = {
 		.add = acpi_container_add,
 		.remove = acpi_container_remove,
@@ -68,7 +75,7 @@ static int is_device_present(acpi_handle handle)
 {
 	acpi_handle temp;
 	acpi_status status;
-	unsigned long sta;
+	unsigned long long sta;
 
 
 	status = acpi_get_handle(handle, "_STA", &temp);
@@ -100,7 +107,7 @@ static int acpi_container_add(struct acpi_device *device)
 	container->handle = device->handle;
 	strcpy(acpi_device_name(device), ACPI_CONTAINER_DEVICE_NAME);
 	strcpy(acpi_device_class(device), ACPI_CONTAINER_CLASS);
-	acpi_driver_data(device) = container;
+	device->driver_data = container;
 
 	ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Device <%s> bid <%s>\n",
 			  acpi_device_name(device), acpi_device_bid(device)));

@@ -2690,22 +2690,13 @@ aic7xxx_done(struct aic7xxx_host *p, struct aic7xxx_scb *scb)
 	struct aic7xxx_scb *scbp;
 	unsigned char queue_depth;
 
-  if (cmd->use_sg > 1)
-  {
-    struct scatterlist *sg;
+        scsi_dma_unmap(cmd);
 
-    sg = (struct scatterlist *)cmd->request_buffer;
-    pci_unmap_sg(p->pdev, sg, cmd->use_sg, cmd->sc_data_direction);
-  }
-  else if (cmd->request_bufflen)
-    pci_unmap_single(p->pdev, aic7xxx_mapping(cmd),
-		     cmd->request_bufflen,
-                     cmd->sc_data_direction);
   if (scb->flags & SCB_SENSE)
   {
     pci_unmap_single(p->pdev,
                      le32_to_cpu(scb->sg_list[0].address),
-                     sizeof(cmd->sense_buffer),
+                     SCSI_SENSE_BUFFERSIZE,
                      PCI_DMA_FROMDEVICE);
   }
   if (scb->flags & SCB_RECOVERY_SCB)
@@ -3869,7 +3860,7 @@ aic7xxx_calculate_residual (struct aic7xxx_host *p, struct aic7xxx_scb *scb)
        * the mid layer didn't check residual data counts to see if the
        * command needs retried.
        */
-      cmd->resid = scb->sg_length - actual;
+      scsi_set_resid(cmd, scb->sg_length - actual);
       aic7xxx_status(cmd) = hscb->target_status;
     }
   }
@@ -4276,13 +4267,13 @@ aic7xxx_handle_seqint(struct aic7xxx_host *p, unsigned char intstat)
                        sizeof(generic_sense));
 
                 scb->sense_cmd[1] = (cmd->device->lun << 5);
-                scb->sense_cmd[4] = sizeof(cmd->sense_buffer);
+                scb->sense_cmd[4] = SCSI_SENSE_BUFFERSIZE;
 
                 scb->sg_list[0].length = 
-                  cpu_to_le32(sizeof(cmd->sense_buffer));
+                  cpu_to_le32(SCSI_SENSE_BUFFERSIZE);
 		scb->sg_list[0].address =
                         cpu_to_le32(pci_map_single(p->pdev, cmd->sense_buffer,
-                                                   sizeof(cmd->sense_buffer),
+                                                   SCSI_SENSE_BUFFERSIZE,
                                                    PCI_DMA_FROMDEVICE));
 
                 /*
@@ -4305,7 +4296,7 @@ aic7xxx_handle_seqint(struct aic7xxx_host *p, unsigned char intstat)
                 hscb->residual_data_count[2] = 0;
 
                 scb->sg_count = hscb->SG_segment_count = 1;
-                scb->sg_length = sizeof(cmd->sense_buffer);
+                scb->sg_length = SCSI_SENSE_BUFFERSIZE;
                 scb->tag_action = 0;
                 scb->flags |= SCB_SENSE;
                 /*
@@ -6481,7 +6472,7 @@ do_aic7xxx_isr(int irq, void *dev_id)
   unsigned long cpu_flags;
   struct aic7xxx_host *p;
   
-  p = (struct aic7xxx_host *)dev_id;
+  p = dev_id;
   if(!p)
     return IRQ_NONE;
   spin_lock_irqsave(p->host->host_lock, cpu_flags);
@@ -6581,7 +6572,7 @@ aic7xxx_slave_alloc(struct scsi_device *SDptr)
   struct aic7xxx_host *p = (struct aic7xxx_host *)SDptr->host->hostdata;
   struct aic_dev_data *aic_dev;
 
-  aic_dev = kmalloc(sizeof(struct aic_dev_data), GFP_ATOMIC | GFP_KERNEL);
+  aic_dev = kmalloc(sizeof(struct aic_dev_data), GFP_KERNEL);
   if(!aic_dev)
     return 1;
   /*
@@ -8425,10 +8416,9 @@ aic7xxx_alloc(struct scsi_host_template *sht, struct aic7xxx_host *temp)
     *p = *temp;
     p->host = host;
 
-    p->scb_data = kmalloc(sizeof(scb_data_type), GFP_ATOMIC);
-    if (p->scb_data != NULL)
+    p->scb_data = kzalloc(sizeof(scb_data_type), GFP_ATOMIC);
+    if (p->scb_data)
     {
-      memset(p->scb_data, 0, sizeof(scb_data_type));
       scbq_init (&p->scb_data->free_scbs);
     }
     else
@@ -9205,10 +9195,9 @@ aic7xxx_detect(struct scsi_host_template *template)
             printk(KERN_INFO "         this driver, we are ignoring it.\n");
           }
         }
-        else if ( (temp_p = kmalloc(sizeof(struct aic7xxx_host),
+        else if ( (temp_p = kzalloc(sizeof(struct aic7xxx_host),
                                     GFP_ATOMIC)) != NULL )
         {
-          memset(temp_p, 0, sizeof(struct aic7xxx_host));
           temp_p->chip = aic_pdevs[i].chip | AHC_PCI;
           temp_p->flags = aic_pdevs[i].flags;
           temp_p->features = aic_pdevs[i].features;
@@ -10137,6 +10126,7 @@ static void aic7xxx_buildscb(struct aic7xxx_host *p, struct scsi_cmnd *cmd,
   struct scsi_device *sdptr = cmd->device;
   unsigned char tindex = TARGET_INDEX(cmd);
   struct request *req = cmd->request;
+  int use_sg;
 
   mask = (0x01 << tindex);
   hscb = scb->hscb;
@@ -10209,8 +10199,10 @@ static void aic7xxx_buildscb(struct aic7xxx_host *p, struct scsi_cmnd *cmd,
   memcpy(scb->cmnd, cmd->cmnd, cmd->cmd_len);
   hscb->SCSI_cmd_pointer = cpu_to_le32(SCB_DMA_ADDR(scb, scb->cmnd));
 
-  if (cmd->use_sg)
-  {
+  use_sg = scsi_dma_map(cmd);
+  BUG_ON(use_sg < 0);
+
+  if (use_sg) {
     struct scatterlist *sg;  /* Must be mid-level SCSI code scatterlist */
 
     /*
@@ -10219,11 +10211,11 @@ static void aic7xxx_buildscb(struct aic7xxx_host *p, struct scsi_cmnd *cmd,
      * differences and the kernel SG list uses virtual addresses where
      * we need physical addresses.
      */
-    int i, use_sg;
+    int i;
 
-    sg = (struct scatterlist *)cmd->request_buffer;
     scb->sg_length = 0;
-    use_sg = pci_map_sg(p->pdev, sg, cmd->use_sg, cmd->sc_data_direction);
+
+
     /*
      * Copy the segments into the SG array.  NOTE!!! - We used to
      * have the first entry both in the data_pointer area and the first
@@ -10231,10 +10223,9 @@ static void aic7xxx_buildscb(struct aic7xxx_host *p, struct scsi_cmnd *cmd,
      * entry in both places, but now we download the address of
      * scb->sg_list[1] instead of 0 to the sg pointer in the hscb.
      */
-    for (i = 0; i < use_sg; i++)
-    {
-      unsigned int len = sg_dma_len(sg+i);
-      scb->sg_list[i].address = cpu_to_le32(sg_dma_address(sg+i));
+    scsi_for_each_sg(cmd, sg, use_sg, i) {
+      unsigned int len = sg_dma_len(sg);
+      scb->sg_list[i].address = cpu_to_le32(sg_dma_address(sg));
       scb->sg_list[i].length = cpu_to_le32(len);
       scb->sg_length += len;
     }
@@ -10244,33 +10235,13 @@ static void aic7xxx_buildscb(struct aic7xxx_host *p, struct scsi_cmnd *cmd,
     scb->sg_count = i;
     hscb->SG_segment_count = i;
     hscb->SG_list_pointer = cpu_to_le32(SCB_DMA_ADDR(scb, &scb->sg_list[1]));
-  }
-  else
-  {
-    if (cmd->request_bufflen)
-    {
-      unsigned int address = pci_map_single(p->pdev, cmd->request_buffer,
-					    cmd->request_bufflen,
-                                            cmd->sc_data_direction);
-      aic7xxx_mapping(cmd) = address;
-      scb->sg_list[0].address = cpu_to_le32(address);
-      scb->sg_list[0].length = cpu_to_le32(cmd->request_bufflen);
-      scb->sg_count = 1;
-      scb->sg_length = cmd->request_bufflen;
-      hscb->SG_segment_count = 1;
-      hscb->SG_list_pointer = cpu_to_le32(SCB_DMA_ADDR(scb, &scb->sg_list[0]));
-      hscb->data_count = scb->sg_list[0].length;
-      hscb->data_pointer = scb->sg_list[0].address;
-    }
-    else
-    {
+  } else {
       scb->sg_count = 0;
       scb->sg_length = 0;
       hscb->SG_segment_count = 0;
       hscb->SG_list_pointer = 0;
       hscb->data_count = 0;
       hscb->data_pointer = 0;
-    }
   }
 }
 
@@ -10322,7 +10293,6 @@ static int aic7xxx_queue(struct scsi_cmnd *cmd, void (*fn)(struct scsi_cmnd *))
   aic7xxx_position(cmd) = scb->hscb->tag;
   cmd->scsi_done = fn;
   cmd->result = DID_OK;
-  memset(cmd->sense_buffer, 0, sizeof(cmd->sense_buffer));
   aic7xxx_error(cmd) = DID_OK;
   aic7xxx_status(cmd) = 0;
   cmd->host_scribble = NULL;

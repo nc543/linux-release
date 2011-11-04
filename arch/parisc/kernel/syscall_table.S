@@ -87,7 +87,7 @@
 	ENTRY_SAME(setuid)
 	ENTRY_SAME(getuid)
 	ENTRY_COMP(stime)		/* 25 */
-	ENTRY_SAME(ptrace)
+	ENTRY_COMP(ptrace)
 	ENTRY_SAME(alarm)
 	/* see stat comment */
 	ENTRY_COMP(newfstat)
@@ -149,8 +149,8 @@
 	ENTRY_COMP(getrlimit)
 	ENTRY_COMP(getrusage)
 	/* struct timeval and timezone are maybe?? consistent wide and narrow */
-	ENTRY_DIFF(gettimeofday)
-	ENTRY_DIFF(settimeofday)
+	ENTRY_COMP(gettimeofday)
+	ENTRY_COMP(settimeofday)
 	ENTRY_SAME(getgroups)		/* 80 */
 	ENTRY_SAME(setgroups)
 	/* struct socketaddr... */
@@ -222,9 +222,7 @@
 	ENTRY_SAME(setfsgid)
 	/* I think this might work */
 	ENTRY_SAME(llseek)		/* 140 */
-	/* struct linux_dirent has longs, like 'unsigned long d_ino' which
-	 * almost definitely should be 'ino_t d_ino' but it's too late now */
-	ENTRY_DIFF(getdents)
+	ENTRY_COMP(getdents)
 	/* it is POSSIBLE that select will be OK because even though fd_set
 	 * contains longs, the macros and sizes are clever. */
 	ENTRY_COMP(select)
@@ -403,8 +401,18 @@
 	ENTRY_COMP(kexec_load)		/* 300 */
 	ENTRY_COMP(utimensat)
 	ENTRY_COMP(signalfd)
-	ENTRY_COMP(timerfd)
+	ENTRY_SAME(ni_syscall)		/* was timerfd */
 	ENTRY_SAME(eventfd)
+	ENTRY_COMP(fallocate)		/* 305 */
+	ENTRY_SAME(timerfd_create)
+	ENTRY_COMP(timerfd_settime)
+	ENTRY_COMP(timerfd_gettime)
+	ENTRY_COMP(signalfd4)
+	ENTRY_SAME(eventfd2)		/* 310 */
+	ENTRY_SAME(epoll_create1)
+	ENTRY_SAME(dup3)
+	ENTRY_SAME(pipe2)
+	ENTRY_SAME(inotify_init1)
 
 	/* Nothing yet */
 

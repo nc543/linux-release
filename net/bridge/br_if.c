@@ -5,8 +5,6 @@
  *	Authors:
  *	Lennert Buytenhek		<buytenh@gnu.org>
  *
- *	$Id: br_if.c,v 1.7 2001/12/24 00:59:55 davem Exp $
- *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
  *	as published by the Free Software Foundation; either version
@@ -29,35 +27,24 @@
  * Determine initial path cost based on speed.
  * using recommendations from 802.1d standard
  *
- * Need to simulate user ioctl because not all device's that support
- * ethtool, use ethtool_ops.  Also, since driver might sleep need to
- * not be holding any locks.
+ * Since driver might sleep need to not be holding any locks.
  */
 static int port_cost(struct net_device *dev)
 {
-	struct ethtool_cmd ecmd = { ETHTOOL_GSET };
-	struct ifreq ifr;
-	mm_segment_t old_fs;
-	int err;
+	if (dev->ethtool_ops && dev->ethtool_ops->get_settings) {
+		struct ethtool_cmd ecmd = { .cmd = ETHTOOL_GSET, };
 
-	strncpy(ifr.ifr_name, dev->name, IFNAMSIZ);
-	ifr.ifr_data = (void __user *) &ecmd;
-
-	old_fs = get_fs();
-	set_fs(KERNEL_DS);
-	err = dev_ethtool(&ifr);
-	set_fs(old_fs);
-
-	if (!err) {
-		switch(ecmd.speed) {
-		case SPEED_100:
-			return 19;
-		case SPEED_1000:
-			return 4;
-		case SPEED_10000:
-			return 2;
-		case SPEED_10:
-			return 100;
+		if (!dev->ethtool_ops->get_settings(dev, &ecmd)) {
+			switch(ecmd.speed) {
+			case SPEED_10000:
+				return 2;
+			case SPEED_1000:
+				return 4;
+			case SPEED_100:
+				return 19;
+			case SPEED_10:
+				return 100;
+			}
 		}
 	}
 
@@ -144,7 +131,7 @@ static void del_nbp(struct net_bridge_port *p)
 	struct net_bridge *br = p->br;
 	struct net_device *dev = p->dev;
 
-	sysfs_remove_link(&br->ifobj, dev->name);
+	sysfs_remove_link(br->ifobj, dev->name);
 
 	dev_set_promiscuity(dev, -1);
 
@@ -181,7 +168,7 @@ static void del_br(struct net_bridge *br)
 	unregister_netdevice(br->dev);
 }
 
-static struct net_device *new_bridge_dev(const char *name)
+static struct net_device *new_bridge_dev(struct net *net, const char *name)
 {
 	struct net_bridge *br;
 	struct net_device *dev;
@@ -191,6 +178,7 @@ static struct net_device *new_bridge_dev(const char *name)
 
 	if (!dev)
 		return NULL;
+	dev_net_set(dev, net);
 
 	br = netdev_priv(dev);
 	br->dev = dev;
@@ -215,6 +203,9 @@ static struct net_device *new_bridge_dev(const char *name)
 	br->topology_change = 0;
 	br->topology_change_detected = 0;
 	br->ageing_time = 300 * HZ;
+
+	br_netfilter_rtable_init(br);
+
 	INIT_LIST_HEAD(&br->age_list);
 
 	br_stp_timer_init(br);
@@ -269,36 +260,28 @@ static struct net_bridge_port *new_nbp(struct net_bridge *br,
 	p->state = BR_STATE_DISABLED;
 	br_stp_port_timer_init(p);
 
-	kobject_init(&p->kobj);
-	kobject_set_name(&p->kobj, SYSFS_BRIDGE_PORT_ATTR);
-	p->kobj.ktype = &brport_ktype;
-	p->kobj.parent = &(dev->dev.kobj);
-	p->kobj.kset = NULL;
-
 	return p;
 }
 
-int br_add_bridge(const char *name)
+int br_add_bridge(struct net *net, const char *name)
 {
 	struct net_device *dev;
 	int ret;
 
-	dev = new_bridge_dev(name);
+	dev = new_bridge_dev(net, name);
 	if (!dev)
 		return -ENOMEM;
 
 	rtnl_lock();
 	if (strchr(dev->name, '%')) {
 		ret = dev_alloc_name(dev, dev->name);
-		if (ret < 0) {
-			free_netdev(dev);
-			goto out;
-		}
+		if (ret < 0)
+			goto out_free;
 	}
 
 	ret = register_netdevice(dev);
 	if (ret)
-		goto out;
+		goto out_free;
 
 	ret = br_sysfs_addbr(dev);
 	if (ret)
@@ -306,15 +289,19 @@ int br_add_bridge(const char *name)
  out:
 	rtnl_unlock();
 	return ret;
+
+out_free:
+	free_netdev(dev);
+	goto out;
 }
 
-int br_del_bridge(const char *name)
+int br_del_bridge(struct net *net, const char *name)
 {
 	struct net_device *dev;
 	int ret = 0;
 
 	rtnl_lock();
-	dev = __dev_get_by_name(name);
+	dev = __dev_get_by_name(net, name);
 	if (dev == NULL)
 		ret =  -ENXIO; 	/* Could not find device */
 
@@ -360,35 +347,21 @@ int br_min_mtu(const struct net_bridge *br)
 void br_features_recompute(struct net_bridge *br)
 {
 	struct net_bridge_port *p;
-	unsigned long features, checksum;
+	unsigned long features, mask;
 
-	checksum = br->feature_mask & NETIF_F_ALL_CSUM ? NETIF_F_NO_CSUM : 0;
-	features = br->feature_mask & ~NETIF_F_ALL_CSUM;
+	features = mask = br->feature_mask;
+	if (list_empty(&br->port_list))
+		goto done;
+
+	features &= ~NETIF_F_ONE_FOR_ALL;
 
 	list_for_each_entry(p, &br->port_list, list) {
-		unsigned long feature = p->dev->features;
-
-		if (checksum & NETIF_F_NO_CSUM && !(feature & NETIF_F_NO_CSUM))
-			checksum ^= NETIF_F_NO_CSUM | NETIF_F_HW_CSUM;
-		if (checksum & NETIF_F_HW_CSUM && !(feature & NETIF_F_HW_CSUM))
-			checksum ^= NETIF_F_HW_CSUM | NETIF_F_IP_CSUM;
-		if (!(feature & NETIF_F_IP_CSUM))
-			checksum = 0;
-
-		if (feature & NETIF_F_GSO)
-			feature |= NETIF_F_GSO_SOFTWARE;
-		feature |= NETIF_F_GSO;
-
-		features &= feature;
+		features = netdev_increment_features(features,
+						     p->dev->features, mask);
 	}
 
-	if (!(checksum & NETIF_F_ALL_CSUM))
-		features &= ~NETIF_F_SG;
-	if (!(features & NETIF_F_SG))
-		features &= ~NETIF_F_GSO_MASK;
-
-	br->dev->features = features | checksum | NETIF_F_LLTX |
-			    NETIF_F_GSO_ROBUST;
+done:
+	br->dev->features = netdev_fix_features(features, NULL);
 }
 
 /* called with RTNL */
@@ -410,7 +383,12 @@ int br_add_if(struct net_bridge *br, struct net_device *dev)
 	if (IS_ERR(p))
 		return PTR_ERR(p);
 
-	err = kobject_add(&p->kobj);
+	err = dev_set_promiscuity(dev, 1);
+	if (err)
+		goto put_back;
+
+	err = kobject_init_and_add(&p->kobj, &brport_ktype, &(dev->dev.kobj),
+				   SYSFS_BRIDGE_PORT_ATTR);
 	if (err)
 		goto err0;
 
@@ -423,7 +401,7 @@ int br_add_if(struct net_bridge *br, struct net_device *dev)
 		goto err2;
 
 	rcu_assign_pointer(dev->br_port, p);
-	dev_set_promiscuity(dev, 1);
+	dev_disable_lro(dev);
 
 	list_add_rcu(&p->list, &br->port_list);
 
@@ -449,6 +427,10 @@ err1:
 	kobject_del(&p->kobj);
 err0:
 	kobject_put(&p->kobj);
+	dev_set_promiscuity(dev, -1);
+put_back:
+	dev_put(dev);
+	kfree(p);
 	return err;
 }
 
@@ -470,14 +452,18 @@ int br_del_if(struct net_bridge *br, struct net_device *dev)
 	return 0;
 }
 
-void __exit br_cleanup_bridges(void)
+void br_net_exit(struct net *net)
 {
-	struct net_device *dev, *nxt;
+	struct net_device *dev;
 
 	rtnl_lock();
-	for_each_netdev_safe(dev, nxt)
-		if (dev->priv_flags & IFF_EBRIDGE)
+restart:
+	for_each_netdev(net, dev) {
+		if (dev->priv_flags & IFF_EBRIDGE) {
 			del_br(dev->priv);
+			goto restart;
+		}
+	}
 	rtnl_unlock();
 
 }

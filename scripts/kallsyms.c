@@ -7,12 +7,6 @@
  *
  * Usage: nm -n vmlinux | scripts/kallsyms [--all-symbols] > symbols.S
  *
- * ChangeLog:
- *
- * (25/Aug/2004) Paulo Marques <pmarques@grupopie.com>
- *      Changed the compression method from stem compression to "table lookup"
- *      compression
- *
  *      Table compression uses all the unused char codes on the symbols and
  *  maps these to the most used substrings (tokens). For instance, it might
  *  map char code 0xF7 to represent "write_" and then in every symbol where
@@ -24,26 +18,23 @@
  *
  */
 
-#define _GNU_SOURCE
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 
-#define KSYM_NAME_LEN		127
-
+#define KSYM_NAME_LEN		128
 
 struct sym_entry {
 	unsigned long long addr;
 	unsigned int len;
+	unsigned int start_pos;
 	unsigned char *sym;
 };
 
-
 static struct sym_entry *table;
 static unsigned int table_size, table_cnt;
-static unsigned long long _text, _stext, _etext, _sinittext, _einittext, _sextratext, _eextratext;
+static unsigned long long _text, _stext, _etext, _sinittext, _einittext;
 static int all_symbols = 0;
 static char symbol_prefix_char = '\0';
 
@@ -101,10 +92,6 @@ static int read_symbol(FILE *in, struct sym_entry *s)
 		_sinittext = s->addr;
 	else if (strcmp(sym, "_einittext") == 0)
 		_einittext = s->addr;
-	else if (strcmp(sym, "_sextratext") == 0)
-		_sextratext = s->addr;
-	else if (strcmp(sym, "_eextratext") == 0)
-		_eextratext = s->addr;
 	else if (toupper(stype) == 'A')
 	{
 		/* Keep these useful absolute symbols */
@@ -120,6 +107,9 @@ static int read_symbol(FILE *in, struct sym_entry *s)
 		return -1;
 	/* exclude also MIPS ELF local symbols ($L123 instead of .L123) */
 	else if (str[0] == '$')
+		return -1;
+	/* exclude debugging symbols */
+	else if (stype == 'N')
 		return -1;
 
 	/* include the type field in the symbol name, so that it gets
@@ -167,18 +157,18 @@ static int symbol_valid(struct sym_entry *s)
 	 * and inittext sections are discarded */
 	if (!all_symbols) {
 		if ((s->addr < _stext || s->addr > _etext)
-		    && (s->addr < _sinittext || s->addr > _einittext)
-		    && (s->addr < _sextratext || s->addr > _eextratext))
+		    && (s->addr < _sinittext || s->addr > _einittext))
 			return 0;
 		/* Corner case.  Discard any symbols with the same value as
-		 * _etext _einittext or _eextratext; they can move between pass
-		 * 1 and 2 when the kallsyms data are added.  If these symbols
-		 * move then they may get dropped in pass 2, which breaks the
-		 * kallsyms rules.
+		 * _etext _einittext; they can move between pass 1 and 2 when
+		 * the kallsyms data are added.  If these symbols move then
+		 * they may get dropped in pass 2, which breaks the kallsyms
+		 * rules.
 		 */
-		if ((s->addr == _etext && strcmp((char*)s->sym + offset, "_etext")) ||
-		    (s->addr == _einittext && strcmp((char*)s->sym + offset, "_einittext")) ||
-		    (s->addr == _eextratext && strcmp((char*)s->sym + offset, "_eextratext")))
+		if ((s->addr == _etext &&
+				strcmp((char *)s->sym + offset, "_etext")) ||
+		    (s->addr == _einittext &&
+				strcmp((char *)s->sym + offset, "_einittext")))
 			return 0;
 	}
 
@@ -204,8 +194,10 @@ static void read_map(FILE *in)
 				exit (1);
 			}
 		}
-		if (read_symbol(in, &table[table_cnt]) == 0)
+		if (read_symbol(in, &table[table_cnt]) == 0) {
+			table[table_cnt].start_pos = table_cnt;
 			table_cnt++;
+		}
 	}
 }
 
@@ -254,7 +246,7 @@ static void write_src(void)
 	unsigned int i, k, off;
 	unsigned int best_idx[256];
 	unsigned int *markers;
-	char buf[KSYM_NAME_LEN+1];
+	char buf[KSYM_NAME_LEN];
 
 	printf("#include <asm/types.h>\n");
 	printf("#if BITS_PER_LONG == 64\n");
@@ -378,6 +370,17 @@ static void build_initial_tok_table(void)
 	table_cnt = pos;
 }
 
+static void *find_token(unsigned char *str, int len, unsigned char *token)
+{
+	int i;
+
+	for (i = 0; i < len - 1; i++) {
+		if (str[i] == token[0] && str[i+1] == token[1])
+			return &str[i];
+	}
+	return NULL;
+}
+
 /* replace a given token in all the valid symbols. Use the sampled symbols
  * to update the counts */
 static void compress_symbols(unsigned char *str, int idx)
@@ -391,7 +394,7 @@ static void compress_symbols(unsigned char *str, int idx)
 		p1 = table[i].sym;
 
 		/* find the token on the symbol */
-		p2 = memmem(p1, len, str, 2);
+		p2 = find_token(p1, len, str);
 		if (!p2) continue;
 
 		/* decrease the counts for this symbol's tokens */
@@ -410,7 +413,7 @@ static void compress_symbols(unsigned char *str, int idx)
 			if (size < 2) break;
 
 			/* find the token on the symbol */
-			p2 = memmem(p1, size, str, 2);
+			p2 = find_token(p1, size, str);
 
 		} while (p2);
 
@@ -497,6 +500,35 @@ static void optimize_token_table(void)
 	optimize_result();
 }
 
+static int compare_symbols(const void *a, const void *b)
+{
+	const struct sym_entry *sa;
+	const struct sym_entry *sb;
+	int wa, wb;
+
+	sa = a;
+	sb = b;
+
+	/* sort by address first */
+	if (sa->addr > sb->addr)
+		return 1;
+	if (sa->addr < sb->addr)
+		return -1;
+
+	/* sort by "weakness" type */
+	wa = (sa->sym[0] == 'w') || (sa->sym[0] == 'W');
+	wb = (sb->sym[0] == 'w') || (sb->sym[0] == 'W');
+	if (wa != wb)
+		return wa - wb;
+
+	/* sort by initial order, so that other symbols are left undisturbed */
+	return sa->start_pos - sb->start_pos;
+}
+
+static void sort_symbols(void)
+{
+	qsort(table, table_cnt, sizeof(struct sym_entry), compare_symbols);
+}
 
 int main(int argc, char **argv)
 {
@@ -518,6 +550,7 @@ int main(int argc, char **argv)
 		usage();
 
 	read_map(stdin);
+	sort_symbols();
 	optimize_token_table();
 	write_src();
 

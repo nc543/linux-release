@@ -25,11 +25,14 @@
 #include <linux/device.h>
 #include <linux/vmalloc.h>
 #include <linux/poll.h>
+#include <linux/preempt.h>
+#include <linux/time.h>
 #include <linux/delay.h>
 #include <linux/mm.h>
 #include <linux/idr.h>
 #include <linux/compat.h>
 #include <linux/firewire-cdev.h>
+#include <asm/system.h>
 #include <asm/uaccess.h>
 #include "fw-transaction.h"
 #include "fw-topology.h"
@@ -106,15 +109,22 @@ static int fw_device_op_open(struct inode *inode, struct file *file)
 	struct client *client;
 	unsigned long flags;
 
-	device = fw_device_from_devt(inode->i_rdev);
+	device = fw_device_get_by_devt(inode->i_rdev);
 	if (device == NULL)
 		return -ENODEV;
 
-	client = kzalloc(sizeof(*client), GFP_KERNEL);
-	if (client == NULL)
-		return -ENOMEM;
+	if (fw_device_is_shutdown(device)) {
+		fw_device_put(device);
+		return -ENODEV;
+	}
 
-	client->device = fw_device_get(device);
+	client = kzalloc(sizeof(*client), GFP_KERNEL);
+	if (client == NULL) {
+		fw_device_put(device);
+		return -ENOMEM;
+	}
+
+	client->device = device;
 	INIT_LIST_HEAD(&client->event_list);
 	INIT_LIST_HEAD(&client->resource_list);
 	spin_lock_init(&client->lock);
@@ -140,11 +150,10 @@ static void queue_event(struct client *client, struct event *event,
 	event->v[1].size = size1;
 
 	spin_lock_irqsave(&client->lock, flags);
-
 	list_add_tail(&event->link, &client->event_list);
-	wake_up_interruptible(&client->wait);
-
 	spin_unlock_irqrestore(&client->lock, flags);
+
+	wake_up_interruptible(&client->wait);
 }
 
 static int
@@ -196,6 +205,7 @@ fw_device_op_read(struct file *file,
 	return dequeue_event(client, buffer, count);
 }
 
+/* caller must hold card->lock so that node pointers can be dereferenced here */
 static void
 fill_bus_reset_event(struct fw_cdev_event_bus_reset *event,
 		     struct client *client)
@@ -204,12 +214,12 @@ fill_bus_reset_event(struct fw_cdev_event_bus_reset *event,
 
 	event->closure	     = client->bus_reset_closure;
 	event->type          = FW_CDEV_EVENT_BUS_RESET;
+	event->generation    = client->device->generation;
 	event->node_id       = client->device->node_id;
 	event->local_node_id = card->local_node->node_id;
 	event->bm_node_id    = 0; /* FIXME: We don't track the BM. */
 	event->irm_node_id   = card->irm_node->node_id;
 	event->root_node_id  = card->root_node->node_id;
-	event->generation    = card->generation;
 }
 
 static void
@@ -264,31 +274,43 @@ static int ioctl_get_info(struct client *client, void *buffer)
 {
 	struct fw_cdev_get_info *get_info = buffer;
 	struct fw_cdev_event_bus_reset bus_reset;
+	struct fw_card *card = client->device->card;
+	unsigned long ret = 0;
 
 	client->version = get_info->version;
 	get_info->version = FW_CDEV_VERSION;
+
+	down_read(&fw_device_rwsem);
 
 	if (get_info->rom != 0) {
 		void __user *uptr = u64_to_uptr(get_info->rom);
 		size_t want = get_info->rom_length;
 		size_t have = client->device->config_rom_length * 4;
 
-		if (copy_to_user(uptr, client->device->config_rom,
-				 min(want, have)))
-			return -EFAULT;
+		ret = copy_to_user(uptr, client->device->config_rom,
+				   min(want, have));
 	}
 	get_info->rom_length = client->device->config_rom_length * 4;
+
+	up_read(&fw_device_rwsem);
+
+	if (ret != 0)
+		return -EFAULT;
 
 	client->bus_reset_closure = get_info->bus_reset_closure;
 	if (get_info->bus_reset != 0) {
 		void __user *uptr = u64_to_uptr(get_info->bus_reset);
+		unsigned long flags;
 
+		spin_lock_irqsave(&card->lock, flags);
 		fill_bus_reset_event(&bus_reset, client);
+		spin_unlock_irqrestore(&card->lock, flags);
+
 		if (copy_to_user(uptr, &bus_reset, sizeof(bus_reset)))
 			return -EFAULT;
 	}
 
-	get_info->card = client->device->card->index;
+	get_info->card = card->index;
 
 	return 0;
 }
@@ -347,22 +369,33 @@ complete_transaction(struct fw_card *card, int rcode,
 	struct response *response = data;
 	struct client *client = response->client;
 	unsigned long flags;
+	struct fw_cdev_event_response *r = &response->response;
 
-	if (length < response->response.length)
-		response->response.length = length;
+	if (length < r->length)
+		r->length = length;
 	if (rcode == RCODE_COMPLETE)
-		memcpy(response->response.data, payload,
-		       response->response.length);
+		memcpy(r->data, payload, r->length);
 
 	spin_lock_irqsave(&client->lock, flags);
 	list_del(&response->resource.link);
 	spin_unlock_irqrestore(&client->lock, flags);
 
-	response->response.type   = FW_CDEV_EVENT_RESPONSE;
-	response->response.rcode  = rcode;
-	queue_event(client, &response->event,
-		    &response->response, sizeof(response->response),
-		    response->response.data, response->response.length);
+	r->type   = FW_CDEV_EVENT_RESPONSE;
+	r->rcode  = rcode;
+
+	/*
+	 * In the case that sizeof(*r) doesn't align with the position of the
+	 * data, and the read is short, preserve an extra copy of the data
+	 * to stay compatible with a pre-2.6.27 bug.  Since the bug is harmless
+	 * for short reads and some apps depended on it, this is both safe
+	 * and prudent for compatibility.
+	 */
+	if (r->length <= sizeof(*r) - offsetof(typeof(*r), data))
+		queue_event(client, &response->event, r, sizeof(*r),
+			    r->data, r->length);
+	else
+		queue_event(client, &response->event, r, sizeof(*r) + r->length,
+			    NULL, 0);
 }
 
 static int ioctl_send_request(struct client *client, void *buffer)
@@ -397,7 +430,7 @@ static int ioctl_send_request(struct client *client, void *buffer)
 			request->tcode & 0x1f,
 			device->node->node_id,
 			request->generation,
-			device->node->max_speed,
+			device->max_speed,
 			request->offset,
 			response->response.data, request->length,
 			complete_transaction, response);
@@ -621,26 +654,29 @@ iso_callback(struct fw_iso_context *context, u32 cycle,
 	     size_t header_length, void *header, void *data)
 {
 	struct client *client = data;
-	struct iso_interrupt *interrupt;
+	struct iso_interrupt *irq;
 
-	interrupt = kzalloc(sizeof(*interrupt) + header_length, GFP_ATOMIC);
-	if (interrupt == NULL)
+	irq = kzalloc(sizeof(*irq) + header_length, GFP_ATOMIC);
+	if (irq == NULL)
 		return;
 
-	interrupt->interrupt.type      = FW_CDEV_EVENT_ISO_INTERRUPT;
-	interrupt->interrupt.closure   = client->iso_closure;
-	interrupt->interrupt.cycle     = cycle;
-	interrupt->interrupt.header_length = header_length;
-	memcpy(interrupt->interrupt.header, header, header_length);
-	queue_event(client, &interrupt->event,
-		    &interrupt->interrupt,
-		    sizeof(interrupt->interrupt) + header_length, NULL, 0);
+	irq->interrupt.type      = FW_CDEV_EVENT_ISO_INTERRUPT;
+	irq->interrupt.closure   = client->iso_closure;
+	irq->interrupt.cycle     = cycle;
+	irq->interrupt.header_length = header_length;
+	memcpy(irq->interrupt.header, header, header_length);
+	queue_event(client, &irq->event, &irq->interrupt,
+		    sizeof(irq->interrupt) + header_length, NULL, 0);
 }
 
 static int ioctl_create_iso_context(struct client *client, void *buffer)
 {
 	struct fw_cdev_create_iso_context *request = buffer;
 	struct fw_iso_context *context;
+
+	/* We only support one context at this time. */
+	if (client->iso_context != NULL)
+		return -EBUSY;
 
 	if (request->channel > 63)
 		return -EINVAL;
@@ -684,8 +720,8 @@ static int ioctl_create_iso_context(struct client *client, void *buffer)
 #define GET_PAYLOAD_LENGTH(v)	((v) & 0xffff)
 #define GET_INTERRUPT(v)	(((v) >> 16) & 0x01)
 #define GET_SKIP(v)		(((v) >> 17) & 0x01)
-#define GET_TAG(v)		(((v) >> 18) & 0x02)
-#define GET_SY(v)		(((v) >> 20) & 0x04)
+#define GET_TAG(v)		(((v) >> 18) & 0x03)
+#define GET_SY(v)		(((v) >> 20) & 0x0f)
 #define GET_HEADER_LENGTH(v)	(((v) >> 24) & 0xff)
 
 static int ioctl_queue_iso(struct client *client, void *buffer)
@@ -722,10 +758,11 @@ static int ioctl_queue_iso(struct client *client, void *buffer)
 		buffer_end = 0;
 	}
 
-	if (!access_ok(VERIFY_READ, request->packets, request->size))
+	p = (struct fw_cdev_iso_packet __user *)u64_to_uptr(request->packets);
+
+	if (!access_ok(VERIFY_READ, p, request->size))
 		return -EFAULT;
 
-	p = (struct fw_cdev_iso_packet __user *)u64_to_uptr(request->packets);
 	end = (void __user *)p + request->size;
 	count = 0;
 	while (p < end) {
@@ -787,8 +824,9 @@ static int ioctl_start_iso(struct client *client, void *buffer)
 {
 	struct fw_cdev_start_iso *request = buffer;
 
-	if (request->handle != 0)
+	if (client->iso_context == NULL || request->handle != 0)
 		return -EINVAL;
+
 	if (client->iso_context->type == FW_ISO_CONTEXT_RECEIVE) {
 		if (request->tags == 0 || request->tags > 15)
 			return -EINVAL;
@@ -805,10 +843,32 @@ static int ioctl_stop_iso(struct client *client, void *buffer)
 {
 	struct fw_cdev_stop_iso *request = buffer;
 
-	if (request->handle != 0)
+	if (client->iso_context == NULL || request->handle != 0)
 		return -EINVAL;
 
 	return fw_iso_context_stop(client->iso_context);
+}
+
+static int ioctl_get_cycle_timer(struct client *client, void *buffer)
+{
+	struct fw_cdev_get_cycle_timer *request = buffer;
+	struct fw_card *card = client->device->card;
+	unsigned long long bus_time;
+	struct timeval tv;
+	unsigned long flags;
+
+	preempt_disable();
+	local_irq_save(flags);
+
+	bus_time = card->driver->get_bus_time(card);
+	do_gettimeofday(&tv);
+
+	local_irq_restore(flags);
+	preempt_enable();
+
+	request->local_time = tv.tv_sec * 1000000ULL + tv.tv_usec;
+	request->cycle_timer = bus_time & 0xffffffff;
+	return 0;
 }
 
 static int (* const ioctl_handlers[])(struct client *client, void *buffer) = {
@@ -824,6 +884,7 @@ static int (* const ioctl_handlers[])(struct client *client, void *buffer) = {
 	ioctl_queue_iso,
 	ioctl_start_iso,
 	ioctl_stop_iso,
+	ioctl_get_cycle_timer,
 };
 
 static int
@@ -852,7 +913,7 @@ dispatch_ioctl(struct client *client, unsigned int cmd, void __user *arg)
 			return -EFAULT;
 	}
 
-	return 0;
+	return retval;
 }
 
 static long
@@ -860,6 +921,9 @@ fw_device_op_ioctl(struct file *file,
 		   unsigned int cmd, unsigned long arg)
 {
 	struct client *client = file->private_data;
+
+	if (fw_device_is_shutdown(client->device))
+		return -ENODEV;
 
 	return dispatch_ioctl(client, cmd, (void __user *) arg);
 }
@@ -871,6 +935,9 @@ fw_device_op_compat_ioctl(struct file *file,
 {
 	struct client *client = file->private_data;
 
+	if (fw_device_is_shutdown(client->device))
+		return -ENODEV;
+
 	return dispatch_ioctl(client, cmd, compat_ptr(arg));
 }
 #endif
@@ -881,6 +948,9 @@ static int fw_device_op_mmap(struct file *file, struct vm_area_struct *vma)
 	enum dma_data_direction direction;
 	unsigned long size;
 	int page_count, retval;
+
+	if (fw_device_is_shutdown(client->device))
+		return -ENODEV;
 
 	/* FIXME: We could support multiple buffers, but we don't. */
 	if (client->buffer.pages != NULL)

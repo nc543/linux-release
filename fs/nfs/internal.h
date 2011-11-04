@@ -3,10 +3,9 @@
  */
 
 #include <linux/mount.h>
+#include <linux/security.h>
 
 struct nfs_string;
-struct nfs_mount_data;
-struct nfs4_mount_data;
 
 /* Maximum number of readahead requests
  * FIXME: this should really be a sysctl so that users may tune it to suit
@@ -23,24 +22,59 @@ struct nfs_clone_mount {
 	struct nfs_fattr *fattr;
 	char *hostname;
 	char *mnt_path;
-	struct sockaddr_in *addr;
+	struct sockaddr *addr;
+	size_t addrlen;
 	rpc_authflavor_t authflavor;
+};
+
+/*
+ * In-kernel mount arguments
+ */
+struct nfs_parsed_mount_data {
+	int			flags;
+	int			rsize, wsize;
+	int			timeo, retrans;
+	int			acregmin, acregmax,
+				acdirmin, acdirmax;
+	int			namlen;
+	unsigned int		bsize;
+	unsigned int		auth_flavor_len;
+	rpc_authflavor_t	auth_flavors[1];
+	char			*client_address;
+
+	struct {
+		struct sockaddr_storage	address;
+		size_t			addrlen;
+		char			*hostname;
+		u32			version;
+		unsigned short		port;
+		unsigned short		protocol;
+	} mount_server;
+
+	struct {
+		struct sockaddr_storage	address;
+		size_t			addrlen;
+		char			*hostname;
+		char			*export_path;
+		unsigned short		port;
+		unsigned short		protocol;
+	} nfs_server;
+
+	struct security_mnt_opts lsm_opts;
 };
 
 /* client.c */
 extern struct rpc_program nfs_program;
 
 extern void nfs_put_client(struct nfs_client *);
-extern struct nfs_client *nfs_find_client(const struct sockaddr_in *, int);
-extern struct nfs_server *nfs_create_server(const struct nfs_mount_data *,
-					    struct nfs_fh *);
-extern struct nfs_server *nfs4_create_server(const struct nfs4_mount_data *,
-					     const char *,
-					     const struct sockaddr_in *,
-					     const char *,
-					     const char *,
-					     rpc_authflavor_t,
-					     struct nfs_fh *);
+extern struct nfs_client *nfs_find_client(const struct sockaddr *, u32);
+extern struct nfs_client *nfs_find_client_next(struct nfs_client *);
+extern struct nfs_server *nfs_create_server(
+					const struct nfs_parsed_mount_data *,
+					struct nfs_fh *);
+extern struct nfs_server *nfs4_create_server(
+					const struct nfs_parsed_mount_data *,
+					struct nfs_fh *);
 extern struct nfs_server *nfs4_create_referral_server(struct nfs_clone_mount *,
 						      struct nfs_fh *);
 extern void nfs_free_server(struct nfs_server *server);
@@ -82,13 +116,8 @@ extern void nfs_destroy_readpagecache(void);
 extern int __init nfs_init_writepagecache(void);
 extern void nfs_destroy_writepagecache(void);
 
-#ifdef CONFIG_NFS_DIRECTIO
 extern int __init nfs_init_directcache(void);
 extern void nfs_destroy_directcache(void);
-#else
-#define nfs_init_directcache() (0)
-#define nfs_destroy_directcache() do {} while(0)
-#endif
 
 /* nfs2xdr.c */
 extern int nfs_stat_to_errno(int);
@@ -113,6 +142,7 @@ extern struct rpc_procinfo nfs4_procedures[];
 extern int nfs_access_cache_shrinker(int nr_to_scan, gfp_t gfp_mask);
 
 /* inode.c */
+extern struct workqueue_struct *nfsiod_workqueue;
 extern struct inode *nfs_alloc_inode(struct super_block *sb);
 extern void nfs_destroy_inode(struct inode *);
 extern int nfs_write_inode(struct inode *,int);
@@ -120,8 +150,10 @@ extern void nfs_clear_inode(struct inode *);
 #ifdef CONFIG_NFS_V4
 extern void nfs4_clear_inode(struct inode *);
 #endif
+void nfs_zap_acl_cache(struct inode *inode);
 
 /* super.c */
+void nfs_parse_ip_address(char *, size_t, struct sockaddr *, size_t *);
 extern struct file_system_type nfs_xdev_fs_type;
 #ifdef CONFIG_NFS_V4
 extern struct file_system_type nfs4_xdev_fs_type;
@@ -132,6 +164,8 @@ extern struct rpc_stat nfs_rpcstat;
 
 extern int __init register_nfs_fs(void);
 extern void __exit unregister_nfs_fs(void);
+extern void nfs_sb_active(struct super_block *sb);
+extern void nfs_sb_deactive(struct super_block *sb);
 
 /* namespace.c */
 extern char *nfs_path(const char *base,
@@ -183,9 +217,9 @@ unsigned long nfs_block_bits(unsigned long bsize, unsigned char *nrbitsp)
 /*
  * Calculate the number of 512byte blocks used.
  */
-static inline unsigned long nfs_calc_block_size(u64 tsize)
+static inline blkcnt_t nfs_calc_block_size(u64 tsize)
 {
-	loff_t used = (tsize + 511) >> 9;
+	blkcnt_t used = (tsize + 511) >> 9;
 	return (used > ULONG_MAX) ? ULONG_MAX : used;
 }
 
@@ -243,3 +277,23 @@ unsigned int nfs_page_array_len(unsigned int base, size_t len)
 		PAGE_SIZE - 1) >> PAGE_SHIFT;
 }
 
+#define IPV6_SCOPE_DELIMITER	'%'
+
+/*
+ * Set the port number in an address.  Be agnostic about the address
+ * family.
+ */
+static inline void nfs_set_port(struct sockaddr *sap, unsigned short port)
+{
+	struct sockaddr_in *ap = (struct sockaddr_in *)sap;
+	struct sockaddr_in6 *ap6 = (struct sockaddr_in6 *)sap;
+
+	switch (sap->sa_family) {
+	case AF_INET:
+		ap->sin_port = htons(port);
+		break;
+	case AF_INET6:
+		ap6->sin6_port = htons(port);
+		break;
+	}
+}

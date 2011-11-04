@@ -76,7 +76,7 @@ simple_get_netobj(const void *p, const void *end, struct xdr_netobj *res)
 	q = (const void *)((const char *)p + len);
 	if (unlikely(q > end || q < p))
 		return ERR_PTR(-EFAULT);
-	res->data = kmemdup(p, len, GFP_KERNEL);
+	res->data = kmemdup(p, len, GFP_NOFS);
 	if (unlikely(res->data == NULL))
 		return ERR_PTR(-ENOMEM);
 	return q;
@@ -90,7 +90,7 @@ gss_import_sec_context_spkm3(const void *p, size_t len,
 	struct	spkm3_ctx *ctx;
 	int	version;
 
-	if (!(ctx = kzalloc(sizeof(*ctx), GFP_KERNEL)))
+	if (!(ctx = kzalloc(sizeof(*ctx), GFP_NOFS)))
 		goto out_err;
 
 	p = simple_get_bytes(p, end, &version, sizeof(version));
@@ -202,7 +202,7 @@ gss_get_mic_spkm3(struct gss_ctx	*ctx,
 	return err;
 }
 
-static struct gss_api_ops gss_spkm3_ops = {
+static const struct gss_api_ops gss_spkm3_ops = {
 	.gss_import_sec_context	= gss_import_sec_context_spkm3,
 	.gss_get_mic		= gss_get_mic_spkm3,
 	.gss_verify_mic		= gss_verify_mic_spkm3,
@@ -217,6 +217,7 @@ static struct pf_desc gss_spkm3_pfs[] = {
 static struct gss_api_mech gss_spkm3_mech = {
 	.gm_name	= "spkm3",
 	.gm_owner	= THIS_MODULE,
+	.gm_oid		= {7, "\053\006\001\005\005\001\003"},
 	.gm_ops		= &gss_spkm3_ops,
 	.gm_pf_num	= ARRAY_SIZE(gss_spkm3_pfs),
 	.gm_pfs		= gss_spkm3_pfs,

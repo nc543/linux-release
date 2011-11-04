@@ -61,7 +61,7 @@
 struct rtc_plat_data {
 	struct rtc_device *rtc;
 	void __iomem *ioaddr;
-	unsigned long baseaddr;
+	resource_size_t baseaddr;
 	unsigned long last_jiffies;
 	int irq;
 	unsigned int irqen;
@@ -78,17 +78,17 @@ static int ds1553_rtc_set_time(struct device *dev, struct rtc_time *tm)
 	void __iomem *ioaddr = pdata->ioaddr;
 	u8 century;
 
-	century = BIN2BCD((tm->tm_year + 1900) / 100);
+	century = bin2bcd((tm->tm_year + 1900) / 100);
 
 	writeb(RTC_WRITE, pdata->ioaddr + RTC_CONTROL);
 
-	writeb(BIN2BCD(tm->tm_year % 100), ioaddr + RTC_YEAR);
-	writeb(BIN2BCD(tm->tm_mon + 1), ioaddr + RTC_MONTH);
-	writeb(BIN2BCD(tm->tm_wday) & RTC_DAY_MASK, ioaddr + RTC_DAY);
-	writeb(BIN2BCD(tm->tm_mday), ioaddr + RTC_DATE);
-	writeb(BIN2BCD(tm->tm_hour), ioaddr + RTC_HOURS);
-	writeb(BIN2BCD(tm->tm_min), ioaddr + RTC_MINUTES);
-	writeb(BIN2BCD(tm->tm_sec) & RTC_SECONDS_MASK, ioaddr + RTC_SECONDS);
+	writeb(bin2bcd(tm->tm_year % 100), ioaddr + RTC_YEAR);
+	writeb(bin2bcd(tm->tm_mon + 1), ioaddr + RTC_MONTH);
+	writeb(bin2bcd(tm->tm_wday) & RTC_DAY_MASK, ioaddr + RTC_DAY);
+	writeb(bin2bcd(tm->tm_mday), ioaddr + RTC_DATE);
+	writeb(bin2bcd(tm->tm_hour), ioaddr + RTC_HOURS);
+	writeb(bin2bcd(tm->tm_min), ioaddr + RTC_MINUTES);
+	writeb(bin2bcd(tm->tm_sec) & RTC_SECONDS_MASK, ioaddr + RTC_SECONDS);
 
 	/* RTC_CENTURY and RTC_CONTROL share same register */
 	writeb(RTC_WRITE | (century & RTC_CENTURY_MASK), ioaddr + RTC_CENTURY);
@@ -118,14 +118,14 @@ static int ds1553_rtc_read_time(struct device *dev, struct rtc_time *tm)
 	year = readb(ioaddr + RTC_YEAR);
 	century = readb(ioaddr + RTC_CENTURY) & RTC_CENTURY_MASK;
 	writeb(0, ioaddr + RTC_CONTROL);
-	tm->tm_sec = BCD2BIN(second);
-	tm->tm_min = BCD2BIN(minute);
-	tm->tm_hour = BCD2BIN(hour);
-	tm->tm_mday = BCD2BIN(day);
-	tm->tm_wday = BCD2BIN(week);
-	tm->tm_mon = BCD2BIN(month) - 1;
+	tm->tm_sec = bcd2bin(second);
+	tm->tm_min = bcd2bin(minute);
+	tm->tm_hour = bcd2bin(hour);
+	tm->tm_mday = bcd2bin(day);
+	tm->tm_wday = bcd2bin(week);
+	tm->tm_mon = bcd2bin(month) - 1;
 	/* year is 1900 + tm->tm_year */
-	tm->tm_year = BCD2BIN(year) + BCD2BIN(century) * 100 - 1900;
+	tm->tm_year = bcd2bin(year) + bcd2bin(century) * 100 - 1900;
 
 	if (rtc_valid_tm(tm) < 0) {
 		dev_err(dev, "retrieved date/time is not valid.\n");
@@ -141,16 +141,16 @@ static void ds1553_rtc_update_alarm(struct rtc_plat_data *pdata)
 
 	spin_lock_irqsave(&pdata->rtc->irq_lock, flags);
 	writeb(pdata->alrm_mday < 0 || (pdata->irqen & RTC_UF) ?
-	       0x80 : BIN2BCD(pdata->alrm_mday),
+	       0x80 : bin2bcd(pdata->alrm_mday),
 	       ioaddr + RTC_DATE_ALARM);
 	writeb(pdata->alrm_hour < 0 || (pdata->irqen & RTC_UF) ?
-	       0x80 : BIN2BCD(pdata->alrm_hour),
+	       0x80 : bin2bcd(pdata->alrm_hour),
 	       ioaddr + RTC_HOURS_ALARM);
 	writeb(pdata->alrm_min < 0 || (pdata->irqen & RTC_UF) ?
-	       0x80 : BIN2BCD(pdata->alrm_min),
+	       0x80 : bin2bcd(pdata->alrm_min),
 	       ioaddr + RTC_MINUTES_ALARM);
 	writeb(pdata->alrm_sec < 0 || (pdata->irqen & RTC_UF) ?
-	       0x80 : BIN2BCD(pdata->alrm_sec),
+	       0x80 : bin2bcd(pdata->alrm_sec),
 	       ioaddr + RTC_SECONDS_ALARM);
 	writeb(pdata->irqen ? RTC_INTS_AE : 0, ioaddr + RTC_INTERRUPTS);
 	readb(ioaddr + RTC_FLAGS);	/* clear interrupts */
@@ -207,17 +207,6 @@ static irqreturn_t ds1553_rtc_interrupt(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static void ds1553_rtc_release(struct device *dev)
-{
-	struct platform_device *pdev = to_platform_device(dev);
-	struct rtc_plat_data *pdata = platform_get_drvdata(pdev);
-
-	if (pdata->irq >= 0) {
-		pdata->irqen = 0;
-		ds1553_rtc_update_alarm(pdata);
-	}
-}
-
 static int ds1553_rtc_ioctl(struct device *dev, unsigned int cmd,
 			    unsigned long arg)
 {
@@ -254,12 +243,12 @@ static const struct rtc_class_ops ds1553_rtc_ops = {
 	.set_time	= ds1553_rtc_set_time,
 	.read_alarm	= ds1553_rtc_read_alarm,
 	.set_alarm	= ds1553_rtc_set_alarm,
-	.release	= ds1553_rtc_release,
 	.ioctl		= ds1553_rtc_ioctl,
 };
 
-static ssize_t ds1553_nvram_read(struct kobject *kobj, char *buf,
-				 loff_t pos, size_t size)
+static ssize_t ds1553_nvram_read(struct kobject *kobj,
+				 struct bin_attribute *bin_attr,
+				 char *buf, loff_t pos, size_t size)
 {
 	struct platform_device *pdev =
 		to_platform_device(container_of(kobj, struct device, kobj));
@@ -272,8 +261,9 @@ static ssize_t ds1553_nvram_read(struct kobject *kobj, char *buf,
 	return count;
 }
 
-static ssize_t ds1553_nvram_write(struct kobject *kobj, char *buf,
-				  loff_t pos, size_t size)
+static ssize_t ds1553_nvram_write(struct kobject *kobj,
+				  struct bin_attribute *bin_attr,
+				  char *buf, loff_t pos, size_t size)
 {
 	struct platform_device *pdev =
 		to_platform_device(container_of(kobj, struct device, kobj));
@@ -289,8 +279,7 @@ static ssize_t ds1553_nvram_write(struct kobject *kobj, char *buf,
 static struct bin_attribute ds1553_nvram_attr = {
 	.attr = {
 		.name = "nvram",
-		.mode = S_IRUGO | S_IWUGO,
-		.owner = THIS_MODULE,
+		.mode = S_IRUGO | S_IWUSR,
 	},
 	.size = RTC_OFFSET,
 	.read = ds1553_nvram_read,
@@ -390,11 +379,14 @@ static int __devexit ds1553_rtc_remove(struct platform_device *pdev)
 	return 0;
 }
 
+/* work with hotplug and coldplug */
+MODULE_ALIAS("platform:rtc-ds1553");
+
 static struct platform_driver ds1553_rtc_driver = {
 	.probe		= ds1553_rtc_probe,
 	.remove		= __devexit_p(ds1553_rtc_remove),
 	.driver		= {
-		.name	= "ds1553",
+		.name	= "rtc-ds1553",
 		.owner	= THIS_MODULE,
 	},
 };
@@ -406,7 +398,7 @@ static __init int ds1553_init(void)
 
 static __exit void ds1553_exit(void)
 {
-	return platform_driver_unregister(&ds1553_rtc_driver);
+	platform_driver_unregister(&ds1553_rtc_driver);
 }
 
 module_init(ds1553_init);

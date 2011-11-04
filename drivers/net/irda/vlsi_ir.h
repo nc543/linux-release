@@ -537,10 +537,10 @@ calc_width_bits(unsigned baudrate, unsigned widthselect, unsigned clockselect)
  */
 
 struct ring_descr_hw {
-	volatile u16	rd_count;	/* tx/rx count [11:0] */
-	u16		reserved;
+	volatile __le16	rd_count;	/* tx/rx count [11:0] */
+	__le16		reserved;
 	union {
-		u32	addr;		/* [23:0] of the buffer's busaddress */
+		__le32	addr;		/* [23:0] of the buffer's busaddress */
 		struct {
 			u8		addr_res[3];
 			volatile u8	status;		/* descriptor status */
@@ -617,7 +617,7 @@ static inline void rd_set_addr_status(struct ring_descr *rd, dma_addr_t a, u8 s)
 	 */
 
 	if ((a & ~DMA_MASK_MSTRPAGE)>>24 != MSTRPAGE_VALUE) {
-		IRDA_ERROR("%s: pci busaddr inconsistency!\n", __FUNCTION__);
+		IRDA_ERROR("%s: pci busaddr inconsistency!\n", __func__);
 		dump_stack();
 		return;
 	}
@@ -728,7 +728,7 @@ typedef struct vlsi_irda_dev {
 	struct timeval		last_rx;
 
 	spinlock_t		lock;
-	struct semaphore	sem;
+	struct mutex		mtx;
 
 	u8			resume_ok;	
 	struct proc_dir_entry	*proc_entry;

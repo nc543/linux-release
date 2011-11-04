@@ -78,7 +78,6 @@ u64 hipz_h_alloc_resource_cq(const struct ipz_adapter_handle adapter_handle,
  * initialize resources, create empty QPPTs (2 rings).
  */
 u64 hipz_h_alloc_resource_qp(const struct ipz_adapter_handle adapter_handle,
-			     struct ehca_qp *qp,
 			     struct ehca_alloc_qp_parms *parms);
 
 u64 hipz_h_query_port(const struct ipz_adapter_handle adapter_handle,
@@ -261,5 +260,6 @@ u64 hipz_h_error_data(const struct ipz_adapter_handle adapter_handle,
 		      const u64 ressource_handle,
 		      void *rblock,
 		      unsigned long *byte_count);
+u64 hipz_h_eoi(int irq);
 
 #endif /* __HCP_IF_H__ */

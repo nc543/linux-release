@@ -17,9 +17,13 @@
 #include "nxt6000.h"
 
 /* debug */
-int dvb_usb_digitv_debug;
+static int dvb_usb_digitv_debug;
 module_param_named(debug,dvb_usb_digitv_debug, int, 0644);
 MODULE_PARM_DESC(debug, "set debugging level (1=rc (or-able))." DVB_USB_DEBUG_STATUS);
+
+DVB_DEFINE_MOD_OPT_ADAPTER_NR(adapter_nr);
+
+#define deb_rc(args...)   dprintk(dvb_usb_digitv_debug,0x01,args)
 
 static int digitv_ctrl_msg(struct dvb_usb_device *d,
 		u8 cmd, u8 vv, u8 *wbuf, int wlen, u8 *rbuf, int rlen)
@@ -118,7 +122,8 @@ static int digitv_nxt6000_tuner_set_params(struct dvb_frontend *fe, struct dvb_f
 {
 	struct dvb_usb_adapter *adap = fe->dvb->priv;
 	u8 b[5];
-	dvb_usb_tuner_calc_regs(fe,fep,b, 5);
+
+	fe->ops.tuner_ops.calc_regs(fe, fep, b, sizeof(b));
 	if (fe->ops.i2c_gate_ctrl)
 		fe->ops.i2c_gate_ctrl(fe, 1);
 	return digitv_ctrl_msg(adap->dev, USB_WRITE_TUNER, 0, &b[1], 4, NULL, 0);
@@ -130,12 +135,14 @@ static struct nxt6000_config digitv_nxt6000_config = {
 
 static int digitv_frontend_attach(struct dvb_usb_adapter *adap)
 {
+	struct digitv_state *st = adap->dev->priv;
+
 	if ((adap->fe = dvb_attach(mt352_attach, &digitv_mt352_config, &adap->dev->i2c_adap)) != NULL) {
-		adap->fe->ops.tuner_ops.calc_regs = dvb_usb_tuner_calc_regs;
+		st->is_nxt6000 = 0;
 		return 0;
 	}
 	if ((adap->fe = dvb_attach(nxt6000_attach, &digitv_nxt6000_config, &adap->dev->i2c_adap)) != NULL) {
-		adap->fe->ops.tuner_ops.set_params = digitv_nxt6000_tuner_set_params;
+		st->is_nxt6000 = 1;
 		return 0;
 	}
 	return -EIO;
@@ -143,8 +150,14 @@ static int digitv_frontend_attach(struct dvb_usb_adapter *adap)
 
 static int digitv_tuner_attach(struct dvb_usb_adapter *adap)
 {
-	adap->pll_addr = 0x60;
-	adap->pll_desc = &dvb_pll_tded4;
+	struct digitv_state *st = adap->dev->priv;
+
+	if (!dvb_attach(dvb_pll_attach, adap->fe, 0x60, NULL, DVB_PLL_TDED4))
+		return -ENODEV;
+
+	if (st->is_nxt6000)
+		adap->fe->ops.tuner_ops.set_params = digitv_nxt6000_tuner_set_params;
+
 	return 0;
 }
 
@@ -246,8 +259,9 @@ static int digitv_probe(struct usb_interface *intf,
 		const struct usb_device_id *id)
 {
 	struct dvb_usb_device *d;
-	int ret;
-	if ((ret = dvb_usb_device_init(intf,&digitv_properties,THIS_MODULE,&d)) == 0) {
+	int ret = dvb_usb_device_init(intf, &digitv_properties, THIS_MODULE, &d,
+				      adapter_nr);
+	if (ret == 0) {
 		u8 b[4] = { 0 };
 
 		if (d != NULL) { /* do that only when the firmware is loaded */
@@ -272,6 +286,8 @@ static struct dvb_usb_device_properties digitv_properties = {
 
 	.usb_ctrl = CYPRESS_FX2,
 	.firmware = "dvb-usb-digitv-02.fw",
+
+	.size_of_priv = sizeof(struct digitv_state),
 
 	.num_adapters = 1,
 	.adapter = {

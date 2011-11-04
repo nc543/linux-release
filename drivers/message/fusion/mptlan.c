@@ -1,11 +1,11 @@
 /*
  *  linux/drivers/message/fusion/mptlan.c
  *      IP Over Fibre Channel device driver.
- *      For use with LSI Logic Fibre Channel PCI chip/adapters
- *      running LSI Logic Fusion MPT (Message Passing Technology) firmware.
+ *      For use with LSI Fibre Channel PCI chip/adapters
+ *      running LSI Fusion MPT (Message Passing Technology) firmware.
  *
- *  Copyright (c) 2000-2007 LSI Logic Corporation
- *  (mailto:mpt_linux_developer@lsi.com)
+ *  Copyright (c) 2000-2008 LSI Corporation
+ *  (mailto:DL-MPTFusionLinux@lsi.com)
  *
  */
 /*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=*/
@@ -76,12 +76,6 @@ MODULE_VERSION(my_VERSION);
 /*
  *  Fusion MPT LAN private structures
  */
-
-struct NAA_Hosed {
-	u16 NAA;
-	u8 ieee[FC_ALEN];
-	struct NAA_Hosed *next;
-};
 
 struct BufferControl {
 	struct sk_buff	*skb;
@@ -154,21 +148,10 @@ static unsigned short mpt_lan_type_trans(struct sk_buff *skb,
 /*
  *  Fusion MPT LAN private data
  */
-static int LanCtx = -1;
+static u8 LanCtx = MPT_MAX_PROTOCOL_DRIVERS;
 
 static u32 max_buckets_out = 127;
 static u32 tx_max_out_p = 127 - 16;
-
-#ifdef QLOGIC_NAA_WORKAROUND
-static struct NAA_Hosed *mpt_bad_naa = NULL;
-DEFINE_RWLOCK(bad_naa_lock);
-#endif
-
-/*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=*/
-/*
- * Fusion MPT LAN external data
- */
-extern int mpt_lan_index;
 
 /*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=*/
 /**
@@ -616,7 +599,7 @@ mpt_lan_send_turbo(struct net_device *dev, u32 tmsg)
 
 	dioprintk((KERN_INFO MYNAM ": %s/%s: @%s, skb %p sent.\n",
 			IOC_AND_NETDEV_NAMES_s_s(dev),
-			__FUNCTION__, sent));
+			__func__, sent));
 
 	priv->SendCtl[ctx].skb = NULL;
 	pci_unmap_single(mpt_dev->pcidev, priv->SendCtl[ctx].dma,
@@ -682,7 +665,7 @@ mpt_lan_send_reply(struct net_device *dev, LANSendReply_t *pSendRep)
 
 		dioprintk((KERN_INFO MYNAM ": %s/%s: @%s, skb %p sent.\n",
 				IOC_AND_NETDEV_NAMES_s_s(dev),
-				__FUNCTION__, sent));
+				__func__, sent));
 
 		priv->SendCtl[ctx].skb = NULL;
 		pci_unmap_single(mpt_dev->pcidev, priv->SendCtl[ctx].dma,
@@ -721,7 +704,7 @@ mpt_lan_sdu_send (struct sk_buff *skb, struct net_device *dev)
 	u16 cur_naa = 0x1000;
 
 	dioprintk((KERN_INFO MYNAM ": %s called, skb_addr = %p\n",
-			__FUNCTION__, skb));
+			__func__, skb));
 
 	spin_lock_irqsave(&priv->txfidx_lock, flags);
 	if (priv->mpt_txfidx_tail < 0) {
@@ -729,7 +712,7 @@ mpt_lan_sdu_send (struct sk_buff *skb, struct net_device *dev)
 		spin_unlock_irqrestore(&priv->txfidx_lock, flags);
 
 		printk (KERN_ERR "%s: no tx context available: %u\n",
-			__FUNCTION__, priv->mpt_txfidx_tail);
+			__func__, priv->mpt_txfidx_tail);
 		return 1;
 	}
 
@@ -739,7 +722,7 @@ mpt_lan_sdu_send (struct sk_buff *skb, struct net_device *dev)
 		spin_unlock_irqrestore(&priv->txfidx_lock, flags);
 
 		printk (KERN_ERR "%s: Unable to alloc request frame\n",
-			__FUNCTION__);
+			__func__);
 		return 1;
 	}
 
@@ -786,30 +769,6 @@ mpt_lan_sdu_send (struct sk_buff *skb, struct net_device *dev)
 //			ctx, skb, skb->data));
 
 	mac = skb_mac_header(skb);
-#ifdef QLOGIC_NAA_WORKAROUND
-{
-	struct NAA_Hosed *nh;
-
-	/* Munge the NAA for Tx packets to QLogic boards, which don't follow
-	   RFC 2625. The longer I look at this, the more my opinion of Qlogic
-	   drops. */
-	read_lock_irq(&bad_naa_lock);
-	for (nh = mpt_bad_naa; nh != NULL; nh=nh->next) {
-		if ((nh->ieee[0] == mac[0]) &&
-		    (nh->ieee[1] == mac[1]) &&
-		    (nh->ieee[2] == mac[2]) &&
-		    (nh->ieee[3] == mac[3]) &&
-		    (nh->ieee[4] == mac[4]) &&
-		    (nh->ieee[5] == mac[5])) {
-			cur_naa = nh->NAA;
-			dlprintk ((KERN_INFO "mptlan/sdu_send: using NAA value "
-				  "= %04x.\n", cur_naa));
-			break;
-		}
-	}
-	read_unlock_irq(&bad_naa_lock);
-}
-#endif
 
 	pTrans->TransactionDetails[0] = cpu_to_le32((cur_naa         << 16) |
 						    (mac[0] <<  8) |
@@ -1214,7 +1173,7 @@ mpt_lan_post_receive_buckets(struct mpt_lan_priv *priv)
 
 	dioprintk((KERN_INFO MYNAM ": %s/%s: @%s, Start_buckets = %u, buckets_out = %u\n",
 			IOC_AND_NETDEV_NAMES_s_s(dev),
-			__FUNCTION__, buckets, curr));
+			__func__, buckets, curr));
 
 	max = (mpt_dev->req_sz - MPT_LAN_RECEIVE_POST_REQUEST_SIZE) /
 			(MPT_LAN_TRANSACTION32_SIZE + sizeof(SGESimple64_t));
@@ -1223,13 +1182,15 @@ mpt_lan_post_receive_buckets(struct mpt_lan_priv *priv)
 		mf = mpt_get_msg_frame(LanCtx, mpt_dev);
 		if (mf == NULL) {
 			printk (KERN_ERR "%s: Unable to alloc request frame\n",
-				__FUNCTION__);
+				__func__);
 			dioprintk((KERN_ERR "%s: %u buckets remaining\n",
-				 __FUNCTION__, buckets));
+				 __func__, buckets));
 			goto out;
 		}
 		pRecvReq = (LANReceivePostRequest_t *) mf;
 
+		i = le16_to_cpu(mf->u.frame.hwhdr.msgctxu.fld.req_idx);
+		mpt_dev->RequestNB[i] = 0;
 		count = buckets;
 		if (count > max)
 			count = max;
@@ -1248,7 +1209,7 @@ mpt_lan_post_receive_buckets(struct mpt_lan_priv *priv)
 			spin_lock_irqsave(&priv->rxfidx_lock, flags);
 			if (priv->mpt_rxfidx_tail < 0) {
 				printk (KERN_ERR "%s: Can't alloc context\n",
-					__FUNCTION__);
+					__func__);
 				spin_unlock_irqrestore(&priv->rxfidx_lock,
 						       flags);
 				break;
@@ -1271,7 +1232,7 @@ mpt_lan_post_receive_buckets(struct mpt_lan_priv *priv)
 				if (skb == NULL) {
 					printk (KERN_WARNING
 						MYNAM "/%s: Can't alloc skb\n",
-						__FUNCTION__);
+						__func__);
 					priv->mpt_rxfidx[++priv->mpt_rxfidx_tail] = ctx;
 					spin_unlock_irqrestore(&priv->rxfidx_lock, flags);
 					break;
@@ -1309,7 +1270,7 @@ mpt_lan_post_receive_buckets(struct mpt_lan_priv *priv)
 
 		if (pSimple == NULL) {
 /**/			printk (KERN_WARNING MYNAM "/%s: No buckets posted\n",
-/**/				__FUNCTION__);
+/**/				__func__);
 			mpt_free_msg_frame(mpt_dev, mf);
 			goto out;
 		}
@@ -1333,9 +1294,9 @@ mpt_lan_post_receive_buckets(struct mpt_lan_priv *priv)
 
 out:
 	dioprintk((KERN_INFO MYNAM "/%s: End_buckets = %u, priv->buckets_out = %u\n",
-		  __FUNCTION__, buckets, atomic_read(&priv->buckets_out)));
+		  __func__, buckets, atomic_read(&priv->buckets_out)));
 	dioprintk((KERN_INFO MYNAM "/%s: Posted %u buckets and received %u back\n",
-	__FUNCTION__, priv->total_posted, priv->total_received));
+	__func__, priv->total_posted, priv->total_received));
 
 	clear_bit(0, &priv->post_buckets_active);
 }
@@ -1351,10 +1312,11 @@ mpt_lan_post_receive_buckets_work(struct work_struct *work)
 static struct net_device *
 mpt_register_lan_device (MPT_ADAPTER *mpt_dev, int pnum)
 {
-	struct net_device *dev = alloc_fcdev(sizeof(struct mpt_lan_priv));
-	struct mpt_lan_priv *priv = NULL;
+	struct net_device *dev;
+	struct mpt_lan_priv *priv;
 	u8 HWaddr[FC_ALEN], *a;
 
+	dev = alloc_fcdev(sizeof(struct mpt_lan_priv));
 	if (!dev)
 		return NULL;
 
@@ -1366,7 +1328,6 @@ mpt_register_lan_device (MPT_ADAPTER *mpt_dev, int pnum)
 	priv->mpt_dev = mpt_dev;
 	priv->pnum = pnum;
 
-	memset(&priv->post_buckets_task, 0, sizeof(priv->post_buckets_task));
 	INIT_DELAYED_WORK(&priv->post_buckets_task,
 			  mpt_lan_post_receive_buckets_work);
 	priv->post_buckets_active = 0;
@@ -1390,8 +1351,6 @@ mpt_register_lan_device (MPT_ADAPTER *mpt_dev, int pnum)
 	priv->bucketthresh = priv->max_buckets_out * 2 / 3;
 	spin_lock_init(&priv->txfidx_lock);
 	spin_lock_init(&priv->rxfidx_lock);
-
-	memset(&priv->stats, 0, sizeof(priv->stats));
 
 	/*  Grab pre-fetched LANPage1 stuff. :-) */
 	a = (u8 *) &mpt_dev->lan_cnfg_page1.HardwareAddressLow;
@@ -1426,8 +1385,6 @@ mpt_register_lan_device (MPT_ADAPTER *mpt_dev, int pnum)
 
 	dlprintk((KERN_INFO MYNAM ": Finished registering dev "
 		"and setting initial values\n"));
-
-	SET_MODULE_OWNER(dev);
 
 	if (register_netdev(dev) != 0) {
 		free_netdev(dev);
@@ -1510,9 +1467,6 @@ static int __init mpt_lan_init (void)
 		return -EBUSY;
 	}
 
-	/* Set the callback index to be used by driver core for turbo replies */
-	mpt_lan_index = LanCtx;
-
 	dlprintk((KERN_INFO MYNAM ": assigned context of %d\n", LanCtx));
 
 	if (mpt_reset_register(LanCtx, mpt_lan_ioc_reset)) {
@@ -1524,8 +1478,7 @@ static int __init mpt_lan_init (void)
 
 	dlprintk((KERN_INFO MYNAM ": Registered for IOC reset notifications\n"));
 	
-	if (mpt_device_driver_register(&mptlan_driver, MPTLAN_DRIVER))
-		dprintk((KERN_INFO MYNAM ": failed to register dd callbacks\n"));
+	mpt_device_driver_register(&mptlan_driver, MPTLAN_DRIVER);
 	return 0;
 }
 
@@ -1534,10 +1487,9 @@ static void __exit mpt_lan_exit(void)
 	mpt_device_driver_deregister(MPTLAN_DRIVER);
 	mpt_reset_deregister(LanCtx);
 
-	if (LanCtx >= 0) {
+	if (LanCtx) {
 		mpt_deregister(LanCtx);
-		LanCtx = -1;
-		mpt_lan_index = 0;
+		LanCtx = MPT_MAX_PROTOCOL_DRIVERS;
 	}
 }
 
@@ -1585,79 +1537,6 @@ mpt_lan_type_trans(struct sk_buff *skb, struct net_device *dev)
 
 	fcllc = (struct fcllc *)skb->data;
 
-#ifdef QLOGIC_NAA_WORKAROUND
-{
-	u16 source_naa = fch->stype, found = 0;
-
-	/* Workaround for QLogic not following RFC 2625 in regards to the NAA
-	   value. */
-
-	if ((source_naa & 0xF000) == 0)
-		source_naa = swab16(source_naa);
-
-	if (fcllc->ethertype == htons(ETH_P_ARP))
-	    dlprintk ((KERN_INFO "mptlan/type_trans: got arp req/rep w/ naa of "
-		      "%04x.\n", source_naa));
-
-	if ((fcllc->ethertype == htons(ETH_P_ARP)) &&
-	   ((source_naa >> 12) !=  MPT_LAN_NAA_RFC2625)){
-		struct NAA_Hosed *nh, *prevnh;
-		int i;
-
-		dlprintk ((KERN_INFO "mptlan/type_trans: ARP Req/Rep from "
-			  "system with non-RFC 2625 NAA value (%04x).\n",
-			  source_naa));
-
-		write_lock_irq(&bad_naa_lock);
-		for (prevnh = nh = mpt_bad_naa; nh != NULL;
-		     prevnh=nh, nh=nh->next) {
-			if ((nh->ieee[0] == fch->saddr[0]) &&
-			    (nh->ieee[1] == fch->saddr[1]) &&
-			    (nh->ieee[2] == fch->saddr[2]) &&
-			    (nh->ieee[3] == fch->saddr[3]) &&
-			    (nh->ieee[4] == fch->saddr[4]) &&
-			    (nh->ieee[5] == fch->saddr[5])) {
-				found = 1;
-				dlprintk ((KERN_INFO "mptlan/type_trans: ARP Re"
-					 "q/Rep w/ bad NAA from system already"
-					 " in DB.\n"));
-				break;
-			}
-		}
-
-		if ((!found) && (nh == NULL)) {
-
-			nh = kmalloc(sizeof(struct NAA_Hosed), GFP_KERNEL);
-			dlprintk ((KERN_INFO "mptlan/type_trans: ARP Req/Rep w/"
-				 " bad NAA from system not yet in DB.\n"));
-
-			if (nh != NULL) {
-				nh->next = NULL;
-				if (!mpt_bad_naa)
-					mpt_bad_naa = nh;
-				if (prevnh)
-					prevnh->next = nh;
-
-				nh->NAA = source_naa; /* Set the S_NAA value. */
-				for (i = 0; i < FC_ALEN; i++)
-					nh->ieee[i] = fch->saddr[i];
-				dlprintk ((KERN_INFO "Got ARP from %02x:%02x:%02x:%02x:"
-					  "%02x:%02x with non-compliant S_NAA value.\n",
-					  fch->saddr[0], fch->saddr[1], fch->saddr[2],
-					  fch->saddr[3], fch->saddr[4],fch->saddr[5]));
-			} else {
-				printk (KERN_ERR "mptlan/type_trans: Unable to"
-					" kmalloc a NAA_Hosed struct.\n");
-			}
-		} else if (!found) {
-			printk (KERN_ERR "mptlan/type_trans: found not"
-				" set, but nh isn't null. Evil "
-				"funkiness abounds.\n");
-		}
-		write_unlock_irq(&bad_naa_lock);
-	}
-}
-#endif
 
 	/* Strip the SNAP header from ARP packets since we don't
 	 * pass them through to the 802.2/SNAP layers.

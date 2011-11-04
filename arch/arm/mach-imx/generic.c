@@ -28,12 +28,16 @@
 #include <linux/module.h>
 #include <linux/string.h>
 
-#include <asm/arch/imxfb.h>
-#include <asm/hardware.h>
-#include <asm/arch/imx-regs.h>
+#include <asm/errno.h>
+#include <mach/imxfb.h>
+#include <mach/hardware.h>
+#include <mach/imx-regs.h>
 
 #include <asm/mach/map.h>
-#include <asm/arch/mmc.h>
+#include <mach/mmc.h>
+#include <mach/gpio.h>
+
+unsigned long imx_gpio_alloc_map[(GPIO_PORT_MAX + 1) * 32 / BITS_PER_LONG];
 
 void imx_gpio_mode(int gpio_mode)
 {
@@ -95,81 +99,120 @@ void imx_gpio_mode(int gpio_mode)
 
 EXPORT_SYMBOL(imx_gpio_mode);
 
-/*
- *  get the system pll clock in Hz
- *
- *                  mfi + mfn / (mfd +1)
- *  f = 2 * f_ref * --------------------
- *                        pd + 1
- */
-static unsigned int imx_decode_pll(unsigned int pll, u32 f_ref)
+int imx_gpio_request(unsigned gpio, const char *label)
 {
-	unsigned long long ll;
-	unsigned long quot;
+	if(gpio >= (GPIO_PORT_MAX + 1) * 32) {
+		printk(KERN_ERR "imx_gpio: Attempt to request nonexistent GPIO %d for \"%s\"\n",
+			gpio, label ? label : "?");
+		return -EINVAL;
+	}
 
-	u32 mfi = (pll >> 10) & 0xf;
-	u32 mfn = pll & 0x3ff;
-	u32 mfd = (pll >> 16) & 0x3ff;
-	u32 pd =  (pll >> 26) & 0xf;
+	if(test_and_set_bit(gpio, imx_gpio_alloc_map)) {
+		printk(KERN_ERR "imx_gpio: GPIO %d already used. Allocation for \"%s\" failed\n",
+			gpio, label ? label : "?");
+		return -EBUSY;
+	}
 
-	mfi = mfi <= 5 ? 5 : mfi;
-
-	ll = 2 * (unsigned long long)f_ref * ( (mfi<<16) + (mfn<<16) / (mfd+1) );
-	quot = (pd+1) * (1<<16);
-	ll += quot / 2;
-	do_div(ll, quot);
-	return (unsigned int) ll;
+	return 0;
 }
 
-unsigned int imx_get_system_clk(void)
-{
-	u32 f_ref = (CSCR & CSCR_SYSTEM_SEL) ? 16000000 : (CLK32 * 512);
+EXPORT_SYMBOL(imx_gpio_request);
 
-	return imx_decode_pll(SPCTL0, f_ref);
-}
-EXPORT_SYMBOL(imx_get_system_clk);
-
-unsigned int imx_get_mcu_clk(void)
+void imx_gpio_free(unsigned gpio)
 {
-	return imx_decode_pll(MPCTL0, CLK32 * 512);
-}
-EXPORT_SYMBOL(imx_get_mcu_clk);
+	if(gpio >= (GPIO_PORT_MAX + 1) * 32)
+		return;
 
-/*
- *  get peripheral clock 1 ( UART[12], Timer[12], PWM )
- */
-unsigned int imx_get_perclk1(void)
-{
-	return imx_get_system_clk() / (((PCDR) & 0xf)+1);
+	clear_bit(gpio, imx_gpio_alloc_map);
 }
-EXPORT_SYMBOL(imx_get_perclk1);
 
-/*
- *  get peripheral clock 2 ( LCD, SD, SPI[12] )
- */
-unsigned int imx_get_perclk2(void)
-{
-	return imx_get_system_clk() / (((PCDR>>4) & 0xf)+1);
-}
-EXPORT_SYMBOL(imx_get_perclk2);
+EXPORT_SYMBOL(imx_gpio_free);
 
-/*
- *  get peripheral clock 3 ( SSI )
- */
-unsigned int imx_get_perclk3(void)
+int imx_gpio_direction_input(unsigned gpio)
 {
-	return imx_get_system_clk() / (((PCDR>>16) & 0x7f)+1);
+	imx_gpio_mode(gpio | GPIO_IN | GPIO_GIUS | GPIO_DR);
+	return 0;
 }
-EXPORT_SYMBOL(imx_get_perclk3);
 
-/*
- *  get hclk ( SDRAM, CSI, Memory Stick, I2C, DMA )
- */
-unsigned int imx_get_hclk(void)
+EXPORT_SYMBOL(imx_gpio_direction_input);
+
+int imx_gpio_direction_output(unsigned gpio, int value)
 {
-	return imx_get_system_clk() / (((CSCR>>10) & 0xf)+1);
+	imx_gpio_set_value(gpio, value);
+	imx_gpio_mode(gpio | GPIO_OUT | GPIO_GIUS | GPIO_DR);
+	return 0;
 }
-EXPORT_SYMBOL(imx_get_hclk);
+
+EXPORT_SYMBOL(imx_gpio_direction_output);
+
+int imx_gpio_setup_multiple_pins(const int *pin_list, unsigned count,
+				int alloc_mode, const char *label)
+{
+	const int *p = pin_list;
+	int i;
+	unsigned gpio;
+	unsigned mode;
+
+	for (i = 0; i < count; i++) {
+		gpio = *p & (GPIO_PIN_MASK | GPIO_PORT_MASK);
+		mode = *p & ~(GPIO_PIN_MASK | GPIO_PORT_MASK);
+
+		if (gpio >= (GPIO_PORT_MAX + 1) * 32)
+			goto setup_error;
+
+		if (alloc_mode & IMX_GPIO_ALLOC_MODE_RELEASE)
+			imx_gpio_free(gpio);
+		else if (!(alloc_mode & IMX_GPIO_ALLOC_MODE_NO_ALLOC))
+			if (imx_gpio_request(gpio, label))
+				if (!(alloc_mode & IMX_GPIO_ALLOC_MODE_TRY_ALLOC))
+					goto setup_error;
+
+		if (!(alloc_mode & (IMX_GPIO_ALLOC_MODE_ALLOC_ONLY |
+				    IMX_GPIO_ALLOC_MODE_RELEASE)))
+			imx_gpio_mode(gpio | mode);
+
+		p++;
+	}
+	return 0;
+
+setup_error:
+	if(alloc_mode & (IMX_GPIO_ALLOC_MODE_NO_ALLOC |
+		         IMX_GPIO_ALLOC_MODE_TRY_ALLOC))
+		return -EINVAL;
+
+	while (p != pin_list) {
+		p--;
+		gpio = *p & (GPIO_PIN_MASK | GPIO_PORT_MASK);
+		imx_gpio_free(gpio);
+	}
+
+	return -EINVAL;
+}
+
+EXPORT_SYMBOL(imx_gpio_setup_multiple_pins);
+
+void __imx_gpio_set_value(unsigned gpio, int value)
+{
+	imx_gpio_set_value_inline(gpio, value);
+}
+
+EXPORT_SYMBOL(__imx_gpio_set_value);
+
+int imx_gpio_to_irq(unsigned gpio)
+{
+	return IRQ_GPIOA(0) + gpio;
+}
+
+EXPORT_SYMBOL(imx_gpio_to_irq);
+
+int imx_irq_to_gpio(unsigned irq)
+{
+	if (irq < IRQ_GPIOA(0))
+		return -EINVAL;
+	return irq - IRQ_GPIOA(0);
+}
+
+EXPORT_SYMBOL(imx_irq_to_gpio);
 
 static struct resource imx_mmc_resources[] = {
 	[0] = {
@@ -208,7 +251,6 @@ void __init set_imx_fb_info(struct imxfb_mach_info *hard_imx_fb_info)
 {
 	memcpy(&imx_fb_info,hard_imx_fb_info,sizeof(struct imxfb_mach_info));
 }
-EXPORT_SYMBOL(set_imx_fb_info);
 
 static struct resource imxfb_resources[] = {
 	[0] = {

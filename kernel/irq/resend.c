@@ -33,10 +33,10 @@ static void resend_irqs(unsigned long arg)
 	struct irq_desc *desc;
 	int irq;
 
-	while (!bitmap_empty(irqs_resend, NR_IRQS)) {
-		irq = find_first_bit(irqs_resend, NR_IRQS);
+	while (!bitmap_empty(irqs_resend, nr_irqs)) {
+		irq = find_first_bit(irqs_resend, nr_irqs);
 		clear_bit(irq, irqs_resend);
-		desc = irq_desc + irq;
+		desc = irq_to_desc(irq);
 		local_irq_disable();
 		desc->handle_irq(irq, desc);
 		local_irq_enable();
@@ -62,7 +62,12 @@ void check_irq_resend(struct irq_desc *desc, unsigned int irq)
 	 */
 	desc->chip->enable(irq);
 
-	if ((status & (IRQ_PENDING | IRQ_REPLAY)) == IRQ_PENDING) {
+	/*
+	 * We do not resend level type interrupts. Level type
+	 * interrupts are resent by hardware when they are still
+	 * active.
+	 */
+	if ((status & (IRQ_LEVEL | IRQ_PENDING | IRQ_REPLAY)) == IRQ_PENDING) {
 		desc->status = (status & ~IRQ_PENDING) | IRQ_REPLAY;
 
 		if (!desc->chip || !desc->chip->retrigger ||

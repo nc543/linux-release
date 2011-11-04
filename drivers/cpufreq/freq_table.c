@@ -2,6 +2,11 @@
  * linux/drivers/cpufreq/freq_table.c
  *
  * Copyright (C) 2002 - 2003 Dominik Brodowski
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
  */
 
 #include <linux/kernel.h>
@@ -169,9 +174,9 @@ int cpufreq_frequency_table_target(struct cpufreq_policy *policy,
 }
 EXPORT_SYMBOL_GPL(cpufreq_frequency_table_target);
 
-static struct cpufreq_frequency_table *show_table[NR_CPUS];
+static DEFINE_PER_CPU(struct cpufreq_frequency_table *, show_table);
 /**
- * show_scaling_governor - show the current policy for the specified CPU
+ * show_available_freqs - show available frequencies for the specified CPU
  */
 static ssize_t show_available_freqs (struct cpufreq_policy *policy, char *buf)
 {
@@ -180,10 +185,10 @@ static ssize_t show_available_freqs (struct cpufreq_policy *policy, char *buf)
 	ssize_t count = 0;
 	struct cpufreq_frequency_table *table;
 
-	if (!show_table[cpu])
+	if (!per_cpu(show_table, cpu))
 		return -ENODEV;
 
-	table = show_table[cpu];
+	table = per_cpu(show_table, cpu);
 
 	for (i=0; (table[i].frequency != CPUFREQ_TABLE_END); i++) {
 		if (table[i].frequency == CPUFREQ_ENTRY_INVALID)
@@ -199,7 +204,6 @@ static ssize_t show_available_freqs (struct cpufreq_policy *policy, char *buf)
 struct freq_attr cpufreq_freq_attr_scaling_available_freqs = {
 	.attr = { .name = "scaling_available_frequencies",
 		  .mode = 0444,
-		  .owner=THIS_MODULE
 		},
 	.show = show_available_freqs,
 };
@@ -213,20 +217,20 @@ void cpufreq_frequency_table_get_attr(struct cpufreq_frequency_table *table,
 				      unsigned int cpu)
 {
 	dprintk("setting show_table for cpu %u to %p\n", cpu, table);
-	show_table[cpu] = table;
+	per_cpu(show_table, cpu) = table;
 }
 EXPORT_SYMBOL_GPL(cpufreq_frequency_table_get_attr);
 
 void cpufreq_frequency_table_put_attr(unsigned int cpu)
 {
 	dprintk("clearing show_table for cpu %u\n", cpu);
-	show_table[cpu] = NULL;
+	per_cpu(show_table, cpu) = NULL;
 }
 EXPORT_SYMBOL_GPL(cpufreq_frequency_table_put_attr);
 
 struct cpufreq_frequency_table *cpufreq_frequency_get_table(unsigned int cpu)
 {
-	return show_table[cpu];
+	return per_cpu(show_table, cpu);
 }
 EXPORT_SYMBOL_GPL(cpufreq_frequency_get_table);
 

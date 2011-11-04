@@ -36,8 +36,17 @@
  * page size of ehea hardware queues
  */
 
-#define EHEA_PAGESHIFT  12
-#define EHEA_PAGESIZE   4096UL
+#define EHEA_PAGESHIFT         12
+#define EHEA_PAGESIZE          (1UL << EHEA_PAGESHIFT)
+#define EHEA_SECTSIZE          (1UL << 24)
+#define EHEA_PAGES_PER_SECTION (EHEA_SECTSIZE >> EHEA_PAGESHIFT)
+#define EHEA_HUGEPAGESHIFT     34
+#define EHEA_HUGEPAGE_SIZE     (1UL << EHEA_HUGEPAGESHIFT)
+#define EHEA_HUGEPAGE_PFN_MASK ((EHEA_HUGEPAGE_SIZE - 1) >> PAGE_SHIFT)
+
+#if ((1UL << SECTION_SIZE_BITS) < EHEA_SECTSIZE)
+#error eHEA module cannot work if kernel sectionsize < ehea sectionsize
+#endif
 
 /* Some abbreviations used here:
  *
@@ -139,8 +148,8 @@ struct ehea_rwqe {
 #define EHEA_CQE_VLAN_TAG_XTRACT   0x0400
 
 #define EHEA_CQE_TYPE_RQ           0x60
-#define EHEA_CQE_STAT_ERR_MASK     0x721F
-#define EHEA_CQE_STAT_FAT_ERR_MASK 0x1F
+#define EHEA_CQE_STAT_ERR_MASK     0x700F
+#define EHEA_CQE_STAT_FAT_ERR_MASK 0xF
 #define EHEA_CQE_STAT_ERR_TCP      0x4000
 #define EHEA_CQE_STAT_ERR_IP       0x2000
 #define EHEA_CQE_STAT_ERR_CRC      0x1000
@@ -182,8 +191,8 @@ struct ehea_eqe {
 	u64 entry;
 };
 
-#define ERROR_DATA_LENGTH  EHEA_BMASK_IBM(52,63)
-#define ERROR_DATA_TYPE    EHEA_BMASK_IBM(0,7)
+#define ERROR_DATA_LENGTH  EHEA_BMASK_IBM(52, 63)
+#define ERROR_DATA_TYPE    EHEA_BMASK_IBM(0, 7)
 
 static inline void *hw_qeit_calc(struct hw_queue *queue, u64 q_offset)
 {
@@ -273,7 +282,7 @@ static inline void *hw_qeit_eq_get_inc(struct hw_queue *queue)
 static inline void *hw_eqit_eq_get_inc_valid(struct hw_queue *queue)
 {
 	void *retvalue = hw_qeit_get(queue);
-	u32 qe = *(u8*)retvalue;
+	u32 qe = *(u8 *)retvalue;
 	if ((qe >> 7) == (queue->toggle_state & 1))
 		hw_qeit_eq_get_inc(queue);
 	else
@@ -358,7 +367,7 @@ struct ehea_cq *ehea_create_cq(struct ehea_adapter *adapter, int cqe,
 
 int ehea_destroy_cq(struct ehea_cq *cq);
 
-struct ehea_qp *ehea_create_qp(struct ehea_adapter * adapter, u32 pd,
+struct ehea_qp *ehea_create_qp(struct ehea_adapter *adapter, u32 pd,
 			       struct ehea_qp_init_attr *init_attr);
 
 int ehea_destroy_qp(struct ehea_qp *qp);
@@ -371,5 +380,11 @@ int ehea_gen_smr(struct ehea_adapter *adapter, struct ehea_mr *old_mr,
 int ehea_rem_mr(struct ehea_mr *mr);
 
 void ehea_error_data(struct ehea_adapter *adapter, u64 res_handle);
+
+int ehea_add_sect_bmap(unsigned long pfn, unsigned long nr_pages);
+int ehea_rem_sect_bmap(unsigned long pfn, unsigned long nr_pages);
+int ehea_create_busmap(void);
+void ehea_destroy_busmap(void);
+u64 ehea_map_vaddr(void *caddr);
 
 #endif	/* __EHEA_QMR_H__ */

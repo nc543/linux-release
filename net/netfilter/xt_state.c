@@ -20,17 +20,10 @@ MODULE_DESCRIPTION("ip[6]_tables connection tracking state match module");
 MODULE_ALIAS("ipt_state");
 MODULE_ALIAS("ip6t_state");
 
-static int
-match(const struct sk_buff *skb,
-      const struct net_device *in,
-      const struct net_device *out,
-      const struct xt_match *match,
-      const void *matchinfo,
-      int offset,
-      unsigned int protoff,
-      int *hotdrop)
+static bool
+state_mt(const struct sk_buff *skb, const struct xt_match_param *par)
 {
-	const struct xt_state_info *sinfo = matchinfo;
+	const struct xt_state_info *sinfo = par->matchinfo;
 	enum ip_conntrack_info ctinfo;
 	unsigned int statebit;
 
@@ -44,56 +37,51 @@ match(const struct sk_buff *skb,
 	return (sinfo->statemask & statebit);
 }
 
-static int check(const char *tablename,
-		 const void *inf,
-		 const struct xt_match *match,
-		 void *matchinfo,
-		 unsigned int hook_mask)
+static bool state_mt_check(const struct xt_mtchk_param *par)
 {
-	if (nf_ct_l3proto_try_module_get(match->family) < 0) {
+	if (nf_ct_l3proto_try_module_get(par->match->family) < 0) {
 		printk(KERN_WARNING "can't load conntrack support for "
-				    "proto=%d\n", match->family);
-		return 0;
+				    "proto=%u\n", par->match->family);
+		return false;
 	}
-	return 1;
+	return true;
 }
 
-static void
-destroy(const struct xt_match *match, void *matchinfo)
+static void state_mt_destroy(const struct xt_mtdtor_param *par)
 {
-	nf_ct_l3proto_module_put(match->family);
+	nf_ct_l3proto_module_put(par->match->family);
 }
 
-static struct xt_match xt_state_match[] = {
+static struct xt_match state_mt_reg[] __read_mostly = {
 	{
 		.name		= "state",
-		.family		= AF_INET,
-		.checkentry	= check,
-		.match		= match,
-		.destroy	= destroy,
+		.family		= NFPROTO_IPV4,
+		.checkentry	= state_mt_check,
+		.match		= state_mt,
+		.destroy	= state_mt_destroy,
 		.matchsize	= sizeof(struct xt_state_info),
 		.me		= THIS_MODULE,
 	},
 	{
 		.name		= "state",
-		.family		= AF_INET6,
-		.checkentry	= check,
-		.match		= match,
-		.destroy	= destroy,
+		.family		= NFPROTO_IPV6,
+		.checkentry	= state_mt_check,
+		.match		= state_mt,
+		.destroy	= state_mt_destroy,
 		.matchsize	= sizeof(struct xt_state_info),
 		.me		= THIS_MODULE,
 	},
 };
 
-static int __init xt_state_init(void)
+static int __init state_mt_init(void)
 {
-	return xt_register_matches(xt_state_match, ARRAY_SIZE(xt_state_match));
+	return xt_register_matches(state_mt_reg, ARRAY_SIZE(state_mt_reg));
 }
 
-static void __exit xt_state_fini(void)
+static void __exit state_mt_exit(void)
 {
-	xt_unregister_matches(xt_state_match, ARRAY_SIZE(xt_state_match));
+	xt_unregister_matches(state_mt_reg, ARRAY_SIZE(state_mt_reg));
 }
 
-module_init(xt_state_init);
-module_exit(xt_state_fini);
+module_init(state_mt_init);
+module_exit(state_mt_exit);

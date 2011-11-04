@@ -43,7 +43,7 @@ struct dm_table {
 	 * device.  This should be a combination of FMODE_READ
 	 * and FMODE_WRITE.
 	 */
-	int mode;
+	fmode_t mode;
 
 	/* a list of devices used by this table */
 	struct list_head devices;
@@ -99,8 +99,13 @@ static void combine_restrictions_low(struct io_restrictions *lhs,
 	lhs->max_segment_size =
 		min_not_zero(lhs->max_segment_size, rhs->max_segment_size);
 
+	lhs->max_hw_sectors =
+		min_not_zero(lhs->max_hw_sectors, rhs->max_hw_sectors);
+
 	lhs->seg_boundary_mask =
 		min_not_zero(lhs->seg_boundary_mask, rhs->seg_boundary_mask);
+
+	lhs->bounce_pfn = min_not_zero(lhs->bounce_pfn, rhs->bounce_pfn);
 
 	lhs->no_cluster |= rhs->no_cluster;
 }
@@ -187,8 +192,10 @@ static int alloc_targets(struct dm_table *t, unsigned int num)
 
 	/*
 	 * Allocate both the target array and offset array at once.
+	 * Append an empty entry to catch sectors beyond the end of
+	 * the device.
 	 */
-	n_highs = (sector_t *) dm_vcalloc(num, sizeof(struct dm_target) +
+	n_highs = (sector_t *) dm_vcalloc(num + 1, sizeof(struct dm_target) +
 					  sizeof(sector_t));
 	if (!n_highs)
 		return -ENOMEM;
@@ -210,15 +217,14 @@ static int alloc_targets(struct dm_table *t, unsigned int num)
 	return 0;
 }
 
-int dm_table_create(struct dm_table **result, int mode,
+int dm_table_create(struct dm_table **result, fmode_t mode,
 		    unsigned num_targets, struct mapped_device *md)
 {
-	struct dm_table *t = kmalloc(sizeof(*t), GFP_KERNEL);
+	struct dm_table *t = kzalloc(sizeof(*t), GFP_KERNEL);
 
 	if (!t)
 		return -ENOMEM;
 
-	memset(t, 0, sizeof(*t));
 	INIT_LIST_HEAD(&t->devices);
 	atomic_set(&t->holders, 1);
 
@@ -239,51 +245,13 @@ int dm_table_create(struct dm_table **result, int mode,
 	return 0;
 }
 
-int dm_create_error_table(struct dm_table **result, struct mapped_device *md)
-{
-	struct dm_table *t;
-	sector_t dev_size = 1;
-	int r;
-
-	/*
-	 * Find current size of device.
-	 * Default to 1 sector if inactive.
-	 */
-	t = dm_get_table(md);
-	if (t) {
-		dev_size = dm_table_get_size(t);
-		dm_table_put(t);
-	}
-
-	r = dm_table_create(&t, FMODE_READ, 1, md);
-	if (r)
-		return r;
-
-	r = dm_table_add_target(t, "error", 0, dev_size, NULL);
-	if (r)
-		goto out;
-
-	r = dm_table_complete(t);
-	if (r)
-		goto out;
-
-	*result = t;
-
-out:
-	if (r)
-		dm_table_put(t);
-
-	return r;
-}
-EXPORT_SYMBOL_GPL(dm_create_error_table);
-
 static void free_devices(struct list_head *devices)
 {
 	struct list_head *tmp, *next;
 
-	for (tmp = devices->next; tmp != devices; tmp = next) {
-		struct dm_dev *dd = list_entry(tmp, struct dm_dev, list);
-		next = tmp->next;
+	list_for_each_safe(tmp, next, devices) {
+		struct dm_dev_internal *dd =
+		    list_entry(tmp, struct dm_dev_internal, list);
 		kfree(dd);
 	}
 }
@@ -345,44 +313,14 @@ static inline int check_space(struct dm_table *t)
 }
 
 /*
- * Convert a device path to a dev_t.
- */
-static int lookup_device(const char *path, dev_t *dev)
-{
-	int r;
-	struct nameidata nd;
-	struct inode *inode;
-
-	if ((r = path_lookup(path, LOOKUP_FOLLOW, &nd)))
-		return r;
-
-	inode = nd.dentry->d_inode;
-	if (!inode) {
-		r = -ENOENT;
-		goto out;
-	}
-
-	if (!S_ISBLK(inode->i_mode)) {
-		r = -ENOTBLK;
-		goto out;
-	}
-
-	*dev = inode->i_rdev;
-
- out:
-	path_release(&nd);
-	return r;
-}
-
-/*
  * See if we've already got a device in the list.
  */
-static struct dm_dev *find_device(struct list_head *l, dev_t dev)
+static struct dm_dev_internal *find_device(struct list_head *l, dev_t dev)
 {
-	struct dm_dev *dd;
+	struct dm_dev_internal *dd;
 
 	list_for_each_entry (dd, l, list)
-		if (dd->bdev->bd_dev == dev)
+		if (dd->dm_dev.bdev->bd_dev == dev)
 			return dd;
 
 	return NULL;
@@ -391,45 +329,47 @@ static struct dm_dev *find_device(struct list_head *l, dev_t dev)
 /*
  * Open a device so we can use it as a map destination.
  */
-static int open_dev(struct dm_dev *d, dev_t dev, struct mapped_device *md)
+static int open_dev(struct dm_dev_internal *d, dev_t dev,
+		    struct mapped_device *md)
 {
 	static char *_claim_ptr = "I belong to device-mapper";
 	struct block_device *bdev;
 
 	int r;
 
-	BUG_ON(d->bdev);
+	BUG_ON(d->dm_dev.bdev);
 
-	bdev = open_by_devnum(dev, d->mode);
+	bdev = open_by_devnum(dev, d->dm_dev.mode);
 	if (IS_ERR(bdev))
 		return PTR_ERR(bdev);
 	r = bd_claim_by_disk(bdev, _claim_ptr, dm_disk(md));
 	if (r)
-		blkdev_put(bdev);
+		blkdev_put(bdev, d->dm_dev.mode);
 	else
-		d->bdev = bdev;
+		d->dm_dev.bdev = bdev;
 	return r;
 }
 
 /*
  * Close a device that we've been using.
  */
-static void close_dev(struct dm_dev *d, struct mapped_device *md)
+static void close_dev(struct dm_dev_internal *d, struct mapped_device *md)
 {
-	if (!d->bdev)
+	if (!d->dm_dev.bdev)
 		return;
 
-	bd_release_from_disk(d->bdev, dm_disk(md));
-	blkdev_put(d->bdev);
-	d->bdev = NULL;
+	bd_release_from_disk(d->dm_dev.bdev, dm_disk(md));
+	blkdev_put(d->dm_dev.bdev, d->dm_dev.mode);
+	d->dm_dev.bdev = NULL;
 }
 
 /*
  * If possible, this checks an area of a destination device is valid.
  */
-static int check_device_area(struct dm_dev *dd, sector_t start, sector_t len)
+static int check_device_area(struct dm_dev_internal *dd, sector_t start,
+			     sector_t len)
 {
-	sector_t dev_size = dd->bdev->bd_inode->i_size >> SECTOR_SHIFT;
+	sector_t dev_size = dd->dm_dev.bdev->bd_inode->i_size >> SECTOR_SHIFT;
 
 	if (!dev_size)
 		return 1;
@@ -442,16 +382,17 @@ static int check_device_area(struct dm_dev *dd, sector_t start, sector_t len)
  * careful to leave things as they were if we fail to reopen the
  * device.
  */
-static int upgrade_mode(struct dm_dev *dd, int new_mode, struct mapped_device *md)
+static int upgrade_mode(struct dm_dev_internal *dd, fmode_t new_mode,
+			struct mapped_device *md)
 {
 	int r;
-	struct dm_dev dd_copy;
-	dev_t dev = dd->bdev->bd_dev;
+	struct dm_dev_internal dd_copy;
+	dev_t dev = dd->dm_dev.bdev->bd_dev;
 
 	dd_copy = *dd;
 
-	dd->mode |= new_mode;
-	dd->bdev = NULL;
+	dd->dm_dev.mode |= new_mode;
+	dd->dm_dev.bdev = NULL;
 	r = open_dev(dd, dev, md);
 	if (!r)
 		close_dev(&dd_copy, md);
@@ -467,11 +408,11 @@ static int upgrade_mode(struct dm_dev *dd, int new_mode, struct mapped_device *m
  */
 static int __table_get_device(struct dm_table *t, struct dm_target *ti,
 			      const char *path, sector_t start, sector_t len,
-			      int mode, struct dm_dev **result)
+			      fmode_t mode, struct dm_dev **result)
 {
 	int r;
-	dev_t dev;
-	struct dm_dev *dd;
+	dev_t uninitialized_var(dev);
+	struct dm_dev_internal *dd;
 	unsigned int major, minor;
 
 	BUG_ON(!t);
@@ -483,8 +424,12 @@ static int __table_get_device(struct dm_table *t, struct dm_target *ti,
 			return -EOVERFLOW;
 	} else {
 		/* convert the path to a device */
-		if ((r = lookup_device(path, &dev)))
-			return r;
+		struct block_device *bdev = lookup_bdev(path);
+
+		if (IS_ERR(bdev))
+			return PTR_ERR(bdev);
+		dev = bdev->bd_dev;
+		bdput(bdev);
 	}
 
 	dd = find_device(&t->devices, dev);
@@ -493,20 +438,20 @@ static int __table_get_device(struct dm_table *t, struct dm_target *ti,
 		if (!dd)
 			return -ENOMEM;
 
-		dd->mode = mode;
-		dd->bdev = NULL;
+		dd->dm_dev.mode = mode;
+		dd->dm_dev.bdev = NULL;
 
 		if ((r = open_dev(dd, dev, t->md))) {
 			kfree(dd);
 			return r;
 		}
 
-		format_dev_t(dd->name, dev);
+		format_dev_t(dd->dm_dev.name, dev);
 
 		atomic_set(&dd->count, 0);
 		list_add(&dd->list, &t->devices);
 
-	} else if (dd->mode != (mode | dd->mode)) {
+	} else if (dd->dm_dev.mode != (mode | dd->dm_dev.mode)) {
 		r = upgrade_mode(dd, mode, t->md);
 		if (r)
 			return r;
@@ -515,19 +460,26 @@ static int __table_get_device(struct dm_table *t, struct dm_target *ti,
 
 	if (!check_device_area(dd, start, len)) {
 		DMWARN("device %s too small for target", path);
-		dm_put_device(ti, dd);
+		dm_put_device(ti, &dd->dm_dev);
 		return -EINVAL;
 	}
 
-	*result = dd;
+	*result = &dd->dm_dev;
 
 	return 0;
 }
 
 void dm_set_device_limits(struct dm_target *ti, struct block_device *bdev)
 {
-	request_queue_t *q = bdev_get_queue(bdev);
+	struct request_queue *q = bdev_get_queue(bdev);
 	struct io_restrictions *rs = &ti->limits;
+	char b[BDEVNAME_SIZE];
+
+	if (unlikely(!q)) {
+		DMWARN("%s: Cannot set limits for nonexistent device %s",
+		       dm_device_name(ti->table->md), bdevname(bdev, b));
+		return;
+	}
 
 	/*
 	 * Combine the device limits low.
@@ -539,14 +491,13 @@ void dm_set_device_limits(struct dm_target *ti, struct block_device *bdev)
 	rs->max_sectors =
 		min_not_zero(rs->max_sectors, q->max_sectors);
 
-	/* FIXME: Device-Mapper on top of RAID-0 breaks because DM
-	 *        currently doesn't honor MD's merge_bvec_fn routine.
-	 *        In this case, we'll force DM to use PAGE_SIZE or
-	 *        smaller I/O, just to be safe. A better fix is in the
-	 *        works, but add this for the time being so it will at
-	 *        least operate correctly.
+	/*
+	 * Check if merge fn is supported.
+	 * If not we'll force DM to use PAGE_SIZE or
+	 * smaller I/O, just to be safe.
 	 */
-	if (q->merge_bvec_fn)
+
+	if (q->merge_bvec_fn && !ti->type->merge)
 		rs->max_sectors =
 			min_not_zero(rs->max_sectors,
 				     (unsigned int) (PAGE_SIZE >> 9));
@@ -563,16 +514,21 @@ void dm_set_device_limits(struct dm_target *ti, struct block_device *bdev)
 	rs->max_segment_size =
 		min_not_zero(rs->max_segment_size, q->max_segment_size);
 
+	rs->max_hw_sectors =
+		min_not_zero(rs->max_hw_sectors, q->max_hw_sectors);
+
 	rs->seg_boundary_mask =
 		min_not_zero(rs->seg_boundary_mask,
 			     q->seg_boundary_mask);
+
+	rs->bounce_pfn = min_not_zero(rs->bounce_pfn, q->bounce_pfn);
 
 	rs->no_cluster |= !test_bit(QUEUE_FLAG_CLUSTER, &q->queue_flags);
 }
 EXPORT_SYMBOL_GPL(dm_set_device_limits);
 
 int dm_get_device(struct dm_target *ti, const char *path, sector_t start,
-		  sector_t len, int mode, struct dm_dev **result)
+		  sector_t len, fmode_t mode, struct dm_dev **result)
 {
 	int r = __table_get_device(ti->table, ti, path,
 				   start, len, mode, result);
@@ -586,8 +542,11 @@ int dm_get_device(struct dm_target *ti, const char *path, sector_t start,
 /*
  * Decrement a devices use count and remove it if necessary.
  */
-void dm_put_device(struct dm_target *ti, struct dm_dev *dd)
+void dm_put_device(struct dm_target *ti, struct dm_dev *d)
 {
+	struct dm_dev_internal *dd = container_of(d, struct dm_dev_internal,
+						  dm_dev);
+
 	if (atomic_dec_and_test(&dd->count)) {
 		close_dev(dd, ti->table->md);
 		list_del(&dd->list);
@@ -698,6 +657,8 @@ static void check_for_valid_limits(struct io_restrictions *rs)
 {
 	if (!rs->max_sectors)
 		rs->max_sectors = SAFE_MAX_SECTORS;
+	if (!rs->max_hw_sectors)
+		rs->max_hw_sectors = SAFE_MAX_SECTORS;
 	if (!rs->max_phys_segments)
 		rs->max_phys_segments = MAX_PHYS_SEGMENTS;
 	if (!rs->max_hw_segments)
@@ -707,7 +668,9 @@ static void check_for_valid_limits(struct io_restrictions *rs)
 	if (!rs->max_segment_size)
 		rs->max_segment_size = MAX_SEGMENT_SIZE;
 	if (!rs->seg_boundary_mask)
-		rs->seg_boundary_mask = -1;
+		rs->seg_boundary_mask = BLK_SEG_BOUNDARY_MASK;
+	if (!rs->bounce_pfn)
+		rs->bounce_pfn = -1;
 }
 
 int dm_table_add_target(struct dm_table *t, const char *type,
@@ -790,7 +753,7 @@ static int setup_indexes(struct dm_table *t)
 		return -ENOMEM;
 
 	/* set up internal nodes, bottom-up */
-	for (i = t->depth - 2, total = 0; i >= 0; i--) {
+	for (i = t->depth - 2; i >= 0; i--) {
 		t->index[i] = indexes;
 		indexes += (KEYS_PER_NODE * t->counts[i]);
 		setup_btree_index(i, t);
@@ -862,6 +825,9 @@ struct dm_target *dm_table_get_target(struct dm_table *t, unsigned int index)
 
 /*
  * Search the btree for the correct target.
+ *
+ * Caller should check returned pointer with dm_target_is_valid()
+ * to trap I/O beyond end of device.
  */
 struct dm_target *dm_table_find_target(struct dm_table *t, sector_t sector)
 {
@@ -891,11 +857,14 @@ void dm_table_set_restrictions(struct dm_table *t, struct request_queue *q)
 	q->max_hw_segments = t->limits.max_hw_segments;
 	q->hardsect_size = t->limits.hardsect_size;
 	q->max_segment_size = t->limits.max_segment_size;
+	q->max_hw_sectors = t->limits.max_hw_sectors;
 	q->seg_boundary_mask = t->limits.seg_boundary_mask;
+	q->bounce_pfn = t->limits.bounce_pfn;
+
 	if (t->limits.no_cluster)
-		q->queue_flags &= ~(1 << QUEUE_FLAG_CLUSTER);
+		queue_flag_clear_unlocked(QUEUE_FLAG_CLUSTER, q);
 	else
-		q->queue_flags |= (1 << QUEUE_FLAG_CLUSTER);
+		queue_flag_set_unlocked(QUEUE_FLAG_CLUSTER, q);
 
 }
 
@@ -909,7 +878,7 @@ struct list_head *dm_table_get_devices(struct dm_table *t)
 	return &t->devices;
 }
 
-int dm_table_get_mode(struct dm_table *t)
+fmode_t dm_table_get_mode(struct dm_table *t)
 {
 	return t->mode;
 }
@@ -935,7 +904,7 @@ void dm_table_presuspend_targets(struct dm_table *t)
 	if (!t)
 		return;
 
-	return suspend_targets(t, 0);
+	suspend_targets(t, 0);
 }
 
 void dm_table_postsuspend_targets(struct dm_table *t)
@@ -943,7 +912,7 @@ void dm_table_postsuspend_targets(struct dm_table *t)
 	if (!t)
 		return;
 
-	return suspend_targets(t, 1);
+	suspend_targets(t, 1);
 }
 
 int dm_table_resume_targets(struct dm_table *t)
@@ -973,14 +942,20 @@ int dm_table_resume_targets(struct dm_table *t)
 
 int dm_table_any_congested(struct dm_table *t, int bdi_bits)
 {
-	struct list_head *d, *devices;
+	struct dm_dev_internal *dd;
+	struct list_head *devices = dm_table_get_devices(t);
 	int r = 0;
 
-	devices = dm_table_get_devices(t);
-	for (d = devices->next; d != devices; d = d->next) {
-		struct dm_dev *dd = list_entry(d, struct dm_dev, list);
-		request_queue_t *q = bdev_get_queue(dd->bdev);
-		r |= bdi_congested(&q->backing_dev_info, bdi_bits);
+	list_for_each_entry(dd, devices, list) {
+		struct request_queue *q = bdev_get_queue(dd->dm_dev.bdev);
+		char b[BDEVNAME_SIZE];
+
+		if (likely(q))
+			r |= bdi_congested(&q->backing_dev_info, bdi_bits);
+		else
+			DMWARN_LIMIT("%s: any_congested: nonexistent device %s",
+				     dm_device_name(t->md),
+				     bdevname(dd->dm_dev.bdev, b));
 	}
 
 	return r;
@@ -988,42 +963,20 @@ int dm_table_any_congested(struct dm_table *t, int bdi_bits)
 
 void dm_table_unplug_all(struct dm_table *t)
 {
-	struct list_head *d, *devices = dm_table_get_devices(t);
+	struct dm_dev_internal *dd;
+	struct list_head *devices = dm_table_get_devices(t);
 
-	for (d = devices->next; d != devices; d = d->next) {
-		struct dm_dev *dd = list_entry(d, struct dm_dev, list);
-		request_queue_t *q = bdev_get_queue(dd->bdev);
+	list_for_each_entry(dd, devices, list) {
+		struct request_queue *q = bdev_get_queue(dd->dm_dev.bdev);
+		char b[BDEVNAME_SIZE];
 
-		if (q->unplug_fn)
-			q->unplug_fn(q);
-	}
-}
-
-int dm_table_flush_all(struct dm_table *t)
-{
-	struct list_head *d, *devices = dm_table_get_devices(t);
-	int ret = 0;
-	unsigned i;
-
-	for (i = 0; i < t->num_targets; i++)
-		if (t->targets[i].type->flush)
-			t->targets[i].type->flush(&t->targets[i]);
-
-	for (d = devices->next; d != devices; d = d->next) {
-		struct dm_dev *dd = list_entry(d, struct dm_dev, list);
-		request_queue_t *q = bdev_get_queue(dd->bdev);
-		int err;
-
-		if (!q->issue_flush_fn)
-			err = -EOPNOTSUPP;
+		if (likely(q))
+			blk_unplug(q);
 		else
-			err = q->issue_flush_fn(q, dd->bdev->bd_disk, NULL);
-
-		if (!ret)
-			ret = err;
+			DMWARN_LIMIT("%s: Cannot unplug nonexistent device %s",
+				     dm_device_name(t->md),
+				     bdevname(dd->dm_dev.bdev, b));
 	}
-
-	return ret;
 }
 
 struct mapped_device *dm_table_get_md(struct dm_table *t)
@@ -1043,4 +996,3 @@ EXPORT_SYMBOL(dm_table_get_md);
 EXPORT_SYMBOL(dm_table_put);
 EXPORT_SYMBOL(dm_table_get);
 EXPORT_SYMBOL(dm_table_unplug_all);
-EXPORT_SYMBOL(dm_table_flush_all);

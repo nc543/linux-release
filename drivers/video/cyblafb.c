@@ -1068,15 +1068,18 @@ static int cyblafb_setcolreg(unsigned regno, unsigned red, unsigned green,
 		out8(0x3C9, green >> 10);
 		out8(0x3C9, blue >> 10);
 
-	} else if (bpp == 16)	// RGB 565
-		((u32 *) info->pseudo_palette)[regno] =
-		    (red & 0xF800) |
-		    ((green & 0xFC00) >> 5) | ((blue & 0xF800) >> 11);
-	else if (bpp == 32)	// ARGB 8888
-		((u32 *) info->pseudo_palette)[regno] =
-		    ((transp & 0xFF00) << 16) |
-		    ((red & 0xFF00) << 8) |
-		    ((green & 0xFF00)) | ((blue & 0xFF00) >> 8);
+	} else if (regno < 16) {
+		if (bpp == 16)	// RGB 565
+			((u32 *) info->pseudo_palette)[regno] =
+				(red & 0xF800) |
+				((green & 0xFC00) >> 5) |
+				((blue & 0xF800) >> 11);
+		else if (bpp == 32)	// ARGB 8888
+			((u32 *) info->pseudo_palette)[regno] =
+				((transp & 0xFF00) << 16) |
+				((red & 0xFF00) << 8) |
+				((green & 0xFF00)) | ((blue & 0xFF00) >> 8);
+	}
 
 	return 0;
 }
@@ -1153,7 +1156,7 @@ static struct fb_ops cyblafb_ops __devinitdata = {
 // need altered timings to display correctly. So I decided that it is much
 // better to provide a limited optimized set of modes plus the option of
 // using the mode in effect at startup time (might be selected using the
-// vga=??? paramter). After that the user might use fbset to select any
+// vga=??? parameter). After that the user might use fbset to select any
 // mode he likes, check_var will not try to alter geometry parameters as
 // it would be necessary otherwise.
 //

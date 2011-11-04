@@ -51,7 +51,7 @@ processor_set_pstate (
 	retval = ia64_pal_set_pstate((u64)value);
 
 	if (retval) {
-		dprintk("Failed to set freq to 0x%x, with error 0x%x\n",
+		dprintk("Failed to set freq to 0x%x, with error 0x%lx\n",
 		        value, retval);
 		return -ENODEV;
 	}
@@ -74,7 +74,7 @@ processor_get_pstate (
 
 	if (retval)
 		dprintk("Failed to get current freq with "
-		        "error 0x%x, idx 0x%x\n", retval, *value);
+			"error 0x%lx, idx 0x%x\n", retval, *value);
 
 	return (int)retval;
 }
@@ -113,10 +113,8 @@ processor_get_freq (
 
 	saved_mask = current->cpus_allowed;
 	set_cpus_allowed(current, cpumask_of_cpu(cpu));
-	if (smp_processor_id() != cpu) {
-		ret = -EAGAIN;
+	if (smp_processor_id() != cpu)
 		goto migrate_end;
-	}
 
 	/* processor_get_pstate gets the instantaneous frequency */
 	ret = processor_get_pstate(&value);
@@ -125,7 +123,7 @@ processor_get_freq (
 		set_cpus_allowed(current, saved_mask);
 		printk(KERN_WARNING "get performance failed with error %d\n",
 		       ret);
-		ret = -EAGAIN;
+		ret = 0;
 		goto migrate_end;
 	}
 	clock_freq = extract_clock(data, value, cpu);
@@ -323,8 +321,6 @@ acpi_cpufreq_cpu_init (
 			    data->acpi_data.states[i].transition_latency * 1000;
 		}
 	}
-	policy->governor = CPUFREQ_DEFAULT_GOVERNOR;
-
 	policy->cur = processor_get_freq(data, policy->cpu);
 
 	/* table init */

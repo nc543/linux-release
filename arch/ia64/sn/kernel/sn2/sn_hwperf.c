@@ -33,10 +33,10 @@
 #include <linux/smp_lock.h>
 #include <linux/nodemask.h>
 #include <linux/smp.h>
+#include <linux/mutex.h>
 
 #include <asm/processor.h>
 #include <asm/topology.h>
-#include <asm/semaphore.h>
 #include <asm/uaccess.h>
 #include <asm/sal.h>
 #include <asm/sn/io.h>
@@ -50,7 +50,7 @@ static void *sn_hwperf_salheap = NULL;
 static int sn_hwperf_obj_cnt = 0;
 static nasid_t sn_hwperf_master_nasid = INVALID_NASID;
 static int sn_hwperf_init(void);
-static DECLARE_MUTEX(sn_hwperf_init_mutex);
+static DEFINE_MUTEX(sn_hwperf_init_mutex);
 
 #define cnode_possible(n)	((n) < num_cnodes)
 
@@ -66,7 +66,8 @@ static int sn_hwperf_enum_objects(int *nobj, struct sn_hwperf_object_info **ret)
 	}
 
 	sz = sn_hwperf_obj_cnt * sizeof(struct sn_hwperf_object_info);
-	if ((objbuf = (struct sn_hwperf_object_info *) vmalloc(sz)) == NULL) {
+	objbuf = vmalloc(sz);
+	if (objbuf == NULL) {
 		printk("sn_hwperf_enum_objects: vmalloc(%d) failed\n", (int)sz);
 		e = -ENOMEM;
 		goto out;
@@ -576,7 +577,7 @@ static void sn_topology_stop(struct seq_file *m, void *v)
 /*
  * /proc/sgi_sn/sn_topology, read-only using seq_file
  */
-static struct seq_operations sn_topology_seq_ops = {
+static const struct seq_operations sn_topology_seq_ops = {
 	.start = sn_topology_start,
 	.next = sn_topology_next,
 	.stop = sn_topology_stop,
@@ -628,7 +629,7 @@ static int sn_hwperf_op_cpu(struct sn_hwperf_op_info *op_info)
 		if (use_ipi) {
 			/* use an interprocessor interrupt to call SAL */
 			smp_call_function_single(cpu, sn_hwperf_call_sal,
-				op_info, 1, 1);
+				op_info, 1);
 		}
 		else {
 			/* migrate the task before calling SAL */ 
@@ -750,9 +751,10 @@ sn_hwperf_ioctl(struct inode *in, struct file *fp, u32 op, u64 arg)
 			goto error;
 		} else
 		if ((r = sn_hwperf_enum_objects(&nobj, &objs)) == 0) {
+			int cpuobj_index = 0;
+
 			memset(p, 0, a.sz);
 			for (i = 0; i < nobj; i++) {
-				int cpuobj_index = 0;
 				if (!SN_HWPERF_IS_NODE(objs + i))
 					continue;
 				node = sn_hwperf_obj_to_cnode(objs + i);
@@ -882,10 +884,10 @@ static int sn_hwperf_init(void)
 	int e = 0;
 
 	/* single threaded, once-only initialization */
-	down(&sn_hwperf_init_mutex);
+	mutex_lock(&sn_hwperf_init_mutex);
 
 	if (sn_hwperf_salheap) {
-		up(&sn_hwperf_init_mutex);
+		mutex_unlock(&sn_hwperf_init_mutex);
 		return e;
 	}
 
@@ -934,7 +936,7 @@ out:
 		sn_hwperf_salheap = NULL;
 		sn_hwperf_obj_cnt = 0;
 	}
-	up(&sn_hwperf_init_mutex);
+	mutex_unlock(&sn_hwperf_init_mutex);
 	return e;
 }
 

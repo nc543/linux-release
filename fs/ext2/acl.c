@@ -294,7 +294,7 @@ ext2_check_acl(struct inode *inode, int mask)
 }
 
 int
-ext2_permission(struct inode *inode, int mask, struct nameidata *nd)
+ext2_permission(struct inode *inode, int mask)
 {
 	return generic_permission(inode, mask, ext2_check_acl);
 }
@@ -464,7 +464,7 @@ ext2_xattr_set_acl(struct inode *inode, int type, const void *value,
 
 	if (!test_opt(inode->i_sb, POSIX_ACL))
 		return -EOPNOTSUPP;
-	if ((current->fsuid != inode->i_uid) && !capable(CAP_FOWNER))
+	if (!is_owner_or_cap(inode))
 		return -EPERM;
 
 	if (value) {

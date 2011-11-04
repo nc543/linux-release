@@ -33,13 +33,11 @@
 #include <asm/tlbflush.h>
 #include <asm/cpudata.h>
 
-int smp_num_cpus = 1;
-volatile unsigned long cpu_callin_map[NR_CPUS] __initdata = {0,};
+#include "irq.h"
+
+volatile unsigned long cpu_callin_map[NR_CPUS] __cpuinitdata = {0,};
 unsigned char boot_cpu_id = 0;
 unsigned char boot_cpu_id4 = 0; /* boot_cpu_id << 2 */
-int smp_activated = 0;
-volatile int __cpu_number_map[NR_CPUS];
-volatile int __cpu_logical_map[NR_CPUS];
 
 cpumask_t cpu_online_map = CPU_MASK_NONE;
 cpumask_t phys_cpu_present_map = CPU_MASK_NONE;
@@ -53,9 +51,6 @@ cpumask_t smp_commenced_mask = CPU_MASK_NONE;
  * instruction which is much better...
  */
 
-/* Used to make bitops atomic */
-unsigned char bitops_spinlock = 0;
-
 void __cpuinit smp_store_cpu_info(int id)
 {
 	int cpu_node;
@@ -68,16 +63,6 @@ void __cpuinit smp_store_cpu_info(int id)
 	cpu_data(id).prom_node = cpu_node;
 	cpu_data(id).mid = cpu_get_hwmid(cpu_node);
 
-	/* this is required to tune the scheduler correctly */
-	/* is it possible to have CPUs with different cache sizes? */
-	if (id == boot_cpu_id) {
-		int cache_line,cache_nlines;
-		cache_line = 0x20;
-		cache_line = prom_getintdefault(cpu_node, "ecache-line-size", cache_line);
-		cache_nlines = 0x8000;
-		cache_nlines = prom_getintdefault(cpu_node, "ecache-nlines", cache_nlines);
-		max_cache_size = cache_line * cache_nlines;
-	}
 	if (cpu_data(id).mid < 0)
 		panic("No MID found for CPU%d at node 0x%08d", id, cpu_node);
 }
@@ -135,7 +120,7 @@ void cpu_panic(void)
 	panic("SMP bolixed\n");
 }
 
-struct linux_prom_registers smp_penguin_ctable __initdata = { 0 };
+struct linux_prom_registers smp_penguin_ctable __cpuinitdata = { 0 };
 
 void smp_send_reschedule(int cpu)
 {

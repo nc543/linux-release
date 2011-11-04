@@ -28,8 +28,6 @@
  * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
  * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
- *
- * $Id: mthca_allocator.c 1349 2004-12-16 21:09:43Z roland $
  */
 
 #include <linux/errno.h>
@@ -255,7 +253,7 @@ int mthca_buf_alloc(struct mthca_dev *dev, int size, int max_direct,
 			dma_list[i] = t;
 			pci_unmap_addr_set(&buf->page_list[i], mapping, t);
 
-			memset(buf->page_list[i].buf, 0, PAGE_SIZE);
+			clear_page(buf->page_list[i].buf);
 		}
 	}
 

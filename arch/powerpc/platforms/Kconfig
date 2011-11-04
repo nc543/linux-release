@@ -1,39 +1,23 @@
 menu "Platform support"
 
-choice
-	prompt "Machine type"
-	depends on PPC64 || CLASSIC32
-	default PPC_MULTIPLATFORM
-
 config PPC_MULTIPLATFORM
-	bool "Generic desktop/server/laptop"
-	help
-	  Select this option if configuring for an IBM pSeries or
-	  RS/6000 machine, an Apple machine, or a PReP, CHRP,
-	  Maple or Cell-based machine.
+	bool
+	depends on PPC64 || 6xx
+	default y
 
-config EMBEDDED6xx
-	bool "Embedded 6xx/7xx/7xxx-based board"
-	depends on PPC32 && (BROKEN||BROKEN_ON_SMP)
-
-config APUS
-	bool "Amiga-APUS"
-	depends on PPC32 && BROKEN
-	help
-	  Select APUS if configuring for a PowerUP Amiga.
-	  More information is available at:
-	  <http://linux-apus.sourceforge.net/>.
-endchoice
+config CLASSIC32
+	def_bool y
+	depends on 6xx && PPC_MULTIPLATFORM
 
 source "arch/powerpc/platforms/pseries/Kconfig"
 source "arch/powerpc/platforms/iseries/Kconfig"
 source "arch/powerpc/platforms/chrp/Kconfig"
+source "arch/powerpc/platforms/512x/Kconfig"
 source "arch/powerpc/platforms/52xx/Kconfig"
 source "arch/powerpc/platforms/powermac/Kconfig"
 source "arch/powerpc/platforms/prep/Kconfig"
 source "arch/powerpc/platforms/maple/Kconfig"
 source "arch/powerpc/platforms/pasemi/Kconfig"
-source "arch/powerpc/platforms/celleb/Kconfig"
 source "arch/powerpc/platforms/ps3/Kconfig"
 source "arch/powerpc/platforms/cell/Kconfig"
 source "arch/powerpc/platforms/8xx/Kconfig"
@@ -43,7 +27,7 @@ source "arch/powerpc/platforms/85xx/Kconfig"
 source "arch/powerpc/platforms/86xx/Kconfig"
 source "arch/powerpc/platforms/embedded6xx/Kconfig"
 source "arch/powerpc/platforms/44x/Kconfig"
-#source "arch/powerpc/platforms/4xx/Kconfig
+source "arch/powerpc/platforms/40x/Kconfig"
 
 config PPC_NATIVE
 	bool
@@ -67,6 +51,10 @@ config XICS
 	depends on PPC_PSERIES
 	bool
 	default y
+
+config IPIC
+	bool
+	default n
 
 config MPIC
 	bool
@@ -105,10 +93,10 @@ config RTAS_FLASH
 
 config PPC_PMI
 	tristate "Support for PMI"
-	depends PPC_IBM_CELL_BLADE
+	depends on PPC_IBM_CELL_BLADE
 	help
 	  PMI (Platform Management Interrupt) is a way to
-	  communicate with the BMC (Baseboard Mangement Controller).
+	  communicate with the BMC (Baseboard Management Controller).
 	  It is used in some IBM Cell blades.
 	default m
 
@@ -120,6 +108,16 @@ config MPIC_U3_HT_IRQS
 	bool
 	depends on PPC_MAPLE
 	default y
+
+config MPIC_BROKEN_REGREAD
+	bool
+	depends on MPIC
+	help
+	  This option enables a MPIC driver workaround for some chips
+	  that have a bug that causes some interrupt source information
+	  to not read back properly. It is safe to use on other chips as
+	  well, but enabling it uses about 8KB of memory to keep copies
+	  of the register contents in software.
 
 config IBMVIO
 	depends on PPC_PSERIES || PPC_ISERIES
@@ -241,20 +239,77 @@ config TAU_AVERAGE
 	  If in doubt, say N here.
 
 config QUICC_ENGINE
-	bool
+	bool "Freescale QUICC Engine (QE) Support"
+	depends on FSL_SOC
+	select PPC_LIB_RHEAP
+	select CRC32
 	help
 	  The QUICC Engine (QE) is a new generation of communications
 	  coprocessors on Freescale embedded CPUs (akin to CPM in older chips).
 	  Selecting this option means that you wish to build a kernel
 	  for a machine with a QE coprocessor.
 
+config QE_GPIO
+	bool "QE GPIO support"
+	depends on QUICC_ENGINE
+	select GENERIC_GPIO
+	select ARCH_REQUIRE_GPIOLIB
+	help
+	  Say Y here if you're going to use hardware that connects to the
+	  QE GPIOs.
+
 config CPM2
-	bool
-	default n
+	bool "Enable support for the CPM2 (Communications Processor Module)"
+	depends on MPC85xx || 8260
+	select CPM
+	select PPC_LIB_RHEAP
+	select PPC_PCI_CHOICE
+	select ARCH_REQUIRE_GPIOLIB
+	select GENERIC_GPIO
 	help
 	  The CPM2 (Communications Processor Module) is a coprocessor on
 	  embedded CPUs made by Freescale.  Selecting this option means that
 	  you wish to build a kernel for a machine with a CPM2 coprocessor
 	  on it (826x, 827x, 8560).
+
+config AXON_RAM
+	tristate "Axon DDR2 memory device driver"
+	depends on PPC_IBM_CELL_BLADE
+	default m
+	help
+	  It registers one block device per Axon's DDR2 memory bank found
+	  on a system. Block devices are called axonram?, their major and
+	  minor numbers are available in /proc/devices, /proc/partitions or
+	  in /sys/block/axonram?/dev.
+
+config FSL_ULI1575
+	bool
+	default n
+	select GENERIC_ISA_DMA
+	help
+	  Supports for the ULI1575 PCIe south bridge that exists on some
+	  Freescale reference boards. The boards all use the ULI in pretty
+	  much the same way.
+
+config CPM
+	bool
+	select PPC_CLOCK
+
+config OF_RTC
+	bool
+	help
+	  Uses information from the OF or flattened device tree to instatiate
+	  platform devices for direct mapped RTC chips like the DS1742 or DS1743.
+
+source "arch/powerpc/sysdev/bestcomm/Kconfig"
+
+config MPC8xxx_GPIO
+	bool "MPC8xxx GPIO support"
+	depends on PPC_MPC831x || PPC_MPC834x || PPC_MPC837x || PPC_85xx || PPC_86xx
+	select GENERIC_GPIO
+	select ARCH_REQUIRE_GPIOLIB
+	help
+	  Say Y here if you're going to use hardware that connects to the
+	  MPC831x/834x/837x/8572/8610 GPIOs.
 
 endmenu

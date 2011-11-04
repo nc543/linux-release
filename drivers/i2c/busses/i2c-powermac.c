@@ -94,7 +94,7 @@ static s32 i2c_powermac_smbus_xfer(	struct i2c_adapter*	adap,
 	    	break;
 
 	/* Note that these are broken vs. the expected smbus API where
-	 * on reads, the lenght is actually returned from the function,
+	 * on reads, the length is actually returned from the function,
 	 * but I think the current API makes no sense and I don't want
 	 * any driver that I haven't verified for correctness to go
 	 * anywhere near a pmac i2c bus anyway ...
@@ -121,8 +121,7 @@ static s32 i2c_powermac_smbus_xfer(	struct i2c_adapter*	adap,
 		if (rc)
 			goto bail;
 		rc = pmac_i2c_xfer(bus, addrdir, 1, command,
-				   read ? data->block : &data->block[1],
-				   data->block[0]);
+				   &data->block[1], data->block[0]);
 		break;
 
         default:
@@ -181,7 +180,7 @@ static const struct i2c_algorithm i2c_powermac_algorithm = {
 };
 
 
-static int i2c_powermac_remove(struct platform_device *dev)
+static int __devexit i2c_powermac_remove(struct platform_device *dev)
 {
 	struct i2c_adapter	*adapter = platform_get_drvdata(dev);
 	struct pmac_i2c_bus	*bus = i2c_get_adapdata(adapter);
@@ -201,7 +200,7 @@ static int i2c_powermac_remove(struct platform_device *dev)
 }
 
 
-static int __devexit i2c_powermac_probe(struct platform_device *dev)
+static int __devinit i2c_powermac_probe(struct platform_device *dev)
 {
 	struct pmac_i2c_bus *bus = dev->dev.platform_data;
 	struct device_node *parent = NULL;
@@ -260,9 +259,41 @@ static int __devexit i2c_powermac_probe(struct platform_device *dev)
 	}
 
 	printk(KERN_INFO "PowerMac i2c bus %s registered\n", name);
+
+	if (!strncmp(basename, "uni-n", 5)) {
+		struct device_node *np;
+		const u32 *prop;
+		struct i2c_board_info info;
+
+		/* Instantiate I2C motion sensor if present */
+		np = of_find_node_by_name(NULL, "accelerometer");
+		if (np && of_device_is_compatible(np, "AAPL,accelerometer_1") &&
+		    (prop = of_get_property(np, "reg", NULL))) {
+			int i2c_bus;
+			const char *tmp_bus;
+
+			/* look for bus either using "reg" or by path */
+			tmp_bus = strstr(np->full_name, "/i2c-bus@");
+			if (tmp_bus)
+				i2c_bus = *(tmp_bus + 9) - '0';
+			else
+				i2c_bus = ((*prop) >> 8) & 0x0f;
+
+			if (pmac_i2c_get_channel(bus) == i2c_bus) {
+				memset(&info, 0, sizeof(struct i2c_board_info));
+				info.addr = ((*prop) & 0xff) >> 1;
+				strlcpy(info.type, "ams", I2C_NAME_SIZE);
+				i2c_new_device(adapter, &info);
+			}
+		}
+	}
+
 	return rc;
 }
 
+
+/* work with hotplug and coldplug */
+MODULE_ALIAS("platform:i2c-powermac");
 
 static struct platform_driver i2c_powermac_driver = {
 	.probe = i2c_powermac_probe,

@@ -27,6 +27,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/smp_lock.h>
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/miscdevice.h>
@@ -35,7 +36,6 @@
 #include <linux/poll.h>
 #include <linux/init.h>
 #include <linux/string.h>
-#include <linux/smp_lock.h>
 #include <linux/genhd.h>
 #include <linux/blkdev.h>
 
@@ -185,7 +185,7 @@ static void jsfd_read(char *buf, unsigned long p, size_t togo) {
 	}
 }
 
-static void jsfd_do_request(request_queue_t *q)
+static void jsfd_do_request(struct request_queue *q)
 {
 	struct request *req;
 
@@ -417,11 +417,17 @@ static int jsf_mmap(struct file * file, struct vm_area_struct * vma)
 
 static int jsf_open(struct inode * inode, struct file * filp)
 {
-
-	if (jsf0.base == 0) return -ENXIO;
-	if (test_and_set_bit(0, (void *)&jsf0.busy) != 0)
+	lock_kernel();
+	if (jsf0.base == 0) {
+		unlock_kernel();
+		return -ENXIO;
+	}
+	if (test_and_set_bit(0, (void *)&jsf0.busy) != 0) {
+		unlock_kernel();
 		return -EBUSY;
+	}
 
+	unlock_kernel();
 	return 0;	/* XXX What security? */
 }
 
@@ -619,8 +625,7 @@ static void __exit jsflash_cleanup_module(void)
 	jsf0.busy = 0;
 
 	misc_deregister(&jsf_dev);
-	if (unregister_blkdev(JSFD_MAJOR, "jsfd") != 0)
-		printk("jsfd: cleanup_module failed\n");
+	unregister_blkdev(JSFD_MAJOR, "jsfd");
 	blk_cleanup_queue(jsf_queue);
 }
 

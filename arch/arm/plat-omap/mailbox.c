@@ -30,8 +30,8 @@
 #include <linux/blkdev.h>
 #include <linux/err.h>
 #include <linux/delay.h>
-#include <asm/io.h>
-#include <asm/arch/mailbox.h>
+#include <linux/io.h>
+#include <mach/mailbox.h>
 #include "mailbox.h"
 
 static struct omap_mbox *mboxes;
@@ -116,8 +116,8 @@ static void mbox_tx_work(struct work_struct *work)
 		}
 
 		spin_lock(q->queue_lock);
-		blkdev_dequeue_request(rq);
-		end_that_request_last(rq, 0);
+		if (__blk_end_request(rq, 0, 0))
+			BUG();
 		spin_unlock(q->queue_lock);
 	}
 }
@@ -149,10 +149,8 @@ static void mbox_rx_work(struct work_struct *work)
 
 		msg = (mbox_msg_t) rq->data;
 
-		spin_lock_irqsave(q->queue_lock, flags);
-		blkdev_dequeue_request(rq);
-		end_that_request_last(rq, 0);
-		spin_unlock_irqrestore(q->queue_lock, flags);
+		if (blk_end_request(rq, 0, 0))
+			BUG();
 
 		mbox->rxq->callback((void *)msg);
 	}
@@ -161,11 +159,11 @@ static void mbox_rx_work(struct work_struct *work)
 /*
  * Mailbox interrupt handler
  */
-static void mbox_txq_fn(request_queue_t * q)
+static void mbox_txq_fn(struct request_queue * q)
 {
 }
 
-static void mbox_rxq_fn(request_queue_t * q)
+static void mbox_rxq_fn(struct request_queue * q)
 {
 }
 
@@ -180,7 +178,7 @@ static void __mbox_rx_interrupt(struct omap_mbox *mbox)
 {
 	struct request *rq;
 	mbox_msg_t msg;
-	request_queue_t *q = mbox->rxq->queue;
+	struct request_queue *q = mbox->rxq->queue;
 
 	disable_mbox_irq(mbox, IRQ_RX);
 
@@ -212,7 +210,7 @@ static void __mbox_rx_interrupt(struct omap_mbox *mbox)
 
 static irqreturn_t mbox_interrupt(int irq, void *p)
 {
-	struct omap_mbox *mbox = (struct omap_mbox *)p;
+	struct omap_mbox *mbox = p;
 
 	if (is_mbox_irq(mbox, IRQ_TX))
 		__mbox_tx_interrupt(mbox);
@@ -263,10 +261,8 @@ omap_mbox_read(struct device *dev, struct device_attribute *attr, char *buf)
 
 		*p = (mbox_msg_t) rq->data;
 
-		spin_lock_irqsave(q->queue_lock, flags);
-		blkdev_dequeue_request(rq);
-		end_that_request_last(rq, 0);
-		spin_unlock_irqrestore(q->queue_lock, flags);
+		if (blk_end_request(rq, 0, 0))
+			BUG();
 
 		if (unlikely(mbox_seq_test(mbox, *p))) {
 			pr_info("mbox: Illegal seq bit!(%08x) ignored\n", *p);
@@ -297,7 +293,7 @@ static struct omap_mbox_queue *mbox_queue_alloc(struct omap_mbox *mbox,
 					request_fn_proc * proc,
 					void (*work) (struct work_struct *))
 {
-	request_queue_t *q;
+	struct request_queue *q;
 	struct omap_mbox_queue *mq;
 
 	mq = kzalloc(sizeof(struct omap_mbox_queue), GFP_KERNEL);
@@ -338,7 +334,7 @@ static int omap_mbox_init(struct omap_mbox *mbox)
 	}
 
 	mbox->dev.class = &omap_mbox_class;
-	strlcpy(mbox->dev.bus_id, mbox->name, KOBJ_NAME_LEN);
+	dev_set_name(&mbox->dev, "%s", mbox->name);
 	dev_set_drvdata(&mbox->dev, mbox);
 
 	ret = device_register(&mbox->dev);
@@ -359,7 +355,6 @@ static int omap_mbox_init(struct omap_mbox *mbox)
 			"failed to register mailbox interrupt:%d\n", ret);
 		goto fail_request_irq;
 	}
-	enable_mbox_irq(mbox, IRQ_RX);
 
 	mq = mbox_queue_alloc(mbox, mbox_txq_fn, mbox_tx_work);
 	if (!mq) {

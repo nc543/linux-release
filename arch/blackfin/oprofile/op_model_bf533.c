@@ -32,12 +32,12 @@
 #include <linux/init.h>
 #include <linux/smp.h>
 #include <linux/interrupt.h>
-#include <asm/ptrace.h>
+#include <linux/ptrace.h>
+#include <linux/irq.h>
+#include <linux/io.h>
 #include <asm/system.h>
 #include <asm/processor.h>
 #include <asm/blackfin.h>
-#include <asm/irq.h>
-#include <asm/io.h>
 
 #include "op_blackfin.h"
 
@@ -125,7 +125,7 @@ int pm_overflow_handler(int irq, struct pt_regs *regs)
 	unsigned int pc, pfctl;
 	unsigned int count[2];
 
-	pr_debug("get interrupt in %s\n", __FUNCTION__);
+	pr_debug("get interrupt in %s\n", __func__);
 	if (oprofile_running == 0) {
 		pr_debug("error: entering interrupt when oprofile is stopped.\n\r");
 		return -1;

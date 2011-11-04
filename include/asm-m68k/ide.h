@@ -45,10 +45,6 @@
 #include <asm/macints.h>
 #endif
 
-#ifndef MAX_HWIFS
-#define MAX_HWIFS	4	/* same as the other archs */
-#endif
-
 /*
  * Get rid of defs from io.h - ide has its private and conflicting versions
  * Since so far no single m68k platform uses ISA/PCI I/O space for IDE, we
@@ -96,15 +92,6 @@
 #define outsw_swapw(port, addr, n)	raw_outsw_swapw((u16 *)port, addr, n)
 #endif
 
-
-/* Q40 and Atari have byteswapped IDE busses and since many interesting
- * values in the identification string are text, chars and words they
- * happened to be almost correct without swapping.. However *_capacity
- * is needed for drives over 8 GB. RZ */
-#if defined(CONFIG_Q40) || defined(CONFIG_ATARI)
-#define M68K_IDE_SWAPW  (MACH_IS_Q40 || MACH_IS_ATARI)
-#endif
-
 #ifdef CONFIG_BLK_DEV_FALCON_IDE
 #define IDE_ARCH_LOCK
 
@@ -137,7 +124,7 @@ ide_get_lock(irq_handler_t handler, void *data)
 #endif /* CONFIG_BLK_DEV_FALCON_IDE */
 
 #define IDE_ARCH_ACK_INTR
-#define ide_ack_intr(hwif)	((hwif)->hw.ack_intr ? (hwif)->hw.ack_intr(hwif) : 1)
+#define ide_ack_intr(hwif)	((hwif)->ack_intr ? (hwif)->ack_intr(hwif) : 1)
 
 #endif /* __KERNEL__ */
 #endif /* _M68K_IDE_H */

@@ -62,19 +62,18 @@
 #define URB_ZERO_PACKET 0
 #endif
 
-static int ignore = 0;
-static int ignore_dga = 0;
-static int ignore_csr = 0;
-static int ignore_sniffer = 0;
-static int disable_scofix = 0;
-static int force_scofix = 0;
-static int reset = 0;
+static int ignore_dga;
+static int ignore_csr;
+static int ignore_sniffer;
+static int disable_scofix;
+static int force_scofix;
+static int reset;
 
 #ifdef CONFIG_BT_HCIUSB_SCO
 static int isoc = 2;
 #endif
 
-#define VERSION "2.9"
+#define VERSION "2.10"
 
 static struct usb_driver hci_usb_driver; 
 
@@ -111,10 +110,12 @@ static struct usb_device_id blacklist_ids[] = {
 	{ USB_DEVICE(0x0a5c, 0x2033), .driver_info = HCI_IGNORE },
 
 	/* Broadcom BCM2035 */
+	{ USB_DEVICE(0x0a5c, 0x2035), .driver_info = HCI_RESET | HCI_WRONG_SCO_MTU },
 	{ USB_DEVICE(0x0a5c, 0x200a), .driver_info = HCI_RESET | HCI_WRONG_SCO_MTU },
 	{ USB_DEVICE(0x0a5c, 0x2009), .driver_info = HCI_BCM92035 },
 
 	/* Broadcom BCM2045 */
+	{ USB_DEVICE(0x0a5c, 0x2039), .driver_info = HCI_RESET | HCI_WRONG_SCO_MTU },
 	{ USB_DEVICE(0x0a5c, 0x2101), .driver_info = HCI_RESET | HCI_WRONG_SCO_MTU },
 
 	/* IBM/Lenovo ThinkPad with Broadcom chip */
@@ -132,6 +133,13 @@ static struct usb_device_id blacklist_ids[] = {
 
 	/* Dell laptop with Broadcom chip */
 	{ USB_DEVICE(0x413c, 0x8126), .driver_info = HCI_RESET | HCI_WRONG_SCO_MTU },
+	/* Dell Wireless 370 */
+	{ USB_DEVICE(0x413c, 0x8156), .driver_info = HCI_RESET | HCI_WRONG_SCO_MTU },
+	/* Dell Wireless 410 */
+	{ USB_DEVICE(0x413c, 0x8152), .driver_info = HCI_RESET | HCI_WRONG_SCO_MTU },
+
+	/* Broadcom 2046 */
+	{ USB_DEVICE(0x0a5c, 0x2151), .driver_info = HCI_RESET },
 
 	/* Microsoft Wireless Transceiver for Bluetooth 2.0 */
 	{ USB_DEVICE(0x045e, 0x009c), .driver_info = HCI_RESET },
@@ -146,6 +154,9 @@ static struct usb_device_id blacklist_ids[] = {
 	/* RTX Telecom based adapters with buggy SCO support */
 	{ USB_DEVICE(0x0400, 0x0807), .driver_info = HCI_BROKEN_ISOC },
 	{ USB_DEVICE(0x0400, 0x080a), .driver_info = HCI_BROKEN_ISOC },
+
+	/* CONWISE Technology based adapters with buggy SCO support */
+	{ USB_DEVICE(0x0e5e, 0x6622), .driver_info = HCI_BROKEN_ISOC },
 
 	/* Belkin F8T012 and F8T013 devices */
 	{ USB_DEVICE(0x050d, 0x0012), .driver_info = HCI_RESET | HCI_WRONG_SCO_MTU },
@@ -199,7 +210,6 @@ static void hci_usb_tx_complete(struct urb *urb);
 #define __pending_q(husb, type)   (&husb->pending_q[type-1])
 #define __completed_q(husb, type) (&husb->completed_q[type-1])
 #define __transmit_q(husb, type)  (&husb->transmit_q[type-1])
-#define __reassembly(husb, type)  (husb->reassembly[type-1])
 
 static inline struct _urb *__get_completed(struct hci_usb *husb, int type)
 {
@@ -261,7 +271,7 @@ static int hci_usb_intr_rx_submit(struct hci_usb *husb)
 		BT_ERR("%s intr rx submit failed urb %p err %d",
 				husb->hdev->name, urb, err);
 		_urb_unlink(_urb);
-		_urb_free(_urb);
+		kfree(_urb);
 		kfree(buf);
 	}
 	return err;
@@ -298,7 +308,7 @@ static int hci_usb_bulk_rx_submit(struct hci_usb *husb)
 		BT_ERR("%s bulk rx submit failed urb %p err %d",
 				husb->hdev->name, urb, err);
 		_urb_unlink(_urb);
-		_urb_free(_urb);
+		kfree(_urb);
 		kfree(buf);
 	}
 	return err;
@@ -349,7 +359,7 @@ static int hci_usb_isoc_rx_submit(struct hci_usb *husb)
 		BT_ERR("%s isoc rx submit failed urb %p err %d",
 				husb->hdev->name, urb, err);
 		_urb_unlink(_urb);
-		_urb_free(_urb);
+		kfree(_urb);
 		kfree(buf);
 	}
 	return err;
@@ -427,13 +437,7 @@ static void hci_usb_unlink_urbs(struct hci_usb *husb)
 					husb->hdev->name, _urb, _urb->type, urb);
 			kfree(urb->setup_packet);
 			kfree(urb->transfer_buffer);
-			_urb_free(_urb);
-		}
-
-		/* Release reassembly buffers */
-		if (husb->reassembly[i]) {
-			kfree_skb(husb->reassembly[i]);
-			husb->reassembly[i] = NULL;
+			kfree(_urb);
 		}
 	}
 }
@@ -492,7 +496,7 @@ static inline int hci_usb_send_ctrl(struct hci_usb *husb, struct sk_buff *skb)
 
 		dr = kmalloc(sizeof(*dr), GFP_ATOMIC);
 		if (!dr) {
-			_urb_free(_urb);
+			kfree(_urb);
 			return -ENOMEM;
 		}
 	} else
@@ -671,83 +675,6 @@ static int hci_usb_send_frame(struct sk_buff *skb)
 	return 0;
 }
 
-static inline int __recv_frame(struct hci_usb *husb, int type, void *data, int count)
-{
-	BT_DBG("%s type %d data %p count %d", husb->hdev->name, type, data, count);
-
-	husb->hdev->stat.byte_rx += count;
-
-	while (count) {
-		struct sk_buff *skb = __reassembly(husb, type);
-		struct { int expect; } *scb;
-		int len = 0;
-	
-		if (!skb) {
-			/* Start of the frame */
-
-			switch (type) {
-			case HCI_EVENT_PKT:
-				if (count >= HCI_EVENT_HDR_SIZE) {
-					struct hci_event_hdr *h = data;
-					len = HCI_EVENT_HDR_SIZE + h->plen;
-				} else
-					return -EILSEQ;
-				break;
-
-			case HCI_ACLDATA_PKT:
-				if (count >= HCI_ACL_HDR_SIZE) {
-					struct hci_acl_hdr *h = data;
-					len = HCI_ACL_HDR_SIZE + __le16_to_cpu(h->dlen);
-				} else
-					return -EILSEQ;
-				break;
-#ifdef CONFIG_BT_HCIUSB_SCO
-			case HCI_SCODATA_PKT:
-				if (count >= HCI_SCO_HDR_SIZE) {
-					struct hci_sco_hdr *h = data;
-					len = HCI_SCO_HDR_SIZE + h->dlen;
-				} else
-					return -EILSEQ;
-				break;
-#endif
-			}
-			BT_DBG("new packet len %d", len);
-
-			skb = bt_skb_alloc(len, GFP_ATOMIC);
-			if (!skb) {
-				BT_ERR("%s no memory for the packet", husb->hdev->name);
-				return -ENOMEM;
-			}
-			skb->dev = (void *) husb->hdev;
-			bt_cb(skb)->pkt_type = type;
-	
-			__reassembly(husb, type) = skb;
-
-			scb = (void *) skb->cb;
-			scb->expect = len;
-		} else {
-			/* Continuation */
-			scb = (void *) skb->cb;
-			len = scb->expect;
-		}
-
-		len = min(len, count);
-		
-		memcpy(skb_put(skb, len), data, len);
-
-		scb->expect -= len;
-		if (!scb->expect) {
-			/* Complete frame */
-			__reassembly(husb, type) = NULL;
-			bt_cb(skb)->pkt_type = type;
-			hci_recv_frame(skb);
-		}
-
-		count -= len; data += len;
-	}
-	return 0;
-}
-
 static void hci_usb_rx_complete(struct urb *urb)
 {
 	struct _urb *_urb = container_of(urb, struct _urb, urb);
@@ -775,16 +702,19 @@ static void hci_usb_rx_complete(struct urb *urb)
 					urb->iso_frame_desc[i].offset,
 					urb->iso_frame_desc[i].actual_length);
 	
-			if (!urb->iso_frame_desc[i].status)
-				__recv_frame(husb, _urb->type, 
+			if (!urb->iso_frame_desc[i].status) {
+				husb->hdev->stat.byte_rx += urb->iso_frame_desc[i].actual_length;
+				hci_recv_fragment(husb->hdev, _urb->type, 
 					urb->transfer_buffer + urb->iso_frame_desc[i].offset,
 					urb->iso_frame_desc[i].actual_length);
+			}
 		}
 #else
 		;
 #endif
 	} else {
-		err = __recv_frame(husb, _urb->type, urb->transfer_buffer, count);
+		husb->hdev->stat.byte_rx += count;
+		err = hci_recv_fragment(husb->hdev, _urb->type, urb->transfer_buffer, count);
 		if (err < 0) { 
 			BT_ERR("%s corrupted packet: type %d count %d",
 					husb->hdev->name, _urb->type, count);
@@ -870,7 +800,7 @@ static int hci_usb_probe(struct usb_interface *intf, const struct usb_device_id 
 			id = match;
 	}
 
-	if (ignore || id->driver_info & HCI_IGNORE)
+	if (id->driver_info & HCI_IGNORE)
 		return -ENODEV;
 
 	if (ignore_dga && id->driver_info & HCI_DIGIANSWER)
@@ -1177,9 +1107,6 @@ static void __exit hci_usb_exit(void)
 module_init(hci_usb_init);
 module_exit(hci_usb_exit);
 
-module_param(ignore, bool, 0644);
-MODULE_PARM_DESC(ignore, "Ignore devices from the matching table");
-
 module_param(ignore_dga, bool, 0644);
 MODULE_PARM_DESC(ignore_dga, "Ignore devices with id 08fd:0001");
 
@@ -1203,7 +1130,7 @@ module_param(isoc, int, 0644);
 MODULE_PARM_DESC(isoc, "Set isochronous transfers for SCO over HCI support");
 #endif
 
-MODULE_AUTHOR("Maxim Krasnyansky <maxk@qualcomm.com>, Marcel Holtmann <marcel@holtmann.org>");
+MODULE_AUTHOR("Marcel Holtmann <marcel@holtmann.org>");
 MODULE_DESCRIPTION("Bluetooth HCI USB driver ver " VERSION);
 MODULE_VERSION(VERSION);
 MODULE_LICENSE("GPL");

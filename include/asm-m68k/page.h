@@ -1,8 +1,7 @@
 #ifndef _M68K_PAGE_H
 #define _M68K_PAGE_H
 
-
-#ifdef __KERNEL__
+#include <linux/const.h>
 
 /* PAGE_SHIFT determines the page size */
 #ifndef CONFIG_SUN3
@@ -10,11 +9,7 @@
 #else
 #define PAGE_SHIFT	(13)
 #endif
-#ifdef __ASSEMBLY__
-#define PAGE_SIZE	(1 << PAGE_SHIFT)
-#else
-#define PAGE_SIZE	(1UL << PAGE_SHIFT)
-#endif
+#define PAGE_SIZE	(_AC(1, UL) << PAGE_SHIFT)
 #define PAGE_MASK	(~(PAGE_SIZE-1))
 
 #include <asm/setup.h>
@@ -26,6 +21,8 @@
 #endif
 
 #ifndef __ASSEMBLY__
+
+#include <linux/compiler.h>
 
 #include <asm/module.h>
 
@@ -94,6 +91,7 @@ typedef struct { unsigned long pte; } pte_t;
 typedef struct { unsigned long pmd[16]; } pmd_t;
 typedef struct { unsigned long pgd; } pgd_t;
 typedef struct { unsigned long pgprot; } pgprot_t;
+typedef struct page *pgtable_t;
 
 #define pte_val(x)	((x).pte)
 #define pmd_val(x)	((&x)->pmd[0])
@@ -104,9 +102,6 @@ typedef struct { unsigned long pgprot; } pgprot_t;
 #define __pmd(x)	((pmd_t) { (x) } )
 #define __pgd(x)	((pgd_t) { (x) } )
 #define __pgprot(x)	((pgprot_t) { (x) } )
-
-/* to align the pointer to the (next) page boundary */
-#define PAGE_ALIGN(addr)	(((addr)+PAGE_SIZE-1)&PAGE_MASK)
 
 #endif /* !__ASSEMBLY__ */
 
@@ -229,7 +224,5 @@ static inline __attribute_const__ int __virt_to_node_shift(void)
 				 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
 
 #include <asm-generic/page.h>
-
-#endif /* __KERNEL__ */
 
 #endif /* _M68K_PAGE_H */

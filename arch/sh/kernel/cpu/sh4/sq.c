@@ -22,7 +22,7 @@
 #include <linux/io.h>
 #include <asm/page.h>
 #include <asm/cacheflush.h>
-#include <asm/cpu/sq.h>
+#include <cpu/sq.h>
 
 struct sq_mapping;
 
@@ -58,11 +58,11 @@ do {						\
  */
 void sq_flush_range(unsigned long start, unsigned int len)
 {
-	volatile unsigned long *sq = (unsigned long *)start;
+	unsigned long *sq = (unsigned long *)start;
 
 	/* Flush the queues */
 	for (len >>= 5; len--; sq += 8)
-		prefetchw((void *)sq);
+		prefetchw(sq);
 
 	/* Wait for completion */
 	store_queue_barrier();
@@ -199,7 +199,7 @@ EXPORT_SYMBOL(sq_remap);
 
 /**
  * sq_unmap - Unmap a Store Queue allocation
- * @map: Pre-allocated Store Queue mapping.
+ * @vaddr: Pre-allocated Store Queue mapping.
  *
  * Unmaps the store queue allocation @map that was previously created by
  * sq_remap(). Also frees up the pte that was previously inserted into
@@ -208,7 +208,6 @@ EXPORT_SYMBOL(sq_remap);
 void sq_unmap(unsigned long vaddr)
 {
 	struct sq_mapping **p, *map;
-	struct vm_struct *vma;
 	int page;
 
 	for (p = &sq_mapping_list; (map = *p); p = &map->next)
@@ -217,7 +216,7 @@ void sq_unmap(unsigned long vaddr)
 
 	if (unlikely(!map)) {
 		printk("%s: bad store queue address 0x%08lx\n",
-		       __FUNCTION__, vaddr);
+		       __func__, vaddr);
 		return;
 	}
 
@@ -225,11 +224,18 @@ void sq_unmap(unsigned long vaddr)
 	bitmap_release_region(sq_bitmap, page, get_order(map->size));
 
 #ifdef CONFIG_MMU
-	vma = remove_vm_area((void *)(map->sq_addr & PAGE_MASK));
-	if (!vma) {
-		printk(KERN_ERR "%s: bad address 0x%08lx\n",
-		       __FUNCTION__, map->sq_addr);
-		return;
+	{
+		/*
+		 * Tear down the VMA in the MMU case.
+		 */
+		struct vm_struct *vma;
+
+		vma = remove_vm_area((void *)(map->sq_addr & PAGE_MASK));
+		if (!vma) {
+			printk(KERN_ERR "%s: bad address 0x%08lx\n",
+			       __func__, map->sq_addr);
+			return;
+		}
 	}
 #endif
 
@@ -257,7 +263,7 @@ struct sq_sysfs_attr {
 	ssize_t (*store)(const char *buf, size_t count);
 };
 
-#define to_sq_sysfs_attr(attr)	container_of(attr, struct sq_sysfs_attr, attr)
+#define to_sq_sysfs_attr(a)	container_of(a, struct sq_sysfs_attr, attr)
 
 static ssize_t sq_sysfs_show(struct kobject *kobj, struct attribute *attr,
 			     char *buf)
@@ -335,17 +341,18 @@ static int __devinit sq_sysdev_add(struct sys_device *sysdev)
 {
 	unsigned int cpu = sysdev->id;
 	struct kobject *kobj;
+	int error;
 
 	sq_kobject[cpu] = kzalloc(sizeof(struct kobject), GFP_KERNEL);
 	if (unlikely(!sq_kobject[cpu]))
 		return -ENOMEM;
 
 	kobj = sq_kobject[cpu];
-	kobj->parent = &sysdev->kobj;
-	kobject_set_name(kobj, "%s", "sq");
-	kobj->ktype = &ktype_percpu_entry;
-
-	return kobject_register(kobj);
+	error = kobject_init_and_add(kobj, &ktype_percpu_entry, &sysdev->kobj,
+				     "%s", "sq");
+	if (!error)
+		kobject_uevent(kobj, KOBJ_ADD);
+	return error;
 }
 
 static int __devexit sq_sysdev_remove(struct sys_device *sysdev)
@@ -353,7 +360,7 @@ static int __devexit sq_sysdev_remove(struct sys_device *sysdev)
 	unsigned int cpu = sysdev->id;
 	struct kobject *kobj = sq_kobject[cpu];
 
-	kobject_unregister(kobj);
+	kobject_put(kobj);
 	return 0;
 }
 
@@ -371,8 +378,7 @@ static int __init sq_api_init(void)
 	printk(KERN_NOTICE "sq: Registering store queue API.\n");
 
 	sq_cache = kmem_cache_create("store_queue_cache",
-				sizeof(struct sq_mapping), 0, 0,
-				NULL, NULL);
+				sizeof(struct sq_mapping), 0, 0, NULL);
 	if (unlikely(!sq_cache))
 		return ret;
 

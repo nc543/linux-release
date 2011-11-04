@@ -22,6 +22,7 @@
 #include "ivtv-driver.h"
 #include "ivtv-cards.h"
 #include "ivtv-gpio.h"
+#include "tuner-xc2028.h"
 #include <media/tuner.h>
 
 /*
@@ -115,52 +116,50 @@ void ivtv_reset_ir_gpio(struct ivtv *itv)
 	curout = (curout & ~0xF) | 1;
 	write_reg(curout, IVTV_REG_GPIO_OUT);
 	/* We could use something else for smaller time */
-	current->state = TASK_INTERRUPTIBLE;
-	schedule_timeout(1);
+	schedule_timeout_interruptible(msecs_to_jiffies(1));
 	curout |= 2;
 	write_reg(curout, IVTV_REG_GPIO_OUT);
 	curdir &= ~0x80;
 	write_reg(curdir, IVTV_REG_GPIO_DIR);
 }
 
-#ifdef HAVE_XC3028
-int ivtv_reset_tuner_gpio(enum v4l2_tuner_type mode, void *priv, int ptr)
+/* Xceive tuner reset function */
+int ivtv_reset_tuner_gpio(void *dev, int component, int cmd, int value)
 {
-	int curdir, curout;
-	struct ivtv *itv = (struct ivtv *) priv;
+	struct i2c_algo_bit_data *algo = dev;
+	struct ivtv *itv = algo->data;
+	u32 curout;
 
-	if (itv->card->type != IVTV_CARD_PG600V2 || itv->options.tuner != TUNER_XCEIVE_XC3028)
-		return -EINVAL;
-	IVTV_INFO("Resetting tuner.\n");
+	if (cmd != XC2028_TUNER_RESET)
+		return 0;
+	IVTV_DEBUG_INFO("Resetting tuner\n");
 	curout = read_reg(IVTV_REG_GPIO_OUT);
-	curdir = read_reg(IVTV_REG_GPIO_DIR);
-	curdir |= (1 << 12);  /* GPIO bit 12 */
-
-	curout &= ~(1 << 12);
+	curout &= ~(1 << itv->card->xceive_pin);
 	write_reg(curout, IVTV_REG_GPIO_OUT);
-	current->state = TASK_INTERRUPTIBLE;
-	schedule_timeout(1);
+	schedule_timeout_interruptible(msecs_to_jiffies(1));
 
-	curout |= (1 << 12);
+	curout |= 1 << itv->card->xceive_pin;
 	write_reg(curout, IVTV_REG_GPIO_OUT);
-	current->state = TASK_INTERRUPTIBLE;
-	schedule_timeout(1);
-
+	schedule_timeout_interruptible(msecs_to_jiffies(1));
 	return 0;
 }
-#endif
 
 void ivtv_gpio_init(struct ivtv *itv)
 {
-	if (itv->card->gpio_init.direction == 0)
+	u16 pin = 0;
+
+	if (itv->card->xceive_pin)
+		pin = 1 << itv->card->xceive_pin;
+
+	if ((itv->card->gpio_init.direction | pin) == 0)
 		return;
 
 	IVTV_DEBUG_INFO("GPIO initial dir: %08x out: %08x\n",
 		   read_reg(IVTV_REG_GPIO_DIR), read_reg(IVTV_REG_GPIO_OUT));
 
 	/* init output data then direction */
-	write_reg(itv->card->gpio_init.initial_value, IVTV_REG_GPIO_OUT);
-	write_reg(itv->card->gpio_init.direction, IVTV_REG_GPIO_DIR);
+	write_reg(itv->card->gpio_init.initial_value | pin, IVTV_REG_GPIO_OUT);
+	write_reg(itv->card->gpio_init.direction | pin, IVTV_REG_GPIO_DIR);
 }
 
 static struct v4l2_queryctrl gpio_ctrl_mute = {

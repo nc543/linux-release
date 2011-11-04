@@ -6,6 +6,7 @@
 
 #include <linux/module.h>
 
+#include <linux/smp_lock.h>
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/tty.h>
@@ -67,11 +68,15 @@ static void set_led(char state)
 
 static int briq_panel_open(struct inode *ino, struct file *filep)
 {
-	/* enforce single access */
-	if (vfd_is_open)
+	lock_kernel();
+	/* enforce single access, vfd_is_open is protected by BKL */
+	if (vfd_is_open) {
+		unlock_kernel();
 		return -EBUSY;
+	}
 	vfd_is_open = 1;
 
+	unlock_kernel();
 	return 0;
 }
 
@@ -90,11 +95,6 @@ static ssize_t briq_panel_read(struct file *file, char __user *buf, size_t count
 {
 	unsigned short c;
 	unsigned char cp;
-
-#if 0	/*  Can't seek (pread) on this device  */
-	if (ppos != &file->f_pos)
-		return -ESPIPE;
-#endif
 
 	if (!vfd_is_open)
 		return -ENODEV;
@@ -138,11 +138,6 @@ static ssize_t briq_panel_write(struct file *file, const char __user *buf, size_
 {
 	size_t indx = len;
 	int i, esc = 0;
-
-#if 0	/*  Can't seek (pwrite) on this device  */
-	if (ppos != &file->f_pos)
-		return -ESPIPE;
-#endif
 
 	if (!vfd_is_open)
 		return -EBUSY;

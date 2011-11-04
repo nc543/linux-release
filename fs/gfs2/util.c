@@ -19,17 +19,39 @@
 #include "gfs2.h"
 #include "incore.h"
 #include "glock.h"
-#include "lm.h"
 #include "util.h"
 
 struct kmem_cache *gfs2_glock_cachep __read_mostly;
 struct kmem_cache *gfs2_inode_cachep __read_mostly;
 struct kmem_cache *gfs2_bufdata_cachep __read_mostly;
+struct kmem_cache *gfs2_rgrpd_cachep __read_mostly;
 
 void gfs2_assert_i(struct gfs2_sbd *sdp)
 {
 	printk(KERN_EMERG "GFS2: fsid=%s: fatal assertion failed\n",
 	       sdp->sd_fsname);
+}
+
+int gfs2_lm_withdraw(struct gfs2_sbd *sdp, char *fmt, ...)
+{
+	va_list args;
+
+	if (test_and_set_bit(SDF_SHUTDOWN, &sdp->sd_flags))
+		return 0;
+
+	va_start(args, fmt);
+	vprintk(fmt, args);
+	va_end(args);
+
+	fs_err(sdp, "about to withdraw this file system\n");
+	BUG_ON(sdp->sd_args.ar_debug);
+
+	fs_err(sdp, "telling LM to withdraw\n");
+	gfs2_withdraw_lockproto(&sdp->sd_lockstruct);
+	fs_err(sdp, "withdrawn\n");
+	dump_stack();
+
+	return -1;
 }
 
 /**
@@ -115,8 +137,8 @@ int gfs2_consist_inode_i(struct gfs2_inode *ip, int cluster_wide,
 		"GFS2: fsid=%s:   inode = %llu %llu\n"
 		"GFS2: fsid=%s:   function = %s, file = %s, line = %u\n",
 		sdp->sd_fsname,
-		sdp->sd_fsname, (unsigned long long)ip->i_num.no_formal_ino,
-		(unsigned long long)ip->i_num.no_addr,
+		sdp->sd_fsname, (unsigned long long)ip->i_no_formal_ino,
+		(unsigned long long)ip->i_no_addr,
 		sdp->sd_fsname, function, file, line);
 	return rv;
 }
@@ -137,7 +159,7 @@ int gfs2_consist_rgrpd_i(struct gfs2_rgrpd *rgd, int cluster_wide,
 		"GFS2: fsid=%s:   RG = %llu\n"
 		"GFS2: fsid=%s:   function = %s, file = %s, line = %u\n",
 		sdp->sd_fsname,
-		sdp->sd_fsname, (unsigned long long)rgd->rd_ri.ri_addr,
+		sdp->sd_fsname, (unsigned long long)rgd->rd_addr,
 		sdp->sd_fsname, function, file, line);
 	return rv;
 }

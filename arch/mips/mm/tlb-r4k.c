@@ -48,6 +48,22 @@ extern void build_tlb_refill_handler(void);
 
 #endif /* CONFIG_MIPS_MT_SMTC */
 
+#if defined(CONFIG_CPU_LOONGSON2)
+/*
+ * LOONGSON2 has a 4 entry itlb which is a subset of dtlb,
+ * unfortrunately, itlb is not totally transparent to software.
+ */
+#define FLUSH_ITLB write_c0_diag(4);
+
+#define FLUSH_ITLB_VM(vma) { if ((vma)->vm_flags & VM_EXEC)  write_c0_diag(4); }
+
+#else
+
+#define FLUSH_ITLB
+#define FLUSH_ITLB_VM(vma)
+
+#endif
+
 void local_flush_tlb_all(void)
 {
 	unsigned long flags;
@@ -73,6 +89,7 @@ void local_flush_tlb_all(void)
 	}
 	tlbw_use_hazard();
 	write_c0_entryhi(old_ctx);
+	FLUSH_ITLB;
 	EXIT_CRITICAL(flags);
 }
 
@@ -136,6 +153,7 @@ void local_flush_tlb_range(struct vm_area_struct *vma, unsigned long start,
 		} else {
 			drop_mmu_context(mm, cpu);
 		}
+		FLUSH_ITLB;
 		EXIT_CRITICAL(flags);
 	}
 }
@@ -178,6 +196,7 @@ void local_flush_tlb_kernel_range(unsigned long start, unsigned long end)
 	} else {
 		local_flush_tlb_all();
 	}
+	FLUSH_ITLB;
 	EXIT_CRITICAL(flags);
 }
 
@@ -210,6 +229,7 @@ void local_flush_tlb_page(struct vm_area_struct *vma, unsigned long page)
 
 	finish:
 		write_c0_entryhi(oldpid);
+		FLUSH_ITLB_VM(vma);
 		EXIT_CRITICAL(flags);
 	}
 }
@@ -241,7 +261,7 @@ void local_flush_tlb_one(unsigned long page)
 		tlbw_use_hazard();
 	}
 	write_c0_entryhi(oldpid);
-
+	FLUSH_ITLB;
 	EXIT_CRITICAL(flags);
 }
 
@@ -279,7 +299,7 @@ void __update_tlb(struct vm_area_struct * vma, unsigned long address, pte_t pte)
 	idx = read_c0_index();
 	ptep = pte_offset_map(pmdp, address);
 
-#if defined(CONFIG_64BIT_PHYS_ADDR) && defined(CONFIG_CPU_MIPS32_R1)
+#if defined(CONFIG_64BIT_PHYS_ADDR) && defined(CONFIG_CPU_MIPS32)
 	write_c0_entrylo0(ptep->pte_high);
 	ptep++;
 	write_c0_entrylo1(ptep->pte_high);
@@ -293,6 +313,7 @@ void __update_tlb(struct vm_area_struct * vma, unsigned long address, pte_t pte)
 	else
 		tlb_write_indexed();
 	tlbw_use_hazard();
+	FLUSH_ITLB_VM(vma);
 	EXIT_CRITICAL(flags);
 }
 
@@ -367,7 +388,7 @@ void __init add_wired_entry(unsigned long entrylo0, unsigned long entrylo1,
  * lifetime of the system
  */
 
-static int temp_tlb_entry __initdata;
+static int temp_tlb_entry __cpuinitdata;
 
 __init int add_temporary_entry(unsigned long entrylo0, unsigned long entrylo1,
 			       unsigned long entryhi, unsigned long pagemask)
@@ -406,7 +427,7 @@ out:
 	return ret;
 }
 
-static void __init probe_tlb(unsigned long config)
+static void __cpuinit probe_tlb(unsigned long config)
 {
 	struct cpuinfo_mips *c = &current_cpu_data;
 	unsigned int reg;
@@ -434,7 +455,7 @@ static void __init probe_tlb(unsigned long config)
 	c->tlbsize = ((reg >> 25) & 0x3f) + 1;
 }
 
-static int __initdata ntlb = 0;
+static int __cpuinitdata ntlb = 0;
 static int __init set_ntlb(char *str)
 {
 	get_option(&str, &ntlb);
@@ -443,7 +464,7 @@ static int __init set_ntlb(char *str)
 
 __setup("ntlb=", set_ntlb);
 
-void __init tlb_init(void)
+void __cpuinit tlb_init(void)
 {
 	unsigned int config = read_c0_config();
 
@@ -452,7 +473,7 @@ void __init tlb_init(void)
 	 *   - On R4600 1.7 the tlbp never hits for pages smaller than
 	 *     the value in the c0_pagemask register.
 	 *   - The entire mm handling assumes the c0_pagemask register to
-	 *     be set for 4kb pages.
+	 *     be set to fixed-size pages.
 	 */
 	probe_tlb(config);
 	write_c0_pagemask(PM_DEFAULT_MASK);
@@ -470,7 +491,7 @@ void __init tlb_init(void)
 			int wired = current_cpu_data.tlbsize - ntlb;
 			write_c0_wired(wired);
 			write_c0_index(wired-1);
-			printk ("Restricting TLB to %d entries\n", ntlb);
+			printk("Restricting TLB to %d entries\n", ntlb);
 		} else
 			printk("Ignoring invalid argument ntlb=%d\n", ntlb);
 	}

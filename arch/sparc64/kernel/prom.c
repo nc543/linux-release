@@ -19,171 +19,32 @@
 #include <linux/types.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/bootmem.h>
 #include <linux/module.h>
+#include <linux/lmb.h>
+#include <linux/of_device.h>
 
 #include <asm/prom.h>
-#include <asm/of_device.h>
 #include <asm/oplib.h>
 #include <asm/irq.h>
 #include <asm/asi.h>
 #include <asm/upa.h>
 #include <asm/smp.h>
 
-static struct device_node *allnodes;
+extern struct device_node *allnodes;	/* temporary while merging */
 
-/* use when traversing tree through the allnext, child, sibling,
- * or parent members of struct device_node.
- */
-static DEFINE_RWLOCK(devtree_lock);
-
-int of_device_is_compatible(const struct device_node *device,
-			    const char *compat)
-{
-	const char* cp;
-	int cplen, l;
-
-	cp = of_get_property(device, "compatible", &cplen);
-	if (cp == NULL)
-		return 0;
-	while (cplen > 0) {
-		if (strncmp(cp, compat, strlen(compat)) == 0)
-			return 1;
-		l = strlen(cp) + 1;
-		cp += l;
-		cplen -= l;
-	}
-
-	return 0;
-}
-EXPORT_SYMBOL(of_device_is_compatible);
-
-struct device_node *of_get_parent(const struct device_node *node)
-{
-	struct device_node *np;
-
-	if (!node)
-		return NULL;
-
-	np = node->parent;
-
-	return np;
-}
-EXPORT_SYMBOL(of_get_parent);
-
-struct device_node *of_get_next_child(const struct device_node *node,
-	struct device_node *prev)
-{
-	struct device_node *next;
-
-	next = prev ? prev->sibling : node->child;
-	for (; next != 0; next = next->sibling) {
-		break;
-	}
-
-	return next;
-}
-EXPORT_SYMBOL(of_get_next_child);
-
-struct device_node *of_find_node_by_path(const char *path)
-{
-	struct device_node *np = allnodes;
-
-	for (; np != 0; np = np->allnext) {
-		if (np->full_name != 0 && strcmp(np->full_name, path) == 0)
-			break;
-	}
-
-	return np;
-}
-EXPORT_SYMBOL(of_find_node_by_path);
+extern rwlock_t devtree_lock;	/* temporary while merging */
 
 struct device_node *of_find_node_by_phandle(phandle handle)
 {
 	struct device_node *np;
 
-	for (np = allnodes; np != 0; np = np->allnext)
+	for (np = allnodes; np; np = np->allnext)
 		if (np->node == handle)
 			break;
 
 	return np;
 }
 EXPORT_SYMBOL(of_find_node_by_phandle);
-
-struct device_node *of_find_node_by_name(struct device_node *from,
-	const char *name)
-{
-	struct device_node *np;
-
-	np = from ? from->allnext : allnodes;
-	for (; np != NULL; np = np->allnext)
-		if (np->name != NULL && strcmp(np->name, name) == 0)
-			break;
-
-	return np;
-}
-EXPORT_SYMBOL(of_find_node_by_name);
-
-struct device_node *of_find_node_by_type(struct device_node *from,
-	const char *type)
-{
-	struct device_node *np;
-
-	np = from ? from->allnext : allnodes;
-	for (; np != 0; np = np->allnext)
-		if (np->type != 0 && strcmp(np->type, type) == 0)
-			break;
-
-	return np;
-}
-EXPORT_SYMBOL(of_find_node_by_type);
-
-struct device_node *of_find_compatible_node(struct device_node *from,
-	const char *type, const char *compatible)
-{
-	struct device_node *np;
-
-	np = from ? from->allnext : allnodes;
-	for (; np != 0; np = np->allnext) {
-		if (type != NULL
-		    && !(np->type != 0 && strcmp(np->type, type) == 0))
-			continue;
-		if (of_device_is_compatible(np, compatible))
-			break;
-	}
-
-	return np;
-}
-EXPORT_SYMBOL(of_find_compatible_node);
-
-struct property *of_find_property(const struct device_node *np,
-				  const char *name,
-				  int *lenp)
-{
-	struct property *pp;
-
-	for (pp = np->properties; pp != 0; pp = pp->next) {
-		if (strcasecmp(pp->name, name) == 0) {
-			if (lenp != 0)
-				*lenp = pp->length;
-			break;
-		}
-	}
-	return pp;
-}
-EXPORT_SYMBOL(of_find_property);
-
-/*
- * Find a property with a given name for a given node
- * and return the value.
- */
-const void *of_get_property(const struct device_node *np, const char *name,
-		      int *lenp)
-{
-	struct property *pp = of_find_property(np,name,lenp);
-	return pp ? pp->value : NULL;
-}
-EXPORT_SYMBOL(of_get_property);
 
 int of_getintprop_default(struct device_node *np, const char *name, int def)
 {
@@ -198,35 +59,8 @@ int of_getintprop_default(struct device_node *np, const char *name, int def)
 }
 EXPORT_SYMBOL(of_getintprop_default);
 
-int of_n_addr_cells(struct device_node *np)
-{
-	const int* ip;
-	do {
-		if (np->parent)
-			np = np->parent;
-		ip = of_get_property(np, "#address-cells", NULL);
-		if (ip != NULL)
-			return *ip;
-	} while (np->parent);
-	/* No #address-cells property for the root node, default to 2 */
-	return 2;
-}
-EXPORT_SYMBOL(of_n_addr_cells);
-
-int of_n_size_cells(struct device_node *np)
-{
-	const int* ip;
-	do {
-		if (np->parent)
-			np = np->parent;
-		ip = of_get_property(np, "#size-cells", NULL);
-		if (ip != NULL)
-			return *ip;
-	} while (np->parent);
-	/* No #size-cells property for the root node, default to 1 */
-	return 1;
-}
-EXPORT_SYMBOL(of_n_size_cells);
+DEFINE_MUTEX(of_set_property_mutex);
+EXPORT_SYMBOL(of_set_property_mutex);
 
 int of_set_property(struct device_node *dp, const char *name, void *val, int len)
 {
@@ -251,7 +85,10 @@ int of_set_property(struct device_node *dp, const char *name, void *val, int len
 			void *old_val = prop->value;
 			int ret;
 
+			mutex_lock(&of_set_property_mutex);
 			ret = prom_setprop(dp->node, name, val, len);
+			mutex_unlock(&of_set_property_mutex);
+
 			err = -EINVAL;
 			if (ret >= 0) {
 				prop->value = new_val;
@@ -276,16 +113,35 @@ int of_set_property(struct device_node *dp, const char *name, void *val, int len
 }
 EXPORT_SYMBOL(of_set_property);
 
-static unsigned int prom_early_allocated;
+int of_find_in_proplist(const char *list, const char *match, int len)
+{
+	while (len > 0) {
+		int l;
+
+		if (!strcmp(list, match))
+			return 1;
+		l = strlen(list) + 1;
+		list += l;
+		len -= l;
+	}
+	return 0;
+}
+EXPORT_SYMBOL(of_find_in_proplist);
+
+static unsigned int prom_early_allocated __initdata;
 
 static void * __init prom_early_alloc(unsigned long size)
 {
+	unsigned long paddr = lmb_alloc(size, SMP_CACHE_BYTES);
 	void *ret;
 
-	ret = __alloc_bootmem(size, SMP_CACHE_BYTES, 0UL);
-	if (ret != NULL)
-		memset(ret, 0, size);
+	if (!paddr) {
+		prom_printf("prom_early_alloc(%lu) failed\n");
+		prom_halt();
+	}
 
+	ret = __va(paddr);
+	memset(ret, 0, size);
 	prom_early_allocated += size;
 
 	return ret;
@@ -306,55 +162,11 @@ static unsigned long psycho_pcislot_imap_offset(unsigned long ino)
 		return PSYCHO_IMAP_B_SLOT0 + (slot * 8);
 }
 
-#define PSYCHO_IMAP_SCSI	0x1000UL
-#define PSYCHO_IMAP_ETH		0x1008UL
-#define PSYCHO_IMAP_BPP		0x1010UL
-#define PSYCHO_IMAP_AU_REC	0x1018UL
-#define PSYCHO_IMAP_AU_PLAY	0x1020UL
-#define PSYCHO_IMAP_PFAIL	0x1028UL
-#define PSYCHO_IMAP_KMS		0x1030UL
-#define PSYCHO_IMAP_FLPY	0x1038UL
-#define PSYCHO_IMAP_SHW		0x1040UL
-#define PSYCHO_IMAP_KBD		0x1048UL
-#define PSYCHO_IMAP_MS		0x1050UL
-#define PSYCHO_IMAP_SER		0x1058UL
-#define PSYCHO_IMAP_TIM0	0x1060UL
-#define PSYCHO_IMAP_TIM1	0x1068UL
-#define PSYCHO_IMAP_UE		0x1070UL
-#define PSYCHO_IMAP_CE		0x1078UL
-#define PSYCHO_IMAP_A_ERR	0x1080UL
-#define PSYCHO_IMAP_B_ERR	0x1088UL
-#define PSYCHO_IMAP_PMGMT	0x1090UL
-#define PSYCHO_IMAP_GFX		0x1098UL
-#define PSYCHO_IMAP_EUPA	0x10a0UL
+#define PSYCHO_OBIO_IMAP_BASE	0x1000UL
 
-static unsigned long __psycho_onboard_imap_off[] = {
-/*0x20*/	PSYCHO_IMAP_SCSI,
-/*0x21*/	PSYCHO_IMAP_ETH,
-/*0x22*/	PSYCHO_IMAP_BPP,
-/*0x23*/	PSYCHO_IMAP_AU_REC,
-/*0x24*/	PSYCHO_IMAP_AU_PLAY,
-/*0x25*/	PSYCHO_IMAP_PFAIL,
-/*0x26*/	PSYCHO_IMAP_KMS,
-/*0x27*/	PSYCHO_IMAP_FLPY,
-/*0x28*/	PSYCHO_IMAP_SHW,
-/*0x29*/	PSYCHO_IMAP_KBD,
-/*0x2a*/	PSYCHO_IMAP_MS,
-/*0x2b*/	PSYCHO_IMAP_SER,
-/*0x2c*/	PSYCHO_IMAP_TIM0,
-/*0x2d*/	PSYCHO_IMAP_TIM1,
-/*0x2e*/	PSYCHO_IMAP_UE,
-/*0x2f*/	PSYCHO_IMAP_CE,
-/*0x30*/	PSYCHO_IMAP_A_ERR,
-/*0x31*/	PSYCHO_IMAP_B_ERR,
-/*0x32*/	PSYCHO_IMAP_PMGMT,
-/*0x33*/	PSYCHO_IMAP_GFX,
-/*0x34*/	PSYCHO_IMAP_EUPA,
-};
 #define PSYCHO_ONBOARD_IRQ_BASE		0x20
-#define PSYCHO_ONBOARD_IRQ_LAST		0x34
 #define psycho_onboard_imap_offset(__ino) \
-	__psycho_onboard_imap_off[(__ino) - PSYCHO_ONBOARD_IRQ_BASE]
+	(PSYCHO_OBIO_IMAP_BASE + (((__ino) & 0x1f) << 3))
 
 #define PSYCHO_ICLR_A_SLOT0	0x1400UL
 #define PSYCHO_ICLR_SCSI	0x1800UL
@@ -378,10 +190,6 @@ static unsigned int psycho_irq_build(struct device_node *dp,
 		imap_off = psycho_pcislot_imap_offset(ino);
 	} else {
 		/* Onboard device */
-		if (ino > PSYCHO_ONBOARD_IRQ_LAST) {
-			prom_printf("psycho_irq_build: Wacky INO [%x]\n", ino);
-			prom_halt();
-		}
 		imap_off = psycho_onboard_imap_offset(ino);
 	}
 
@@ -468,23 +276,6 @@ static void sabre_wsync_handler(unsigned int ino, void *_arg1, void *_arg2)
 
 #define SABRE_IMAP_A_SLOT0	0x0c00UL
 #define SABRE_IMAP_B_SLOT0	0x0c20UL
-#define SABRE_IMAP_SCSI		0x1000UL
-#define SABRE_IMAP_ETH		0x1008UL
-#define SABRE_IMAP_BPP		0x1010UL
-#define SABRE_IMAP_AU_REC	0x1018UL
-#define SABRE_IMAP_AU_PLAY	0x1020UL
-#define SABRE_IMAP_PFAIL	0x1028UL
-#define SABRE_IMAP_KMS		0x1030UL
-#define SABRE_IMAP_FLPY		0x1038UL
-#define SABRE_IMAP_SHW		0x1040UL
-#define SABRE_IMAP_KBD		0x1048UL
-#define SABRE_IMAP_MS		0x1050UL
-#define SABRE_IMAP_SER		0x1058UL
-#define SABRE_IMAP_UE		0x1070UL
-#define SABRE_IMAP_CE		0x1078UL
-#define SABRE_IMAP_PCIERR	0x1080UL
-#define SABRE_IMAP_GFX		0x1098UL
-#define SABRE_IMAP_EUPA		0x10a0UL
 #define SABRE_ICLR_A_SLOT0	0x1400UL
 #define SABRE_ICLR_B_SLOT0	0x1480UL
 #define SABRE_ICLR_SCSI		0x1800UL
@@ -514,33 +305,10 @@ static unsigned long sabre_pcislot_imap_offset(unsigned long ino)
 		return SABRE_IMAP_B_SLOT0 + (slot * 8);
 }
 
-static unsigned long __sabre_onboard_imap_off[] = {
-/*0x20*/	SABRE_IMAP_SCSI,
-/*0x21*/	SABRE_IMAP_ETH,
-/*0x22*/	SABRE_IMAP_BPP,
-/*0x23*/	SABRE_IMAP_AU_REC,
-/*0x24*/	SABRE_IMAP_AU_PLAY,
-/*0x25*/	SABRE_IMAP_PFAIL,
-/*0x26*/	SABRE_IMAP_KMS,
-/*0x27*/	SABRE_IMAP_FLPY,
-/*0x28*/	SABRE_IMAP_SHW,
-/*0x29*/	SABRE_IMAP_KBD,
-/*0x2a*/	SABRE_IMAP_MS,
-/*0x2b*/	SABRE_IMAP_SER,
-/*0x2c*/	0 /* reserved */,
-/*0x2d*/	0 /* reserved */,
-/*0x2e*/	SABRE_IMAP_UE,
-/*0x2f*/	SABRE_IMAP_CE,
-/*0x30*/	SABRE_IMAP_PCIERR,
-/*0x31*/	0 /* reserved */,
-/*0x32*/	0 /* reserved */,
-/*0x33*/	SABRE_IMAP_GFX,
-/*0x34*/	SABRE_IMAP_EUPA,
-};
-#define SABRE_ONBOARD_IRQ_BASE		0x20
-#define SABRE_ONBOARD_IRQ_LAST		0x30
+#define SABRE_OBIO_IMAP_BASE	0x1000UL
+#define SABRE_ONBOARD_IRQ_BASE	0x20
 #define sabre_onboard_imap_offset(__ino) \
-	__sabre_onboard_imap_off[(__ino) - SABRE_ONBOARD_IRQ_BASE]
+	(SABRE_OBIO_IMAP_BASE + (((__ino) & 0x1f) << 3))
 
 #define sabre_iclr_offset(ino)					      \
 	((ino & 0x20) ? (SABRE_ICLR_SCSI + (((ino) & 0x1f) << 3)) :  \
@@ -603,10 +371,6 @@ static unsigned int sabre_irq_build(struct device_node *dp,
 		imap_off = sabre_pcislot_imap_offset(ino);
 	} else {
 		/* onboard device */
-		if (ino > SABRE_ONBOARD_IRQ_LAST) {
-			prom_printf("sabre_irq_build: Wacky INO [%x]\n", ino);
-			prom_halt();
-		}
 		imap_off = sabre_onboard_imap_offset(ino);
 	}
 
@@ -1187,21 +951,30 @@ static void __init irq_trans_init(struct device_node *dp)
 		for (i = 0; i < ARRAY_SIZE(pci_irq_trans_table); i++) {
 			struct irq_trans *t = &pci_irq_trans_table[i];
 
-			if (!strcmp(model, t->name))
-				return t->init(dp);
+			if (!strcmp(model, t->name)) {
+				t->init(dp);
+				return;
+			}
 		}
 	}
 #endif
 #ifdef CONFIG_SBUS
 	if (!strcmp(dp->name, "sbus") ||
-	    !strcmp(dp->name, "sbi"))
-		return sbus_irq_trans_init(dp);
+	    !strcmp(dp->name, "sbi")) {
+		sbus_irq_trans_init(dp);
+		return;
+	}
 #endif
 	if (!strcmp(dp->name, "fhc") &&
-	    !strcmp(dp->parent->name, "central"))
-		return central_irq_trans_init(dp);
-	if (!strcmp(dp->name, "virtual-devices"))
-		return sun4v_vdev_irq_trans_init(dp);
+	    !strcmp(dp->parent->name, "central")) {
+		central_irq_trans_init(dp);
+		return;
+	}
+	if (!strcmp(dp->name, "virtual-devices") ||
+	    !strcmp(dp->name, "niu")) {
+		sun4v_vdev_irq_trans_init(dp);
+		return;
+	}
 }
 
 static int is_root_node(const struct device_node *dp)
@@ -1472,32 +1245,49 @@ static void __init __build_path_component(struct device_node *dp, char *tmp_buf)
 
 	if (parent != NULL) {
 		if (!strcmp(parent->type, "pci") ||
-		    !strcmp(parent->type, "pciex"))
-			return pci_path_component(dp, tmp_buf);
-		if (!strcmp(parent->type, "sbus"))
-			return sbus_path_component(dp, tmp_buf);
-		if (!strcmp(parent->type, "upa"))
-			return upa_path_component(dp, tmp_buf);
-		if (!strcmp(parent->type, "ebus"))
-			return ebus_path_component(dp, tmp_buf);
+		    !strcmp(parent->type, "pciex")) {
+			pci_path_component(dp, tmp_buf);
+			return;
+		}
+		if (!strcmp(parent->type, "sbus")) {
+			sbus_path_component(dp, tmp_buf);
+			return;
+		}
+		if (!strcmp(parent->type, "upa")) {
+			upa_path_component(dp, tmp_buf);
+			return;
+		}
+		if (!strcmp(parent->type, "ebus")) {
+			ebus_path_component(dp, tmp_buf);
+			return;
+		}
 		if (!strcmp(parent->name, "usb") ||
-		    !strcmp(parent->name, "hub"))
-			return usb_path_component(dp, tmp_buf);
-		if (!strcmp(parent->type, "i2c"))
-			return i2c_path_component(dp, tmp_buf);
-		if (!strcmp(parent->type, "firewire"))
-			return ieee1394_path_component(dp, tmp_buf);
-		if (!strcmp(parent->type, "virtual-devices"))
-			return vdev_path_component(dp, tmp_buf);
-
+		    !strcmp(parent->name, "hub")) {
+			usb_path_component(dp, tmp_buf);
+			return;
+		}
+		if (!strcmp(parent->type, "i2c")) {
+			i2c_path_component(dp, tmp_buf);
+			return;
+		}
+		if (!strcmp(parent->type, "firewire")) {
+			ieee1394_path_component(dp, tmp_buf);
+			return;
+		}
+		if (!strcmp(parent->type, "virtual-devices")) {
+			vdev_path_component(dp, tmp_buf);
+			return;
+		}
 		/* "isa" is handled with platform naming */
 	}
 
 	/* Use platform naming convention.  */
-	if (tlb_type == hypervisor)
-		return sun4v_path_component(dp, tmp_buf);
-	else
-		return sun4u_path_component(dp, tmp_buf);
+	if (tlb_type == hypervisor) {
+		sun4v_path_component(dp, tmp_buf);
+		return;
+	} else {
+		sun4u_path_component(dp, tmp_buf);
+	}
 }
 
 static char * __init build_path_component(struct device_node *dp)
@@ -1737,8 +1527,12 @@ static void __init of_fill_in_cpu_data(void)
 		ncpus_probed++;
 
 #ifdef CONFIG_SMP
-		if (cpuid >= NR_CPUS)
+		if (cpuid >= NR_CPUS) {
+			printk(KERN_WARNING "Ignoring CPU %d which is "
+			       ">= NR_CPUS (%d)\n",
+			       cpuid, NR_CPUS);
 			continue;
+		}
 #else
 		/* On uniprocessor we only want the values for the
 		 * real physical cpu the kernel booted onto, however
@@ -1808,11 +1602,64 @@ static void __init of_fill_in_cpu_data(void)
 
 #ifdef CONFIG_SMP
 		cpu_set(cpuid, cpu_present_map);
-		cpu_set(cpuid, phys_cpu_present_map);
+		cpu_set(cpuid, cpu_possible_map);
 #endif
 	}
 
 	smp_fill_in_sib_core_maps();
+}
+
+struct device_node *of_console_device;
+EXPORT_SYMBOL(of_console_device);
+
+char *of_console_path;
+EXPORT_SYMBOL(of_console_path);
+
+char *of_console_options;
+EXPORT_SYMBOL(of_console_options);
+
+static void __init of_console_init(void)
+{
+	char *msg = "OF stdout device is: %s\n";
+	struct device_node *dp;
+	const char *type;
+	phandle node;
+
+	of_console_path = prom_early_alloc(256);
+	if (prom_ihandle2path(prom_stdout, of_console_path, 256) < 0) {
+		prom_printf("Cannot obtain path of stdout.\n");
+		prom_halt();
+	}
+	of_console_options = strrchr(of_console_path, ':');
+	if (of_console_options) {
+		of_console_options++;
+		if (*of_console_options == '\0')
+			of_console_options = NULL;
+	}
+
+	node = prom_inst2pkg(prom_stdout);
+	if (!node) {
+		prom_printf("Cannot resolve stdout node from "
+			    "instance %08x.\n", prom_stdout);
+		prom_halt();
+	}
+
+	dp = of_find_node_by_phandle(node);
+	type = of_get_property(dp, "device_type", NULL);
+	if (!type) {
+		prom_printf("Console stdout lacks device_type property.\n");
+		prom_halt();
+	}
+
+	if (strcmp(type, "display") && strcmp(type, "serial")) {
+		prom_printf("Console device_type is neither display "
+			    "nor serial.\n");
+		prom_halt();
+	}
+
+	of_console_device = dp;
+
+	printk(msg, of_console_path);
 }
 
 void __init prom_build_devicetree(void)
@@ -1827,6 +1674,8 @@ void __init prom_build_devicetree(void)
 	allnodes->child = build_tree(allnodes,
 				     prom_getchild(allnodes->node),
 				     &nextp);
+	of_console_init();
+
 	printk("PROM: Built device tree with %u bytes of memory.\n",
 	       prom_early_allocated);
 

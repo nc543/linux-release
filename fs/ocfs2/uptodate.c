@@ -53,7 +53,11 @@
 #include <linux/highmem.h>
 #include <linux/buffer_head.h>
 #include <linux/rbtree.h>
-#include <linux/jbd.h>
+#ifndef CONFIG_OCFS2_COMPAT_JBD
+# include <linux/jbd2.h>
+#else
+# include <linux/jbd.h>
+#endif
 
 #define MLOG_MASK_PREFIX ML_UPTODATE
 
@@ -511,14 +515,10 @@ static void ocfs2_remove_metadata_tree(struct ocfs2_caching_info *ci,
 	ci->ci_num_cached--;
 }
 
-/* Called when we remove a chunk of metadata from an inode. We don't
- * bother reverting things to an inlined array in the case of a remove
- * which moves us back under the limit. */
-void ocfs2_remove_from_cache(struct inode *inode,
-			     struct buffer_head *bh)
+static void ocfs2_remove_block_from_cache(struct inode *inode,
+					  sector_t block)
 {
 	int index;
-	sector_t block = bh->b_blocknr;
 	struct ocfs2_meta_cache_item *item = NULL;
 	struct ocfs2_inode_info *oi = OCFS2_I(inode);
 	struct ocfs2_caching_info *ci = &oi->ip_metadata_cache;
@@ -544,11 +544,35 @@ void ocfs2_remove_from_cache(struct inode *inode,
 		kmem_cache_free(ocfs2_uptodate_cachep, item);
 }
 
+/*
+ * Called when we remove a chunk of metadata from an inode. We don't
+ * bother reverting things to an inlined array in the case of a remove
+ * which moves us back under the limit.
+ */
+void ocfs2_remove_from_cache(struct inode *inode,
+			     struct buffer_head *bh)
+{
+	sector_t block = bh->b_blocknr;
+
+	ocfs2_remove_block_from_cache(inode, block);
+}
+
+/* Called when we remove xattr clusters from an inode. */
+void ocfs2_remove_xattr_clusters_from_cache(struct inode *inode,
+					    sector_t block,
+					    u32 c_len)
+{
+	unsigned int i, b_len = ocfs2_clusters_to_blocks(inode->i_sb, 1) * c_len;
+
+	for (i = 0; i < b_len; i++, block++)
+		ocfs2_remove_block_from_cache(inode, block);
+}
+
 int __init init_ocfs2_uptodate_cache(void)
 {
 	ocfs2_uptodate_cachep = kmem_cache_create("ocfs2_uptodate",
 				  sizeof(struct ocfs2_meta_cache_item),
-				  0, SLAB_HWCACHE_ALIGN, NULL, NULL);
+				  0, SLAB_HWCACHE_ALIGN, NULL);
 	if (!ocfs2_uptodate_cachep)
 		return -ENOMEM;
 

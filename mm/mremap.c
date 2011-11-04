@@ -18,10 +18,13 @@
 #include <linux/highmem.h>
 #include <linux/security.h>
 #include <linux/syscalls.h>
+#include <linux/mmu_notifier.h>
 
 #include <asm/uaccess.h>
 #include <asm/cacheflush.h>
 #include <asm/tlbflush.h>
+
+#include "internal.h"
 
 static pmd_t *get_old_pmd(struct mm_struct *mm, unsigned long addr)
 {
@@ -74,7 +77,11 @@ static void move_ptes(struct vm_area_struct *vma, pmd_t *old_pmd,
 	struct mm_struct *mm = vma->vm_mm;
 	pte_t *old_pte, *new_pte, pte;
 	spinlock_t *old_ptl, *new_ptl;
+	unsigned long old_start;
 
+	old_start = old_addr;
+	mmu_notifier_invalidate_range_start(vma->vm_mm,
+					    old_start, old_end);
 	if (vma->vm_file) {
 		/*
 		 * Subtle point from Rajesh Venkatasubramanian: before
@@ -116,11 +123,12 @@ static void move_ptes(struct vm_area_struct *vma, pmd_t *old_pmd,
 	pte_unmap_unlock(old_pte - 1, old_ptl);
 	if (mapping)
 		spin_unlock(&mapping->i_mmap_lock);
+	mmu_notifier_invalidate_range_end(vma->vm_mm, old_start, old_end);
 }
 
 #define LATENCY_LIMIT	(64 * PAGE_SIZE)
 
-static unsigned long move_page_tables(struct vm_area_struct *vma,
+unsigned long move_page_tables(struct vm_area_struct *vma,
 		unsigned long old_addr, struct vm_area_struct *new_vma,
 		unsigned long new_addr, unsigned long len)
 {
@@ -232,8 +240,8 @@ static unsigned long move_vma(struct vm_area_struct *vma,
 	if (vm_flags & VM_LOCKED) {
 		mm->locked_vm += new_len >> PAGE_SHIFT;
 		if (new_len > old_len)
-			make_pages_present(new_addr + old_len,
-					   new_addr + new_len);
+			mlock_vma_pages_range(new_vma, new_addr + old_len,
+						       new_addr + new_len);
 	}
 
 	return new_addr;
@@ -289,6 +297,10 @@ unsigned long do_mremap(unsigned long addr,
 			goto out;
 
 		if ((addr <= new_addr) && (addr+old_len) > new_addr)
+			goto out;
+
+		ret = security_file_mmap(NULL, 0, 0, 0, new_addr, 1);
+		if (ret)
 			goto out;
 
 		ret = do_munmap(mm, new_addr, new_len);
@@ -369,7 +381,7 @@ unsigned long do_mremap(unsigned long addr,
 			vm_stat_account(mm, vma->vm_flags, vma->vm_file, pages);
 			if (vma->vm_flags & VM_LOCKED) {
 				mm->locked_vm += pages;
-				make_pages_present(addr + old_len,
+				mlock_vma_pages_range(vma, addr + old_len,
 						   addr + new_len);
 			}
 			ret = addr;
@@ -390,8 +402,13 @@ unsigned long do_mremap(unsigned long addr,
 
 			new_addr = get_unmapped_area(vma->vm_file, 0, new_len,
 						vma->vm_pgoff, map_flags);
-			ret = new_addr;
-			if (new_addr & ~PAGE_MASK)
+			if (new_addr & ~PAGE_MASK) {
+				ret = new_addr;
+				goto out;
+			}
+
+			ret = security_file_mmap(NULL, 0, 0, 0, new_addr, 1);
+			if (ret)
 				goto out;
 		}
 		ret = move_vma(vma, addr, old_len, new_len, new_addr);

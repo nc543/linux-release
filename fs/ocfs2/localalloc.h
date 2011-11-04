@@ -48,8 +48,12 @@ int ocfs2_reserve_local_alloc_bits(struct ocfs2_super *osb,
 int ocfs2_claim_local_alloc_bits(struct ocfs2_super *osb,
 				 handle_t *handle,
 				 struct ocfs2_alloc_context *ac,
-				 u32 min_bits,
+				 u32 bits_wanted,
 				 u32 *bit_off,
 				 u32 *num_bits);
+
+void ocfs2_local_alloc_seen_free_bits(struct ocfs2_super *osb,
+				      unsigned int num_clusters);
+void ocfs2_la_enable_worker(struct work_struct *work);
 
 #endif /* OCFS2_LOCALALLOC_H */

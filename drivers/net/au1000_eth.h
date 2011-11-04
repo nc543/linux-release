@@ -106,7 +106,7 @@ struct au1000_private {
 	int old_duplex;
 
 	struct phy_device *phy_dev;
-	struct mii_bus mii_bus;
+	struct mii_bus *mii_bus;
 
 	/* These variables are just for quick access to certain regs addresses. */
 	volatile mac_reg_t *mac;  /* mac registers                      */
@@ -115,6 +115,5 @@ struct au1000_private {
 	u32 vaddr;                /* virtual address of rx/tx buffers   */
 	dma_addr_t dma_addr;      /* dma address of rx/tx buffers       */
 
-	struct net_device_stats stats;
 	spinlock_t lock;       /* Serialise access to device */
 };

@@ -28,9 +28,10 @@
 #include <asm/bootinfo.h>
 #include <asm/reboot.h>
 #include <asm/sibyte/board.h>
+#include <asm/smp-ops.h>
 
-#include "cfe_api.h"
-#include "cfe_error.h"
+#include <asm/fw/cfe/cfe_api.h>
+#include <asm/fw/cfe/cfe_error.h>
 
 /* Max ram addressable in 32-bit segments */
 #ifdef CONFIG_64BIT
@@ -58,11 +59,7 @@ int cfe_cons_handle;
 extern unsigned long initrd_start, initrd_end;
 #endif
 
-#ifdef CONFIG_KGDB
-extern int kgdb_port;
-#endif
-
-static void ATTRIB_NORET cfe_linux_exit(void *arg)
+static void __noreturn cfe_linux_exit(void *arg)
 {
 	int warm = *(int *)arg;
 
@@ -73,7 +70,7 @@ static void ATTRIB_NORET cfe_linux_exit(void *arg)
 		if (!reboot_smp) {
 			/* Get CPU 0 to do the cfe_exit */
 			reboot_smp = 1;
-			smp_call_function(cfe_linux_exit, arg, 1, 0);
+			smp_call_function(cfe_linux_exit, arg, 0);
 		}
 	} else {
 		printk("Passing control back to CFE...\n");
@@ -83,14 +80,14 @@ static void ATTRIB_NORET cfe_linux_exit(void *arg)
 	while (1);
 }
 
-static void ATTRIB_NORET cfe_linux_restart(char *command)
+static void __noreturn cfe_linux_restart(char *command)
 {
 	static const int zero;
 
 	cfe_linux_exit((void *)&zero);
 }
 
-static void ATTRIB_NORET cfe_linux_halt(void)
+static void __noreturn cfe_linux_halt(void)
 {
 	static const int one = 1;
 
@@ -232,6 +229,9 @@ static int __init initrd_setup(char *str)
 
 #endif
 
+extern struct plat_smp_ops sb_smp_ops;
+extern struct plat_smp_ops bcm1480_smp_ops;
+
 /*
  * prom_init is called just after the cpu type is determined, from setup_arch()
  */
@@ -242,9 +242,6 @@ void __init prom_init(void)
 	int argc = fw_arg0;
 	char **envp = (char **) fw_arg2;
 	int *prom_vec = (int *) fw_arg3;
-#ifdef CONFIG_KGDB
-	char *arg;
-#endif
 
 	_machine_restart   = cfe_linux_restart;
 	_machine_halt      = cfe_linux_halt;
@@ -297,9 +294,6 @@ void __init prom_init(void)
 			 *  command line
 			 */
 			strcpy(arcs_cmdline, "root=/dev/ram0 ");
-#ifdef CONFIG_SIBYTE_PTSWARM
-			strcat(arcs_cmdline, "console=ttyS0,115200 ");
-#endif
 		} else {
 			/* The loader should have set the command line */
 			/* too early for panic to do any good */
@@ -307,13 +301,6 @@ void __init prom_init(void)
 			while (1) ;
 		}
 	}
-
-#ifdef CONFIG_KGDB
-	if ((arg = strstr(arcs_cmdline,"kgdb=duart")) != NULL)
-		kgdb_port = (arg[10] == '0') ? 0 : 1;
-	else
-		kgdb_port = 1;
-#endif
 
 #ifdef CONFIG_BLK_DEV_INITRD
 	{
@@ -339,8 +326,14 @@ void __init prom_init(void)
 	/* Not sure this is needed, but it's the safe way. */
 	arcs_cmdline[CL_SIZE-1] = 0;
 
-	mips_machgroup = MACH_GROUP_SIBYTE;
 	prom_meminit();
+
+#if defined(CONFIG_SIBYTE_BCM112X) || defined(CONFIG_SIBYTE_SB1250)
+	register_smp_ops(&sb_smp_ops);
+#endif
+#if defined(CONFIG_SIBYTE_BCM1x55) || defined(CONFIG_SIBYTE_BCM1x80)
+	register_smp_ops(&bcm1480_smp_ops);
+#endif
 }
 
 void __init prom_free_prom_memory(void)

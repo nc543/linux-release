@@ -13,7 +13,7 @@
 #include <linux/init.h>
 #include <linux/wait.h>
 #include <linux/i2c.h>
-#include <asm/semaphore.h>
+#include <linux/mutex.h>
 #include <asm/prom.h>
 #include <asm/smu.h>
 #include <asm/pmac_low_i2c.h>
@@ -36,7 +36,7 @@
 struct wf_sat {
 	int			nr;
 	atomic_t		refcnt;
-	struct semaphore	mutex;
+	struct mutex		mutex;
 	unsigned long		last_read; /* jiffies when cache last updated */
 	u8			cache[16];
 	struct i2c_client	i2c;
@@ -66,26 +66,6 @@ static struct i2c_driver wf_sat_driver = {
 	.attach_adapter	= wf_sat_attach,
 	.detach_client	= wf_sat_detach,
 };
-
-/*
- * XXX i2c_smbus_read_i2c_block_data doesn't pass the requested
- * length down to the low-level driver, so we use this, which
- * works well enough with the SMU i2c driver code...
- */
-static int sat_read_block(struct i2c_client *client, u8 command,
-			  u8 *values, int len)
-{
-	union i2c_smbus_data data;
-	int err;
-
-	data.block[0] = len;
-	err = i2c_smbus_xfer(client->adapter, client->addr, client->flags,
-			     I2C_SMBUS_READ, command, I2C_SMBUS_I2C_BLOCK_DATA,
-			     &data);
-	if (!err)
-		memcpy(values, data.block, len);
-	return err;
-}
 
 struct smu_sdbp_header *smu_sat_get_sdb_partition(unsigned int sat_id, int id,
 						  unsigned int *size)
@@ -124,8 +104,8 @@ struct smu_sdbp_header *smu_sat_get_sdb_partition(unsigned int sat_id, int id,
 		return NULL;
 
 	for (i = 0; i < len; i += 4) {
-		err = sat_read_block(&sat->i2c, 0xa, data, 4);
-		if (err) {
+		err = i2c_smbus_read_i2c_block_data(&sat->i2c, 0xa, 4, data);
+		if (err < 0) {
 			printk(KERN_ERR "smu_sat_get_sdb_part rd err %d\n",
 			       err);
 			goto fail;
@@ -157,8 +137,8 @@ static int wf_sat_read_cache(struct wf_sat *sat)
 {
 	int err;
 
-	err = sat_read_block(&sat->i2c, 0x3f, sat->cache, 16);
-	if (err)
+	err = i2c_smbus_read_i2c_block_data(&sat->i2c, 0x3f, 16, sat->cache);
+	if (err < 0)
 		return err;
 	sat->last_read = jiffies;
 #ifdef LOTSA_DEBUG
@@ -183,7 +163,7 @@ static int wf_sat_get(struct wf_sensor *sr, s32 *value)
 	if (sat->i2c.adapter == NULL)
 		return -ENODEV;
 
-	down(&sat->mutex);
+	mutex_lock(&sat->mutex);
 	if (time_after(jiffies, (sat->last_read + MAX_AGE))) {
 		err = wf_sat_read_cache(sat);
 		if (err)
@@ -202,7 +182,7 @@ static int wf_sat_get(struct wf_sensor *sr, s32 *value)
 	err = 0;
 
  fail:
-	up(&sat->mutex);
+	mutex_unlock(&sat->mutex);
 	return err;
 }
 
@@ -253,7 +233,7 @@ static void wf_sat_create(struct i2c_adapter *adapter, struct device_node *dev)
 	sat->nr = -1;
 	sat->node = of_node_get(dev);
 	atomic_set(&sat->refcnt, 0);
-	init_MUTEX(&sat->mutex);
+	mutex_init(&sat->mutex);
 	sat->i2c.addr = (addr >> 1) & 0x7f;
 	sat->i2c.adapter = adapter;
 	sat->i2c.driver = &wf_sat_driver;
@@ -400,10 +380,12 @@ static int __init sat_sensors_init(void)
 	return i2c_add_driver(&wf_sat_driver);
 }
 
+#if 0	/* uncomment when module_exit() below is uncommented */
 static void __exit sat_sensors_exit(void)
 {
 	i2c_del_driver(&wf_sat_driver);
 }
+#endif
 
 module_init(sat_sensors_init);
 /*module_exit(sat_sensors_exit); Uncomment when cleanup is implemented */

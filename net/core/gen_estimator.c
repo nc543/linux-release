@@ -15,7 +15,7 @@
 
 #include <asm/uaccess.h>
 #include <asm/system.h>
-#include <asm/bitops.h>
+#include <linux/bitops.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
@@ -79,27 +79,27 @@
 
 struct gen_estimator
 {
-	struct gen_estimator	*next;
+	struct list_head	list;
 	struct gnet_stats_basic	*bstats;
 	struct gnet_stats_rate_est	*rate_est;
 	spinlock_t		*stats_lock;
-	unsigned		interval;
 	int			ewma_log;
 	u64			last_bytes;
 	u32			last_packets;
 	u32			avpps;
 	u32			avbps;
+	struct rcu_head		e_rcu;
 };
 
 struct gen_estimator_head
 {
 	struct timer_list	timer;
-	struct gen_estimator	*list;
+	struct list_head	list;
 };
 
 static struct gen_estimator_head elist[EST_MAX_INTERVAL+1];
 
-/* Estimator array lock */
+/* Protects against NULL dereference */
 static DEFINE_RWLOCK(est_lock);
 
 static void est_timer(unsigned long arg)
@@ -107,13 +107,17 @@ static void est_timer(unsigned long arg)
 	int idx = (int)arg;
 	struct gen_estimator *e;
 
-	read_lock(&est_lock);
-	for (e = elist[idx].list; e; e = e->next) {
+	rcu_read_lock();
+	list_for_each_entry_rcu(e, &elist[idx].list, list) {
 		u64 nbytes;
 		u32 npackets;
 		u32 rate;
 
 		spin_lock(e->stats_lock);
+		read_lock(&est_lock);
+		if (e->bstats == NULL)
+			goto skip;
+
 		nbytes = e->bstats->bytes;
 		npackets = e->bstats->packets;
 		rate = (nbytes - e->last_bytes)<<(7 - idx);
@@ -125,11 +129,14 @@ static void est_timer(unsigned long arg)
 		e->last_packets = npackets;
 		e->avpps += ((long)rate - (long)e->avpps) >> e->ewma_log;
 		e->rate_est->pps = (e->avpps+0x1FF)>>10;
+skip:
+		read_unlock(&est_lock);
 		spin_unlock(e->stats_lock);
 	}
 
-	mod_timer(&elist[idx].timer, jiffies + ((HZ<<idx)/4));
-	read_unlock(&est_lock);
+	if (!list_empty(&elist[idx].list))
+		mod_timer(&elist[idx].timer, jiffies + ((HZ/4) << idx));
+	rcu_read_unlock();
 }
 
 /**
@@ -146,14 +153,19 @@ static void est_timer(unsigned long arg)
  * &rate_est with the statistics lock grabed during this period.
  *
  * Returns 0 on success or a negative error code.
+ *
+ * NOTE: Called under rtnl_mutex
  */
 int gen_new_estimator(struct gnet_stats_basic *bstats,
-	struct gnet_stats_rate_est *rate_est, spinlock_t *stats_lock, struct rtattr *opt)
+		      struct gnet_stats_rate_est *rate_est,
+		      spinlock_t *stats_lock,
+		      struct nlattr *opt)
 {
 	struct gen_estimator *est;
-	struct gnet_estimator *parm = RTA_DATA(opt);
+	struct gnet_estimator *parm = nla_data(opt);
+	int idx;
 
-	if (RTA_PAYLOAD(opt) < sizeof(*parm))
+	if (nla_len(opt) < sizeof(*parm))
 		return -EINVAL;
 
 	if (parm->interval < -2 || parm->interval > 3)
@@ -163,7 +175,7 @@ int gen_new_estimator(struct gnet_stats_basic *bstats,
 	if (est == NULL)
 		return -ENOBUFS;
 
-	est->interval = parm->interval + 2;
+	idx = parm->interval + 2;
 	est->bstats = bstats;
 	est->rate_est = rate_est;
 	est->stats_lock = stats_lock;
@@ -173,18 +185,23 @@ int gen_new_estimator(struct gnet_stats_basic *bstats,
 	est->last_packets = bstats->packets;
 	est->avpps = rate_est->pps<<10;
 
-	est->next = elist[est->interval].list;
-	if (est->next == NULL) {
-		init_timer(&elist[est->interval].timer);
-		elist[est->interval].timer.data = est->interval;
-		elist[est->interval].timer.expires = jiffies + ((HZ<<est->interval)/4);
-		elist[est->interval].timer.function = est_timer;
-		add_timer(&elist[est->interval].timer);
+	if (!elist[idx].timer.function) {
+		INIT_LIST_HEAD(&elist[idx].list);
+		setup_timer(&elist[idx].timer, est_timer, idx);
 	}
-	write_lock_bh(&est_lock);
-	elist[est->interval].list = est;
-	write_unlock_bh(&est_lock);
+
+	if (list_empty(&elist[idx].list))
+		mod_timer(&elist[idx].timer, jiffies + ((HZ/4) << idx));
+
+	list_add_rcu(&est->list, &elist[idx].list);
 	return 0;
+}
+
+static void __gen_kill_estimator(struct rcu_head *head)
+{
+	struct gen_estimator *e = container_of(head,
+					struct gen_estimator, e_rcu);
+	kfree(e);
 }
 
 /**
@@ -194,36 +211,37 @@ int gen_new_estimator(struct gnet_stats_basic *bstats,
  *
  * Removes the rate estimator specified by &bstats and &rate_est
  * and deletes the timer.
+ *
+ * NOTE: Called under rtnl_mutex
  */
 void gen_kill_estimator(struct gnet_stats_basic *bstats,
 	struct gnet_stats_rate_est *rate_est)
 {
 	int idx;
-	struct gen_estimator *est, **pest;
+	struct gen_estimator *e, *n;
 
 	for (idx=0; idx <= EST_MAX_INTERVAL; idx++) {
-		int killed = 0;
-		pest = &elist[idx].list;
-		while ((est=*pest) != NULL) {
-			if (est->rate_est != rate_est || est->bstats != bstats) {
-				pest = &est->next;
+
+		/* Skip non initialized indexes */
+		if (!elist[idx].timer.function)
+			continue;
+
+		list_for_each_entry_safe(e, n, &elist[idx].list, list) {
+			if (e->rate_est != rate_est || e->bstats != bstats)
 				continue;
-			}
 
 			write_lock_bh(&est_lock);
-			*pest = est->next;
+			e->bstats = NULL;
 			write_unlock_bh(&est_lock);
 
-			kfree(est);
-			killed++;
+			list_del_rcu(&e->list);
+			call_rcu(&e->e_rcu, __gen_kill_estimator);
 		}
-		if (killed && elist[idx].list == NULL)
-			del_timer(&elist[idx].timer);
 	}
 }
 
 /**
- * gen_replace_estimator - replace rate estimator configruation
+ * gen_replace_estimator - replace rate estimator configuration
  * @bstats: basic statistics
  * @rate_est: rate estimator statistics
  * @stats_lock: statistics lock
@@ -234,13 +252,12 @@ void gen_kill_estimator(struct gnet_stats_basic *bstats,
  *
  * Returns 0 on success or a negative error code.
  */
-int
-gen_replace_estimator(struct gnet_stats_basic *bstats,
-	struct gnet_stats_rate_est *rate_est, spinlock_t *stats_lock,
-	struct rtattr *opt)
+int gen_replace_estimator(struct gnet_stats_basic *bstats,
+			  struct gnet_stats_rate_est *rate_est,
+			  spinlock_t *stats_lock, struct nlattr *opt)
 {
-    gen_kill_estimator(bstats, rate_est);
-    return gen_new_estimator(bstats, rate_est, stats_lock, opt);
+	gen_kill_estimator(bstats, rate_est);
+	return gen_new_estimator(bstats, rate_est, stats_lock, opt);
 }
 
 

@@ -9,9 +9,9 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
+#include <linux/of_device.h>
 
 #include <asm/prom.h>
-#include <asm/of_device.h>
 #include <asm/io.h>
 #include <asm/auxio.h>
 
@@ -109,7 +109,7 @@ void auxio_set_lte(int on)
 	}
 }
 
-static struct of_device_id auxio_match[] = {
+static struct of_device_id __initdata auxio_match[] = {
 	{
 		.name = "auxio",
 	},
@@ -148,14 +148,16 @@ static int __devinit auxio_probe(struct of_device *dev, const struct of_device_i
 }
 
 static struct of_platform_driver auxio_driver = {
-	.name		= "auxio",
 	.match_table	= auxio_match,
 	.probe		= auxio_probe,
+	.driver		= {
+		.name	= "auxio",
+	},
 };
 
 static int __init auxio_init(void)
 {
-	return of_register_driver(&auxio_driver, &of_bus_type);
+	return of_register_driver(&auxio_driver, &of_platform_bus_type);
 }
 
 /* Must be after subsys_initcall() so that busses are probed.  Must

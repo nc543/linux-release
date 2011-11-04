@@ -5,12 +5,13 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (c) 2000-2006 Silicon Graphics, Inc.  All Rights Reserved.
+ * Copyright (c) 2000-2008 Silicon Graphics, Inc.  All Rights Reserved.
  */
 
 #include <linux/irq.h>
 #include <linux/spinlock.h>
 #include <linux/init.h>
+#include <linux/rculist.h>
 #include <asm/sn/addrs.h>
 #include <asm/sn/arch.h>
 #include <asm/sn/intr.h>
@@ -19,6 +20,7 @@
 #include <asm/sn/pcidev.h>
 #include <asm/sn/shub_mmr.h>
 #include <asm/sn/sn_sal.h>
+#include <asm/sn/sn_feature_sets.h>
 
 static void force_interrupt(int irq);
 static void register_intr_pda(struct sn_irq_info *sn_irq_info);
@@ -84,12 +86,18 @@ static void sn_shutdown_irq(unsigned int irq)
 {
 }
 
+extern void ia64_mca_register_cpev(int);
+
 static void sn_disable_irq(unsigned int irq)
 {
+	if (irq == local_vector_to_irq(IA64_CPE_VECTOR))
+		ia64_mca_register_cpev(0);
 }
 
 static void sn_enable_irq(unsigned int irq)
 {
+	if (irq == local_vector_to_irq(IA64_CPE_VECTOR))
+		ia64_mca_register_cpev(irq);
 }
 
 static void sn_ack_irq(unsigned int irq)
@@ -233,6 +241,20 @@ static void sn_set_affinity_irq(unsigned int irq, cpumask_t mask)
 		(void)sn_retarget_vector(sn_irq_info, nasid, slice);
 }
 
+#ifdef CONFIG_SMP
+void sn_set_err_irq_affinity(unsigned int irq)
+{
+        /*
+         * On systems which support CPU disabling (SHub2), all error interrupts
+         * are targetted at the boot CPU.
+         */
+        if (is_shub2() && sn_prom_feature_available(PRF_CPU_DISABLE_SUPPORT))
+                set_irq_affinity_info(irq, cpu_physical_id(0), 0);
+}
+#else
+void sn_set_err_irq_affinity(unsigned int irq) { }
+#endif
+
 static void
 sn_mask_irq(unsigned int irq)
 {
@@ -255,6 +277,13 @@ struct irq_chip irq_type_sn = {
 	.unmask		= sn_unmask_irq,
 	.set_affinity	= sn_set_affinity_irq
 };
+
+ia64_vector sn_irq_to_vector(int irq)
+{
+	if (irq >= IA64_NUM_VECTORS)
+		return 0;
+	return (ia64_vector)irq;
+}
 
 unsigned int sn_local_vector_to_irq(u8 vector)
 {
@@ -346,6 +375,7 @@ void sn_irq_fixup(struct pci_dev *pci_dev, struct sn_irq_info *sn_irq_info)
 	int cpu = nasid_slice_to_cpuid(nasid, slice);
 #ifdef CONFIG_SMP
 	int cpuphys;
+	irq_desc_t *desc;
 #endif
 
 	pci_dev_get(pci_dev);
@@ -362,6 +392,12 @@ void sn_irq_fixup(struct pci_dev *pci_dev, struct sn_irq_info *sn_irq_info)
 #ifdef CONFIG_SMP
 	cpuphys = cpu_physical_id(cpu);
 	set_irq_affinity_info(sn_irq_info->irq_irq, cpuphys, 0);
+	desc = irq_to_desc(sn_irq_info->irq_irq);
+	/*
+	 * Affinity was set by the PROM, prevent it from
+	 * being reset by the request_irq() path.
+	 */
+	desc->status |= IRQ_AFFINITY_SET;
 #endif
 }
 
@@ -398,7 +434,10 @@ sn_call_force_intr_provider(struct sn_irq_info *sn_irq_info)
 	struct sn_pcibus_provider *pci_provider;
 
 	pci_provider = sn_pci_provider[sn_irq_info->irq_bridge_type];
-	if (pci_provider && pci_provider->force_interrupt)
+
+	/* Don't force an interrupt if the irq has been disabled */
+	if (!(irq_desc[sn_irq_info->irq_irq].status & IRQ_DISABLED) &&
+	    pci_provider && pci_provider->force_interrupt)
 		(*pci_provider->force_interrupt)(sn_irq_info);
 }
 

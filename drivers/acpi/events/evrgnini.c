@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2007, R. Byron Moore
+ * Copyright (C) 2000 - 2008, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -284,6 +284,7 @@ acpi_ev_pci_config_region_setup(acpi_handle handle,
 	}
 
 	if (!pci_device_node) {
+		ACPI_FREE(pci_id);
 		return_ACPI_STATUS(AE_AML_OPERAND_TYPE);
 	}
 
@@ -377,9 +378,9 @@ static u8 acpi_ev_match_pci_root_bridge(char *id)
 static u8 acpi_ev_is_pci_root_bridge(struct acpi_namespace_node *node)
 {
 	acpi_status status;
-	struct acpi_device_id hid;
+	struct acpica_device_id hid;
 	struct acpi_compatible_id_list *cid;
-	acpi_native_uint i;
+	u32 i;
 
 	/*
 	 * Get the _HID and check for a PCI Root Bridge

@@ -25,8 +25,8 @@
  * partially mapped pages provide precise accounting of which 4k sub pages
  * are mapped and which ones are not, thereby improving IA-32 compatibility.
  */
-struct partial_page {
-	struct partial_page	*next; /* linked list, sorted by address */
+struct ia64_partial_page {
+	struct ia64_partial_page *next; /* linked list, sorted by address */
 	struct rb_node		pp_rb;
 	/* 64K is the largest "normal" page supported by ia64 ABI. So 4K*64
 	 * should suffice.*/
@@ -34,17 +34,17 @@ struct partial_page {
 	unsigned int		base;
 };
 
-struct partial_page_list {
-	struct partial_page	*pp_head; /* list head, points to the lowest
+struct ia64_partial_page_list {
+	struct ia64_partial_page *pp_head; /* list head, points to the lowest
 					   * addressed partial page */
 	struct rb_root		ppl_rb;
-	struct partial_page	*pp_hint; /* pp_hint->next is the last
+	struct ia64_partial_page *pp_hint; /* pp_hint->next is the last
 					   * accessed partial page */
 	atomic_t		pp_count; /* reference count */
 };
 
 #if PAGE_SHIFT > IA32_PAGE_SHIFT
-struct partial_page_list* ia32_init_pp_list (void);
+struct ia64_partial_page_list* ia32_init_pp_list (void);
 #else
 # define ia32_init_pp_list()	0
 #endif
@@ -276,13 +276,6 @@ typedef struct compat_siginfo {
 	} _sifields;
 } compat_siginfo_t;
 
-struct old_linux32_dirent {
-	u32	d_ino;
-	u32	d_offset;
-	u16	d_namlen;
-	char	d_name[1];
-};
-
 /*
  * IA-32 ELF specific definitions for IA-64.
  */
@@ -290,7 +283,6 @@ struct old_linux32_dirent {
 #define _ASM_IA64_ELF_H		/* Don't include elf.h */
 
 #include <linux/sched.h>
-#include <asm/processor.h>
 
 /*
  * This is used to ensure we don't load something for the wrong architecture.
@@ -340,8 +332,8 @@ void ia64_elf32_init(struct pt_regs *regs);
 #define ELF_PLATFORM	NULL
 
 #ifdef __KERNEL__
-# define SET_PERSONALITY(EX,IBCS2)				\
-	(current->personality = (IBCS2) ? PER_SVR4 : PER_LINUX)
+# define SET_PERSONALITY(EX)				\
+	(current->personality = PER_LINUX)
 #endif
 
 #define IA32_EFLAG	0x200

@@ -7,15 +7,14 @@
  * This file is released under the GPL.
  */
 
-#include "dm.h"
 #include "dm-snap.h"
-#include "dm-io.h"
-#include "kcopyd.h"
 
 #include <linux/mm.h>
 #include <linux/pagemap.h>
 #include <linux/vmalloc.h>
 #include <linux/slab.h>
+#include <linux/dm-io.h>
+#include <linux/dm-kcopyd.h>
 
 #define DM_MSG_PREFIX "snapshots"
 #define DM_CHUNK_SIZE_DEFAULT_SECTORS 32	/* 16KB */
@@ -105,15 +104,20 @@ struct pstore {
 	void *area;
 
 	/*
+	 * An area of zeros used to clear the next area.
+	 */
+	void *zero_area;
+
+	/*
 	 * Used to keep track of which metadata area the data in
 	 * 'chunk' refers to.
 	 */
-	uint32_t current_area;
+	chunk_t current_area;
 
 	/*
 	 * The next free chunk for an exception.
 	 */
-	uint32_t next_free;
+	chunk_t next_free;
 
 	/*
 	 * The index of next free exception in the current
@@ -125,11 +129,13 @@ struct pstore {
 	uint32_t callback_count;
 	struct commit_callback *callbacks;
 	struct dm_io_client *io_client;
+
+	struct workqueue_struct *metadata_wq;
 };
 
-static inline unsigned int sectors_to_pages(unsigned int sectors)
+static unsigned sectors_to_pages(unsigned sectors)
 {
-	return sectors / (PAGE_SIZE >> 9);
+	return DIV_ROUND_UP(sectors, PAGE_SIZE >> 9);
 }
 
 static int alloc_area(struct pstore *ps)
@@ -147,6 +153,13 @@ static int alloc_area(struct pstore *ps)
 	if (!ps->area)
 		return r;
 
+	ps->zero_area = vmalloc(len);
+	if (!ps->zero_area) {
+		vfree(ps->area);
+		return r;
+	}
+	memset(ps->zero_area, 0, len);
+
 	return 0;
 }
 
@@ -154,14 +167,30 @@ static void free_area(struct pstore *ps)
 {
 	vfree(ps->area);
 	ps->area = NULL;
+	vfree(ps->zero_area);
+	ps->zero_area = NULL;
+}
+
+struct mdata_req {
+	struct dm_io_region *where;
+	struct dm_io_request *io_req;
+	struct work_struct work;
+	int result;
+};
+
+static void do_metadata(struct work_struct *work)
+{
+	struct mdata_req *req = container_of(work, struct mdata_req, work);
+
+	req->result = dm_io(req->io_req, 1, req->where, NULL);
 }
 
 /*
  * Read or write a chunk aligned and sized block of data from a device.
  */
-static int chunk_io(struct pstore *ps, uint32_t chunk, int rw)
+static int chunk_io(struct pstore *ps, chunk_t chunk, int rw, int metadata)
 {
-	struct io_region where = {
+	struct dm_io_region where = {
 		.bdev = ps->snap->cow->bdev,
 		.sector = ps->snap->chunk_size * chunk,
 		.count = ps->snap->chunk_size,
@@ -173,34 +202,72 @@ static int chunk_io(struct pstore *ps, uint32_t chunk, int rw)
 		.client = ps->io_client,
 		.notify.fn = NULL,
 	};
+	struct mdata_req req;
 
-	return dm_io(&io_req, 1, &where, NULL);
+	if (!metadata)
+		return dm_io(&io_req, 1, &where, NULL);
+
+	req.where = &where;
+	req.io_req = &io_req;
+
+	/*
+	 * Issue the synchronous I/O from a different thread
+	 * to avoid generic_make_request recursion.
+	 */
+	INIT_WORK(&req.work, do_metadata);
+	queue_work(ps->metadata_wq, &req.work);
+	flush_workqueue(ps->metadata_wq);
+
+	return req.result;
+}
+
+/*
+ * Convert a metadata area index to a chunk index.
+ */
+static chunk_t area_location(struct pstore *ps, chunk_t area)
+{
+	return 1 + ((ps->exceptions_per_area + 1) * area);
 }
 
 /*
  * Read or write a metadata area.  Remembering to skip the first
  * chunk which holds the header.
  */
-static int area_io(struct pstore *ps, uint32_t area, int rw)
+static int area_io(struct pstore *ps, int rw)
 {
 	int r;
-	uint32_t chunk;
+	chunk_t chunk;
 
-	/* convert a metadata area index to a chunk index */
-	chunk = 1 + ((ps->exceptions_per_area + 1) * area);
+	chunk = area_location(ps, ps->current_area);
 
-	r = chunk_io(ps, chunk, rw);
+	r = chunk_io(ps, chunk, rw, 0);
 	if (r)
 		return r;
 
-	ps->current_area = area;
 	return 0;
 }
 
-static int zero_area(struct pstore *ps, uint32_t area)
+static void zero_memory_area(struct pstore *ps)
 {
 	memset(ps->area, 0, ps->snap->chunk_size << SECTOR_SHIFT);
-	return area_io(ps, area, WRITE);
+}
+
+static int zero_disk_area(struct pstore *ps, chunk_t area)
+{
+	struct dm_io_region where = {
+		.bdev = ps->snap->cow->bdev,
+		.sector = ps->snap->chunk_size * area_location(ps, area),
+		.count = ps->snap->chunk_size,
+	};
+	struct dm_io_request io_req = {
+		.bi_rw = WRITE,
+		.mem.type = DM_IO_VMA,
+		.mem.ptr.vma = ps->zero_area,
+		.client = ps->io_client,
+		.notify.fn = NULL,
+	};
+
+	return dm_io(&io_req, 1, &where, NULL);
 }
 
 static int read_header(struct pstore *ps, int *new_snapshot)
@@ -230,7 +297,7 @@ static int read_header(struct pstore *ps, int *new_snapshot)
 	if (r)
 		return r;
 
-	r = chunk_io(ps, 0, READ);
+	r = chunk_io(ps, 0, READ, 1);
 	if (r)
 		goto bad;
 
@@ -292,7 +359,7 @@ static int write_header(struct pstore *ps)
 	dh->version = cpu_to_le32(ps->version);
 	dh->chunk_size = cpu_to_le32(ps->snap->chunk_size);
 
-	return chunk_io(ps, 0, WRITE);
+	return chunk_io(ps, 0, WRITE, 1);
 }
 
 /*
@@ -373,15 +440,14 @@ static int insert_exceptions(struct pstore *ps, int *full)
 
 static int read_exceptions(struct pstore *ps)
 {
-	uint32_t area;
 	int r, full = 1;
 
 	/*
 	 * Keeping reading chunks and inserting exceptions until
 	 * we find a partially full area.
 	 */
-	for (area = 0; full; area++) {
-		r = area_io(ps, area, READ);
+	for (ps->current_area = 0; full; ps->current_area++) {
+		r = area_io(ps, READ);
 		if (r)
 			return r;
 
@@ -390,10 +456,12 @@ static int read_exceptions(struct pstore *ps)
 			return r;
 	}
 
+	ps->current_area--;
+
 	return 0;
 }
 
-static inline struct pstore *get_info(struct exception_store *store)
+static struct pstore *get_info(struct exception_store *store)
 {
 	return (struct pstore *) store->context;
 }
@@ -409,6 +477,7 @@ static void persistent_destroy(struct exception_store *store)
 {
 	struct pstore *ps = get_info(store);
 
+	destroy_workqueue(ps->metadata_wq);
 	dm_io_client_destroy(ps->io_client);
 	vfree(ps->callbacks);
 	free_area(ps);
@@ -417,7 +486,7 @@ static void persistent_destroy(struct exception_store *store)
 
 static int persistent_read_metadata(struct exception_store *store)
 {
-	int r, new_snapshot;
+	int r, uninitialized_var(new_snapshot);
 	struct pstore *ps = get_info(store);
 
 	/*
@@ -447,26 +516,28 @@ static int persistent_read_metadata(struct exception_store *store)
 			return r;
 		}
 
-		r = zero_area(ps, 0);
+		ps->current_area = 0;
+		zero_memory_area(ps);
+		r = zero_disk_area(ps, 0);
 		if (r) {
-			DMWARN("zero_area(0) failed");
+			DMWARN("zero_disk_area(0) failed");
 			return r;
 		}
-
 	} else {
 		/*
 		 * Sanity checks.
 		 */
-		if (!ps->valid) {
-			DMWARN("snapshot is marked invalid");
-			return -EINVAL;
-		}
-
 		if (ps->version != SNAPSHOT_DISK_VERSION) {
 			DMWARN("unable to handle snapshot disk version %d",
 			       ps->version);
 			return -EINVAL;
 		}
+
+		/*
+		 * Metadata are valid, but snapshot is invalidated
+		 */
+		if (!ps->valid)
+			return 1;
 
 		/*
 		 * Read the metadata.
@@ -480,10 +551,11 @@ static int persistent_read_metadata(struct exception_store *store)
 }
 
 static int persistent_prepare(struct exception_store *store,
-			      struct exception *e)
+			      struct dm_snap_exception *e)
 {
 	struct pstore *ps = get_info(store);
 	uint32_t stride;
+	chunk_t next_free;
 	sector_t size = get_dev_size(store->snap->cow->bdev);
 
 	/* Is there enough room ? */
@@ -497,7 +569,8 @@ static int persistent_prepare(struct exception_store *store,
 	 * into account the location of the metadata chunks.
 	 */
 	stride = (ps->exceptions_per_area + 1);
-	if ((++ps->next_free % stride) == 1)
+	next_free = ++ps->next_free;
+	if (sector_div(next_free, stride) == 1)
 		ps->next_free++;
 
 	atomic_inc(&ps->pending_count);
@@ -505,11 +578,10 @@ static int persistent_prepare(struct exception_store *store,
 }
 
 static void persistent_commit(struct exception_store *store,
-			      struct exception *e,
+			      struct dm_snap_exception *e,
 			      void (*callback) (void *, int success),
 			      void *callback_context)
 {
-	int r;
 	unsigned int i;
 	struct pstore *ps = get_info(store);
 	struct disk_exception de;
@@ -530,33 +602,41 @@ static void persistent_commit(struct exception_store *store,
 	cb->context = callback_context;
 
 	/*
-	 * If there are no more exceptions in flight, or we have
-	 * filled this metadata area we commit the exceptions to
-	 * disk.
+	 * If there are exceptions in flight and we have not yet
+	 * filled this metadata area there's nothing more to do.
 	 */
-	if (atomic_dec_and_test(&ps->pending_count) ||
-	    (ps->current_committed == ps->exceptions_per_area)) {
-		r = area_io(ps, ps->current_area, WRITE);
-		if (r)
-			ps->valid = 0;
+	if (!atomic_dec_and_test(&ps->pending_count) &&
+	    (ps->current_committed != ps->exceptions_per_area))
+		return;
 
-		/*
-		 * Have we completely filled the current area ?
-		 */
-		if (ps->current_committed == ps->exceptions_per_area) {
-			ps->current_committed = 0;
-			r = zero_area(ps, ps->current_area + 1);
-			if (r)
-				ps->valid = 0;
-		}
+	/*
+	 * If we completely filled the current area, then wipe the next one.
+	 */
+	if ((ps->current_committed == ps->exceptions_per_area) &&
+	     zero_disk_area(ps, ps->current_area + 1))
+		ps->valid = 0;
 
-		for (i = 0; i < ps->callback_count; i++) {
-			cb = ps->callbacks + i;
-			cb->callback(cb->context, r == 0 ? 1 : 0);
-		}
+	/*
+	 * Commit exceptions to disk.
+	 */
+	if (ps->valid && area_io(ps, WRITE))
+		ps->valid = 0;
 
-		ps->callback_count = 0;
+	/*
+	 * Advance to the next area if this one is full.
+	 */
+	if (ps->current_committed == ps->exceptions_per_area) {
+		ps->current_committed = 0;
+		ps->current_area++;
+		zero_memory_area(ps);
 	}
+
+	for (i = 0; i < ps->callback_count; i++) {
+		cb = ps->callbacks + i;
+		cb->callback(cb->context, ps->valid);
+	}
+
+	ps->callback_count = 0;
 }
 
 static void persistent_drop(struct exception_store *store)
@@ -588,6 +668,13 @@ int dm_create_persistent(struct exception_store *store)
 	atomic_set(&ps->pending_count, 0);
 	ps->callbacks = NULL;
 
+	ps->metadata_wq = create_singlethread_workqueue("ksnaphd");
+	if (!ps->metadata_wq) {
+		kfree(ps);
+		DMERR("couldn't start header metadata update thread");
+		return -ENOMEM;
+	}
+
 	store->destroy = persistent_destroy;
 	store->read_metadata = persistent_read_metadata;
 	store->prepare_exception = persistent_prepare;
@@ -616,7 +703,8 @@ static int transient_read_metadata(struct exception_store *store)
 	return 0;
 }
 
-static int transient_prepare(struct exception_store *store, struct exception *e)
+static int transient_prepare(struct exception_store *store,
+			     struct dm_snap_exception *e)
 {
 	struct transient_c *tc = (struct transient_c *) store->context;
 	sector_t size = get_dev_size(store->snap->cow->bdev);
@@ -631,9 +719,9 @@ static int transient_prepare(struct exception_store *store, struct exception *e)
 }
 
 static void transient_commit(struct exception_store *store,
-		      struct exception *e,
-		      void (*callback) (void *, int success),
-		      void *callback_context)
+			     struct dm_snap_exception *e,
+			     void (*callback) (void *, int success),
+			     void *callback_context)
 {
 	/* Just succeed */
 	callback(callback_context, 1);

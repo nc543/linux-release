@@ -40,9 +40,12 @@
  */
 
 #include <linux/module.h>
+#include <linux/cpu.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/sched.h>
+#include <linux/err.h>
 #include <linux/irq.h>
 #include <linux/bootmem.h>
 #include <linux/delay.h>
@@ -132,7 +135,7 @@ static void map_cpu_to_physid(int, int);
 static void unmap_cpu_to_physid(int, int);
 
 /*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*/
-/* Boot up APs Routins : BSP                                                 */
+/* Boot up APs Routines : BSP                                                */
 /*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*/
 void __devinit smp_prepare_boot_cpu(void)
 {
@@ -403,7 +406,7 @@ void __init smp_cpus_done(unsigned int max_cpus)
 }
 
 /*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*/
-/* Activate a secondary processor Routins                                    */
+/* Activate a secondary processor Routines                                   */
 /*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*/
 
 /*==========================================================================*
@@ -496,6 +499,8 @@ static void __init smp_online(void)
 {
 	int cpu_id = smp_processor_id();
 
+	notify_cpu_starting(cpu_id);
+
 	local_irq_enable();
 
 	/* Get our bogomips. */
@@ -508,7 +513,7 @@ static void __init smp_online(void)
 }
 
 /*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*/
-/* Boot up CPUs common Routins                                               */
+/* Boot up CPUs common Routines                                              */
 /*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*/
 static void __init show_mp_info(int nr_cpu)
 {

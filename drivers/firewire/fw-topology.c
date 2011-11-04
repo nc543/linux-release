@@ -21,6 +21,8 @@
 #include <linux/module.h>
 #include <linux/wait.h>
 #include <linux/errno.h>
+#include <asm/bug.h>
+#include <asm/system.h>
 #include "fw-transaction.h"
 #include "fw-topology.h"
 
@@ -106,6 +108,7 @@ static struct fw_node *fw_node_create(u32 sid, int port_count, int color)
 	node->node_id = LOCAL_BUS | SELF_ID_PHY_ID(sid);
 	node->link_on = SELF_ID_LINK_ON(sid);
 	node->phy_speed = SELF_ID_PHY_SPEED(sid);
+	node->initiated_reset = SELF_ID_PHY_INITIATOR(sid);
 	node->port_count = port_count;
 
 	atomic_set(&node->ref_count, 1);
@@ -135,23 +138,27 @@ static void update_hop_count(struct fw_node *node)
 	int i;
 
 	for (i = 0; i < node->port_count; i++) {
-		if (node->ports[i].node == NULL)
+		if (node->ports[i] == NULL)
 			continue;
 
-		if (node->ports[i].node->max_hops > max_child_hops)
-			max_child_hops = node->ports[i].node->max_hops;
+		if (node->ports[i]->max_hops > max_child_hops)
+			max_child_hops = node->ports[i]->max_hops;
 
-		if (node->ports[i].node->max_depth > depths[0]) {
+		if (node->ports[i]->max_depth > depths[0]) {
 			depths[1] = depths[0];
-			depths[0] = node->ports[i].node->max_depth;
-		} else if (node->ports[i].node->max_depth > depths[1])
-			depths[1] = node->ports[i].node->max_depth;
+			depths[0] = node->ports[i]->max_depth;
+		} else if (node->ports[i]->max_depth > depths[1])
+			depths[1] = node->ports[i]->max_depth;
 	}
 
 	node->max_depth = depths[0] + 1;
 	node->max_hops = max(max_child_hops, depths[0] + depths[1] + 2);
 }
 
+static inline struct fw_node *fw_node(struct list_head *l)
+{
+	return list_entry(l, struct fw_node, link);
+}
 
 /**
  * build_tree - Build the tree representation of the topology
@@ -162,7 +169,7 @@ static void update_hop_count(struct fw_node *node)
  * This function builds the tree representation of the topology given
  * by the self IDs from the latest bus reset.  During the construction
  * of the tree, the function checks that the self IDs are valid and
- * internally consistent.  On succcess this funtions returns the
+ * internally consistent.  On succcess this function returns the
  * fw_node corresponding to the local card otherwise NULL.
  */
 static struct fw_node *build_tree(struct fw_card *card,
@@ -172,7 +179,8 @@ static struct fw_node *build_tree(struct fw_card *card,
 	struct list_head stack, *h;
 	u32 *next_sid, *end, q;
 	int i, port_count, child_port_count, phy_id, parent_count, stack_depth;
-	int gap_count, topology_type;
+	int gap_count;
+	bool beta_repeaters_present;
 
 	local_node = NULL;
 	node = NULL;
@@ -182,7 +190,7 @@ static struct fw_node *build_tree(struct fw_card *card,
 	phy_id = 0;
 	irm_node = NULL;
 	gap_count = SELF_ID_GAP_COUNT(*sid);
-	topology_type = 0;
+	beta_repeaters_present = false;
 
 	while (sid < end) {
 		next_sid = count_ports(sid, &port_count, &child_port_count);
@@ -210,11 +218,15 @@ static struct fw_node *build_tree(struct fw_card *card,
 		 */
 		for (i = 0, h = &stack; i < child_port_count; i++)
 			h = h->prev;
+		/*
+		 * When the stack is empty, this yields an invalid value,
+		 * but that pointer will never be dereferenced.
+		 */
 		child = fw_node(h);
 
 		node = fw_node_create(q, port_count, card->color);
 		if (node == NULL) {
-			fw_error("Out of memory while building topology.");
+			fw_error("Out of memory while building topology.\n");
 			return NULL;
 		}
 
@@ -223,11 +235,6 @@ static struct fw_node *build_tree(struct fw_card *card,
 
 		if (SELF_ID_CONTENDER(q))
 			irm_node = node;
-
-		if (node->phy_speed == SCODE_BETA)
-			topology_type |= FW_TOPOLOGY_B;
-		else
-			topology_type |= FW_TOPOLOGY_A;
 
 		parent_count = 0;
 
@@ -249,12 +256,12 @@ static struct fw_node *build_tree(struct fw_card *card,
 				break;
 
 			case SELFID_PORT_CHILD:
-				node->ports[i].node = child;
+				node->ports[i] = child;
 				/*
 				 * Fix up parent reference for this
 				 * child node.
 				 */
-				child->ports[child->color].node = node;
+				child->ports[child->color] = node;
 				child->color = card->color;
 				child = fw_node(child->link.next);
 				break;
@@ -278,13 +285,16 @@ static struct fw_node *build_tree(struct fw_card *card,
 		list_add_tail(&node->link, &stack);
 		stack_depth += 1 - child_port_count;
 
+		if (node->phy_speed == SCODE_BETA &&
+		    parent_count + child_port_count > 1)
+			beta_repeaters_present = true;
+
 		/*
-		 * If all PHYs does not report the same gap count
-		 * setting, we fall back to 63 which will force a gap
-		 * count reconfiguration and a reset.
+		 * If PHYs report different gap counts, set an invalid count
+		 * which will force a gap count reconfiguration and a reset.
 		 */
 		if (SELF_ID_GAP_COUNT(q) != gap_count)
-			gap_count = 63;
+			gap_count = 0;
 
 		update_hop_count(node);
 
@@ -295,7 +305,7 @@ static struct fw_node *build_tree(struct fw_card *card,
 	card->root_node = node;
 	card->irm_node = irm_node;
 	card->gap_count = gap_count;
-	card->topology_type = topology_type;
+	card->beta_repeaters_present = beta_repeaters_present;
 
 	return local_node;
 }
@@ -321,7 +331,7 @@ for_each_fw_node(struct fw_card *card, struct fw_node *root,
 		node->color = card->color;
 
 		for (i = 0; i < node->port_count; i++) {
-			child = node->ports[i].node;
+			child = node->ports[i];
 			if (!child)
 				continue;
 			if (child->color == card->color)
@@ -374,6 +384,7 @@ void fw_destroy_nodes(struct fw_card *card)
 	card->color++;
 	if (card->local_node != NULL)
 		for_each_fw_node(card, card->local_node, report_lost_node);
+	card->local_node = NULL;
 	spin_unlock_irqrestore(&card->lock, flags);
 }
 
@@ -382,11 +393,11 @@ static void move_tree(struct fw_node *node0, struct fw_node *node1, int port)
 	struct fw_node *tree;
 	int i;
 
-	tree = node1->ports[port].node;
-	node0->ports[port].node = tree;
+	tree = node1->ports[port];
+	node0->ports[port] = tree;
 	for (i = 0; i < tree->port_count; i++) {
-		if (tree->ports[i].node == node1) {
-			tree->ports[i].node = node0;
+		if (tree->ports[i] == node1) {
+			tree->ports[i] = node0;
 			break;
 		}
 	}
@@ -402,7 +413,7 @@ static void
 update_tree(struct fw_card *card, struct fw_node *root)
 {
 	struct list_head list0, list1;
-	struct fw_node *node0, *node1;
+	struct fw_node *node0, *node1, *next1;
 	int i, event;
 
 	INIT_LIST_HEAD(&list0);
@@ -414,12 +425,14 @@ update_tree(struct fw_card *card, struct fw_node *root)
 	node1 = fw_node(list1.next);
 
 	while (&node0->link != &list0) {
+		WARN_ON(node0->port_count != node1->port_count);
 
-		/* assert(node0->port_count == node1->port_count); */
 		if (node0->link_on && !node1->link_on)
 			event = FW_NODE_LINK_OFF;
 		else if (!node0->link_on && node1->link_on)
 			event = FW_NODE_LINK_ON;
+		else if (node1->initiated_reset && node1->link_on)
+			event = FW_NODE_INITIATED_RESET;
 		else
 			event = FW_NODE_UPDATED;
 
@@ -437,19 +450,17 @@ update_tree(struct fw_card *card, struct fw_node *root)
 			card->irm_node = node0;
 
 		for (i = 0; i < node0->port_count; i++) {
-			if (node0->ports[i].node && node1->ports[i].node) {
+			if (node0->ports[i] && node1->ports[i]) {
 				/*
 				 * This port didn't change, queue the
 				 * connected node for further
 				 * investigation.
 				 */
-				if (node0->ports[i].node->color == card->color)
+				if (node0->ports[i]->color == card->color)
 					continue;
-				list_add_tail(&node0->ports[i].node->link,
-					      &list0);
-				list_add_tail(&node1->ports[i].node->link,
-					      &list1);
-			} else if (node0->ports[i].node) {
+				list_add_tail(&node0->ports[i]->link, &list0);
+				list_add_tail(&node1->ports[i]->link, &list1);
+			} else if (node0->ports[i]) {
 				/*
 				 * The nodes connected here were
 				 * unplugged; unref the lost nodes and
@@ -457,10 +468,10 @@ update_tree(struct fw_card *card, struct fw_node *root)
 				 * them.
 				 */
 
-				for_each_fw_node(card, node0->ports[i].node,
+				for_each_fw_node(card, node0->ports[i],
 						 report_lost_node);
-				node0->ports[i].node = NULL;
-			} else if (node1->ports[i].node) {
+				node0->ports[i] = NULL;
+			} else if (node1->ports[i]) {
 				/*
 				 * One or more node were connected to
 				 * this port. Move the new nodes into
@@ -468,13 +479,15 @@ update_tree(struct fw_card *card, struct fw_node *root)
 				 * callbacks for them.
 				 */
 				move_tree(node0, node1, i);
-				for_each_fw_node(card, node0->ports[i].node,
+				for_each_fw_node(card, node0->ports[i],
 						 report_found_node);
 			}
 		}
 
 		node0 = fw_node(node0->link.next);
-		node1 = fw_node(node1->link.next);
+		next1 = fw_node(node1->link.next);
+		fw_node_put(node1);
+		node1 = next1;
 	}
 }
 
@@ -499,8 +512,6 @@ fw_core_handle_bus_reset(struct fw_card *card,
 	struct fw_node *local_node;
 	unsigned long flags;
 
-	fw_flush_transactions(card);
-
 	spin_lock_irqsave(&card->lock, flags);
 
 	/*
@@ -512,6 +523,11 @@ fw_core_handle_bus_reset(struct fw_card *card,
 		card->bm_retries = 0;
 
 	card->node_id = node_id;
+	/*
+	 * Update node_id before generation to prevent anybody from using
+	 * a stale node_id together with a current generation.
+	 */
+	smp_wmb();
 	card->generation = generation;
 	card->reset_jiffies = jiffies;
 	schedule_delayed_work(&card->work, 0);

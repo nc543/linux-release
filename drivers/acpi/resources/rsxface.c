@@ -5,7 +5,7 @@
  ******************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2007, R. Byron Moore
+ * Copyright (C) 2000 - 2008, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -473,8 +473,6 @@ acpi_rs_match_vendor_resource(struct acpi_resource *resource, void *context)
 	info->status = AE_OK;
 	return (AE_CTRL_TERMINATE);
 }
-
-ACPI_EXPORT_SYMBOL(acpi_rs_match_vendor_resource)
 
 /*******************************************************************************
  *

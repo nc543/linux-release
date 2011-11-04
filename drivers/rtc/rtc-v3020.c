@@ -26,6 +26,7 @@
 #include <linux/types.h>
 #include <linux/bcd.h>
 #include <linux/rtc-v3020.h>
+#include <linux/delay.h>
 
 #include <asm/io.h>
 
@@ -47,6 +48,7 @@ static void v3020_set_reg(struct v3020 *chip, unsigned char address,
 	for (i = 0; i < 4; i++) {
 		writel((tmp & 1) << chip->leftshift, chip->ioaddress);
 		tmp >>= 1;
+		udelay(1);
 	}
 
 	/* Commands dont have data */
@@ -54,6 +56,7 @@ static void v3020_set_reg(struct v3020 *chip, unsigned char address,
 		for (i = 0; i < 8; i++) {
 			writel((data & 1) << chip->leftshift, chip->ioaddress);
 			data >>= 1;
+			udelay(1);
 		}
 	}
 }
@@ -66,12 +69,14 @@ static unsigned char v3020_get_reg(struct v3020 *chip, unsigned char address)
 	for (i = 0; i < 4; i++) {
 		writel((address & 1) << chip->leftshift, chip->ioaddress);
 		address >>= 1;
+		udelay(1);
 	}
 
 	for (i = 0; i < 8; i++) {
 		data >>= 1;
 		if (readl(chip->ioaddress) & (1 << chip->leftshift))
 			data |= 0x80;
+		udelay(1);
 	}
 
 	return data;
@@ -87,22 +92,22 @@ static int v3020_read_time(struct device *dev, struct rtc_time *dt)
 
 	/* ...and then read constant values. */
 	tmp = v3020_get_reg(chip, V3020_SECONDS);
-	dt->tm_sec	= BCD2BIN(tmp);
+	dt->tm_sec	= bcd2bin(tmp);
 	tmp = v3020_get_reg(chip, V3020_MINUTES);
-	dt->tm_min	= BCD2BIN(tmp);
+	dt->tm_min	= bcd2bin(tmp);
 	tmp = v3020_get_reg(chip, V3020_HOURS);
-	dt->tm_hour	= BCD2BIN(tmp);
+	dt->tm_hour	= bcd2bin(tmp);
 	tmp = v3020_get_reg(chip, V3020_MONTH_DAY);
-	dt->tm_mday	= BCD2BIN(tmp);
+	dt->tm_mday	= bcd2bin(tmp);
 	tmp = v3020_get_reg(chip, V3020_MONTH);
-	dt->tm_mon	= BCD2BIN(tmp);
+	dt->tm_mon    = bcd2bin(tmp) - 1;
 	tmp = v3020_get_reg(chip, V3020_WEEK_DAY);
-	dt->tm_wday	= BCD2BIN(tmp);
+	dt->tm_wday	= bcd2bin(tmp);
 	tmp = v3020_get_reg(chip, V3020_YEAR);
-	dt->tm_year = BCD2BIN(tmp)+100;
+	dt->tm_year = bcd2bin(tmp)+100;
 
 #ifdef DEBUG
-	printk("\n%s : Read RTC values\n",__FUNCTION__);
+	printk("\n%s : Read RTC values\n",__func__);
 	printk("tm_hour: %i\n",dt->tm_hour);
 	printk("tm_min : %i\n",dt->tm_min);
 	printk("tm_sec : %i\n",dt->tm_sec);
@@ -121,7 +126,7 @@ static int v3020_set_time(struct device *dev, struct rtc_time *dt)
 	struct v3020 *chip = dev_get_drvdata(dev);
 
 #ifdef DEBUG
-	printk("\n%s : Setting RTC values\n",__FUNCTION__);
+	printk("\n%s : Setting RTC values\n",__func__);
 	printk("tm_sec : %i\n",dt->tm_sec);
 	printk("tm_min : %i\n",dt->tm_min);
 	printk("tm_hour: %i\n",dt->tm_hour);
@@ -131,13 +136,13 @@ static int v3020_set_time(struct device *dev, struct rtc_time *dt)
 #endif
 
 	/* Write all the values to ram... */
-	v3020_set_reg(chip, V3020_SECONDS, 	BIN2BCD(dt->tm_sec));
-	v3020_set_reg(chip, V3020_MINUTES, 	BIN2BCD(dt->tm_min));
-	v3020_set_reg(chip, V3020_HOURS, 	BIN2BCD(dt->tm_hour));
-	v3020_set_reg(chip, V3020_MONTH_DAY,	BIN2BCD(dt->tm_mday));
-	v3020_set_reg(chip, V3020_MONTH, 	BIN2BCD(dt->tm_mon));
-	v3020_set_reg(chip, V3020_WEEK_DAY, 	BIN2BCD(dt->tm_wday));
-	v3020_set_reg(chip, V3020_YEAR, 	BIN2BCD(dt->tm_year % 100));
+	v3020_set_reg(chip, V3020_SECONDS, 	bin2bcd(dt->tm_sec));
+	v3020_set_reg(chip, V3020_MINUTES, 	bin2bcd(dt->tm_min));
+	v3020_set_reg(chip, V3020_HOURS, 	bin2bcd(dt->tm_hour));
+	v3020_set_reg(chip, V3020_MONTH_DAY,	bin2bcd(dt->tm_mday));
+	v3020_set_reg(chip, V3020_MONTH,     bin2bcd(dt->tm_mon + 1));
+	v3020_set_reg(chip, V3020_WEEK_DAY, 	bin2bcd(dt->tm_wday));
+	v3020_set_reg(chip, V3020_YEAR, 	bin2bcd(dt->tm_year % 100));
 
 	/* ...and set the clock. */
 	v3020_set_reg(chip, V3020_CMD_RAM2CLOCK, 0);
@@ -259,3 +264,4 @@ module_exit(v3020_exit);
 MODULE_DESCRIPTION("V3020 RTC");
 MODULE_AUTHOR("Raphael Assenat");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("platform:v3020");

@@ -36,10 +36,8 @@
 
 #include <linux/ioport.h>
 #include <linux/interrupt.h>
-#include <sound/driver.h>
 #include <linux/init.h>
 #include <linux/slab.h>
-#include <linux/version.h>
 #include <sound/core.h>
 #include <sound/initval.h>
 #include <sound/pcm.h>
@@ -192,14 +190,16 @@ au1000_setup_dma_link(struct audio_stream *stream, unsigned int period_bytes,
 static void
 au1000_dma_stop(struct audio_stream *stream)
 {
-	snd_assert(stream->buffer, return);
+	if (snd_BUG_ON(!stream->buffer))
+		return;
 	disable_dma(stream->dma);
 }
 
 static void
 au1000_dma_start(struct audio_stream *stream)
 {
-	snd_assert(stream->buffer, return);
+	if (snd_BUG_ON(!stream->buffer))
+		return;
 
 	init_dma(stream->dma);
 	if (get_dma_active_buffer(stream->dma) == 0) {
@@ -498,8 +498,8 @@ snd_au1000_ac97_read(struct snd_ac97 *ac97, unsigned short reg)
 	int             i;
 
 	spin_lock(&au1000->ac97_lock);
-/* would rather use the interupt than this polling but it works and I can't
-get the interupt driven case to work efficiently */
+/* would rather use the interrupt than this polling but it works and I can't
+get the interrupt driven case to work efficiently */
 	for (i = 0; i < 0x5000; i++)
 		if (!(au1000->ac97_ioport->status & AC97C_CP))
 			break;
@@ -535,8 +535,8 @@ snd_au1000_ac97_write(struct snd_ac97 *ac97, unsigned short reg, unsigned short 
 	int i;
 
 	spin_lock(&au1000->ac97_lock);
-/* would rather use the interupt than this polling but it works and I can't
-get the interupt driven case to work efficiently */
+/* would rather use the interrupt than this polling but it works and I can't
+get the interrupt driven case to work efficiently */
 	for (i = 0; i < 0x5000; i++)
 		if (!(au1000->ac97_ioport->status & AC97C_CP))
 			break;

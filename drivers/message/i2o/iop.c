@@ -15,8 +15,8 @@
  *
  *	Fixes/additions:
  *		Philipp Rumpf
- *		Juha Siev‰nen <Juha.Sievanen@cs.Helsinki.FI>
- *		Auvo H‰kkinen <Auvo.Hakkinen@cs.Helsinki.FI>
+ *		Juha Siev√§nen <Juha.Sievanen@cs.Helsinki.FI>
+ *		Auvo H√§kkinen <Auvo.Hakkinen@cs.Helsinki.FI>
  *		Deepak Saxena <deepak@plexity.net>
  *		Boji T Kannanthanam <boji.t.kannanthanam@intel.com>
  *		Alan Cox <alan@redhat.com>:
@@ -49,7 +49,6 @@ static int i2o_hrt_get(struct i2o_controller *c);
 /**
  *	i2o_msg_get_wait - obtain an I2O message from the IOP
  *	@c: I2O controller
- *	@msg: pointer to a I2O message pointer
  *	@wait: how long to wait until timeout
  *
  *	This function waits up to wait seconds for a message slot to be
@@ -916,7 +915,7 @@ static int i2o_parse_hrt(struct i2o_controller *c)
  *	status block. The status block could then be accessed through
  *	c->status_block.
  *
- *	Returns 0 on sucess or negative error code on failure.
+ *	Returns 0 on success or negative error code on failure.
  */
 int i2o_status_get(struct i2o_controller *c)
 {
@@ -1004,7 +1003,7 @@ static int i2o_hrt_get(struct i2o_controller *c)
 
 		size = hrt->num_entries * hrt->entry_len << 2;
 		if (size > c->hrt.len) {
-			if (i2o_dma_realloc(dev, &c->hrt, size, GFP_KERNEL))
+			if (i2o_dma_realloc(dev, &c->hrt, size))
 				return -ENOMEM;
 			else
 				hrt = c->hrt.virt;
@@ -1067,7 +1066,7 @@ struct i2o_controller *i2o_iop_alloc(void)
 
 	INIT_LIST_HEAD(&c->devices);
 	spin_lock_init(&c->lock);
-	init_MUTEX(&c->lct_lock);
+	mutex_init(&c->lct_lock);
 
 	device_initialize(&c->device);
 

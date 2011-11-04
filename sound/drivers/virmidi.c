@@ -41,7 +41,6 @@
  * - Run application using a midi device (eg. /dev/snd/midiC1D0)
  */
 
-#include <sound/driver.h>
 #include <linux/init.h>
 #include <linux/wait.h>
 #include <linux/err.h>
@@ -145,7 +144,7 @@ static struct platform_driver snd_virmidi_driver = {
 	},
 };
 
-static void __init_or_module snd_virmidi_unregister_all(void)
+static void snd_virmidi_unregister_all(void)
 {
 	int i;
 

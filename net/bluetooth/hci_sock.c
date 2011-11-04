@@ -37,6 +37,7 @@
 #include <linux/skbuff.h>
 #include <linux/workqueue.h>
 #include <linux/interrupt.h>
+#include <linux/compat.h>
 #include <linux/socket.h>
 #include <linux/ioctl.h>
 #include <net/sock.h>
@@ -70,20 +71,20 @@ static struct hci_sec_filter hci_sec_filter = {
 	{
 		{ 0x0 },
 		/* OGF_LINK_CTL */
-		{ 0xbe000006, 0x00000001, 0x000000, 0x00 },
+		{ 0xbe000006, 0x00000001, 0x00000000, 0x00 },
 		/* OGF_LINK_POLICY */
-		{ 0x00005200, 0x00000000, 0x000000, 0x00 },
+		{ 0x00005200, 0x00000000, 0x00000000, 0x00 },
 		/* OGF_HOST_CTL */
-		{ 0xaab00200, 0x2b402aaa, 0x020154, 0x00 },
+		{ 0xaab00200, 0x2b402aaa, 0x05220154, 0x00 },
 		/* OGF_INFO_PARAM */
-		{ 0x000002be, 0x00000000, 0x000000, 0x00 },
+		{ 0x000002be, 0x00000000, 0x00000000, 0x00 },
 		/* OGF_STATUS_PARAM */
-		{ 0x000000ea, 0x00000000, 0x000000, 0x00 }
+		{ 0x000000ea, 0x00000000, 0x00000000, 0x00 }
 	}
 };
 
 static struct bt_sock_list hci_sk_list = {
-	.lock = RW_LOCK_UNLOCKED
+	.lock = __RW_LOCK_UNLOCKED(hci_sk_list.lock)
 };
 
 /* Send frame to RAW socket */
@@ -192,19 +193,11 @@ static inline int hci_sock_bound_ioctl(struct sock *sk, unsigned int cmd, unsign
 
 		return 0;
 
-	case HCISETSECMGR:
-		if (!capable(CAP_NET_ADMIN))
-			return -EACCES;
-
-		if (arg)
-			set_bit(HCI_SECMGR, &hdev->flags);
-		else
-			clear_bit(HCI_SECMGR, &hdev->flags);
-
-		return 0;
-
 	case HCIGETCONNINFO:
-		return hci_get_conn_info(hdev, (void __user *)arg);
+		return hci_get_conn_info(hdev, (void __user *) arg);
+
+	case HCIGETAUTHINFO:
+		return hci_get_auth_info(hdev, (void __user *) arg);
 
 	default:
 		if (hdev->ioctl)
@@ -216,7 +209,7 @@ static inline int hci_sock_bound_ioctl(struct sock *sk, unsigned int cmd, unsign
 static int hci_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 {
 	struct sock *sk = sock->sk;
-	void __user *argp = (void __user *)arg;
+	void __user *argp = (void __user *) arg;
 	int err;
 
 	BT_DBG("cmd %x arg %lx", cmd, arg);
@@ -342,9 +335,24 @@ static inline void hci_sock_cmsg(struct sock *sk, struct msghdr *msg, struct sk_
 
 	if (mask & HCI_CMSG_TSTAMP) {
 		struct timeval tv;
+		void *data;
+		int len;
 
 		skb_get_timestamp(skb, &tv);
-		put_cmsg(msg, SOL_HCI, HCI_CMSG_TSTAMP, sizeof(tv), &tv);
+
+		data = &tv;
+		len = sizeof(tv);
+#ifdef CONFIG_COMPAT
+		if (msg->msg_flags & MSG_CMSG_COMPAT) {
+			struct compat_timeval ctv;
+			ctv.tv_sec = tv.tv_sec;
+			ctv.tv_usec = tv.tv_usec;
+			data = &ctv;
+			len = sizeof(ctv);
+		}
+#endif
+
+		put_cmsg(msg, SOL_HCI, HCI_CMSG_TSTAMP, len, data);
 	}
 }
 
@@ -424,7 +432,7 @@ static int hci_sock_sendmsg(struct kiocb *iocb, struct socket *sock,
 	skb->dev = (void *) hdev;
 
 	if (bt_cb(skb)->pkt_type == HCI_COMMAND_PKT) {
-		u16 opcode = __le16_to_cpu(get_unaligned((__le16 *) skb->data));
+		u16 opcode = get_unaligned_le16(skb->data);
 		u16 ogf = hci_opcode_ogf(opcode);
 		u16 ocf = hci_opcode_ocf(opcode);
 
@@ -435,7 +443,7 @@ static int hci_sock_sendmsg(struct kiocb *iocb, struct socket *sock,
 			goto drop;
 		}
 
-		if (test_bit(HCI_RAW, &hdev->flags) || (ogf == OGF_VENDOR_CMD)) {
+		if (test_bit(HCI_RAW, &hdev->flags) || (ogf == 0x3f)) {
 			skb_queue_tail(&hdev->raw_q, skb);
 			hci_sched_tx(hdev);
 		} else {
@@ -618,7 +626,7 @@ static struct proto hci_sk_proto = {
 	.obj_size	= sizeof(struct hci_pinfo)
 };
 
-static int hci_sock_create(struct socket *sock, int protocol)
+static int hci_sock_create(struct net *net, struct socket *sock, int protocol)
 {
 	struct sock *sk;
 
@@ -629,7 +637,7 @@ static int hci_sock_create(struct socket *sock, int protocol)
 
 	sock->ops = &hci_sock_ops;
 
-	sk = sk_alloc(PF_BLUETOOTH, GFP_ATOMIC, &hci_sk_proto, 1);
+	sk = sk_alloc(net, PF_BLUETOOTH, GFP_ATOMIC, &hci_sk_proto);
 	if (!sk)
 		return -ENOMEM;
 
@@ -718,7 +726,7 @@ error:
 	return err;
 }
 
-int __exit hci_sock_cleanup(void)
+void __exit hci_sock_cleanup(void)
 {
 	if (bt_sock_unregister(BTPROTO_HCI) < 0)
 		BT_ERR("HCI socket unregistration failed");
@@ -726,6 +734,4 @@ int __exit hci_sock_cleanup(void)
 	hci_unregister_notifier(&hci_sock_nblock);
 
 	proto_unregister(&hci_sk_proto);
-
-	return 0;
 }

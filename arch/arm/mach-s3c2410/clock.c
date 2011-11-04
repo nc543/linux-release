@@ -31,19 +31,19 @@
 #include <linux/mutex.h>
 #include <linux/delay.h>
 #include <linux/serial_core.h>
+#include <linux/io.h>
 
 #include <asm/mach/map.h>
 
-#include <asm/hardware.h>
-#include <asm/io.h>
+#include <mach/hardware.h>
 
-#include <asm/arch/regs-serial.h>
-#include <asm/arch/regs-clock.h>
-#include <asm/arch/regs-gpio.h>
+#include <plat/regs-serial.h>
+#include <mach/regs-clock.h>
+#include <mach/regs-gpio.h>
 
-#include <asm/plat-s3c24xx/s3c2410.h>
-#include <asm/plat-s3c24xx/clock.h>
-#include <asm/plat-s3c24xx/cpu.h>
+#include <plat/s3c2410.h>
+#include <plat/clock.h>
+#include <plat/cpu.h>
 
 int s3c2410_clkcon_enable(struct clk *clk, int enable)
 {
@@ -238,7 +238,7 @@ int __init s3c2410_baseclk_add(void)
 	}
 
 	/* We must be careful disabling the clocks we are not intending to
-	 * be using at boot time, as subsytems such as the LCD which do
+	 * be using at boot time, as subsystems such as the LCD which do
 	 * their own DMA requests to the bus can cause the system to lockup
 	 * if they where in the middle of requesting bus access.
 	 *

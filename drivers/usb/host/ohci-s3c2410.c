@@ -8,7 +8,7 @@
  * USB Bus Glue for Samsung S3C2410
  *
  * Written by Christopher Hoover <ch@hpl.hp.com>
- * Based on fragments of previous driver by Rusell King et al.
+ * Based on fragments of previous driver by Russell King et al.
  *
  * Modified for S3C2410 from ohci-sa1111.c, ohci-omap.c and ohci-lh7a40.c
  *	by Ben Dooks, <ben@simtec.co.uk>
@@ -22,8 +22,8 @@
 #include <linux/platform_device.h>
 #include <linux/clk.h>
 
-#include <asm/hardware.h>
-#include <asm/arch/usb-control.h>
+#include <mach/hardware.h>
+#include <mach/usb-control.h>
 
 #define valid_port(idx) ((idx) == 1 || (idx) == 2)
 
@@ -358,7 +358,7 @@ static int usb_hcd_s3c2410_probe (const struct hc_driver *driver,
 	hcd->rsrc_len   = dev->resource[0].end - dev->resource[0].start + 1;
 
 	if (!request_mem_region(hcd->rsrc_start, hcd->rsrc_len, hcd_name)) {
-		dev_err(&dev->dev, "request_mem_region failed");
+		dev_err(&dev->dev, "request_mem_region failed\n");
 		retval = -EBUSY;
 		goto err_put;
 	}
@@ -466,7 +466,6 @@ static const struct hc_driver ohci_s3c2410_hc_driver = {
 	 */
 	.hub_status_data =	ohci_s3c2410_hub_status_data,
 	.hub_control =		ohci_s3c2410_hub_control,
-	.hub_irq_enable =	ohci_rhsc_enable,
 #ifdef	CONFIG_PM
 	.bus_suspend =		ohci_bus_suspend,
 	.bus_resume =		ohci_bus_resume,
@@ -501,3 +500,4 @@ static struct platform_driver ohci_hcd_s3c2410_driver = {
 	},
 };
 
+MODULE_ALIAS("platform:s3c2410-ohci");

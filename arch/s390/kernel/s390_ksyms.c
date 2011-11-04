@@ -25,14 +25,6 @@ EXPORT_SYMBOL(_oi_bitmap);
 EXPORT_SYMBOL(_ni_bitmap);
 EXPORT_SYMBOL(_zb_findmap);
 EXPORT_SYMBOL(_sb_findmap);
-EXPORT_SYMBOL(diag10);
-
-/*
- * semaphore ops
- */
-EXPORT_SYMBOL(__up);
-EXPORT_SYMBOL(__down);
-EXPORT_SYMBOL(__down_interruptible);
 
 /*
  * binfmt_elf loader 

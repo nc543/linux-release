@@ -11,7 +11,6 @@
  *  Modifications by Paul Mackerras (PowerMac) (paulus@cs.anu.edu.au)
  *  and Cort Dougan (PReP) (cort@cs.nmt.edu)
  *    Copyright (C) 1996 Paul Mackerras
- *  Amiga/APUS changes by Jesper Skov (jskov@cygnus.co.uk).
  *
  *  Derived from "arch/i386/mm/init.c"
  *    Copyright (C) 1991, 1992, 1993, 1994  Linus Torvalds
@@ -27,6 +26,8 @@
 #include <linux/mm.h>
 #include <linux/init.h>
 #include <linux/highmem.h>
+#include <linux/pagemap.h>
+
 #include <asm/tlbflush.h>
 #include <asm/tlb.h>
 
@@ -44,6 +45,7 @@ void flush_hash_entry(struct mm_struct *mm, pte_t *ptep, unsigned long addr)
 		flush_hash_pages(mm->context.id, addr, ptephys, 1);
 	}
 }
+EXPORT_SYMBOL(flush_hash_entry);
 
 /*
  * Called by ptep_set_access_flags, must flush on CPUs for which the

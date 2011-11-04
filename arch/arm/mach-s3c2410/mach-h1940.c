@@ -20,30 +20,30 @@
 #include <linux/sysdev.h>
 #include <linux/serial_core.h>
 #include <linux/platform_device.h>
+#include <linux/io.h>
 
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
 #include <asm/mach/irq.h>
 
-#include <asm/hardware.h>
-#include <asm/io.h>
+#include <mach/hardware.h>
 #include <asm/irq.h>
 #include <asm/mach-types.h>
 
-#include <asm/arch/regs-serial.h>
-#include <asm/arch/regs-lcd.h>
-#include <asm/arch/regs-gpio.h>
-#include <asm/arch/regs-clock.h>
+#include <plat/regs-serial.h>
+#include <mach/regs-lcd.h>
+#include <mach/regs-gpio.h>
+#include <mach/regs-clock.h>
 
-#include <asm/arch/h1940.h>
-#include <asm/arch/h1940-latch.h>
-#include <asm/arch/fb.h>
-#include <asm/arch/udc.h>
+#include <mach/h1940.h>
+#include <mach/h1940-latch.h>
+#include <mach/fb.h>
+#include <asm/plat-s3c24xx/udc.h>
 
-#include <asm/plat-s3c24xx/clock.h>
-#include <asm/plat-s3c24xx/devs.h>
-#include <asm/plat-s3c24xx/cpu.h>
-#include <asm/plat-s3c24xx/pm.h>
+#include <plat/clock.h>
+#include <plat/devs.h>
+#include <plat/cpu.h>
+#include <plat/pm.h>
 
 static struct map_desc h1940_iodesc[] __initdata = {
 	[0] = {
@@ -133,29 +133,31 @@ static struct s3c2410_udc_mach_info h1940_udc_cfg __initdata = {
 /**
  * Set lcd on or off
  **/
-static struct s3c2410fb_mach_info h1940_lcdcfg __initdata = {
-	.fixed_syncs=		1,
-	.regs={
-		.lcdcon1=	S3C2410_LCDCON1_TFT16BPP | \
-				S3C2410_LCDCON1_TFT | \
-				S3C2410_LCDCON1_CLKVAL(0x0C),
+static struct s3c2410fb_display h1940_lcd __initdata = {
+	.lcdcon5=	S3C2410_LCDCON5_FRM565 | \
+			S3C2410_LCDCON5_INVVLINE | \
+			S3C2410_LCDCON5_HWSWP,
 
-		.lcdcon2=	S3C2410_LCDCON2_VBPD(7) | \
-				S3C2410_LCDCON2_LINEVAL(319) | \
-				S3C2410_LCDCON2_VFPD(6) | \
-				S3C2410_LCDCON2_VSPW(0),
+	.type =		S3C2410_LCDCON1_TFT,
+	.width =	240,
+	.height =	320,
+	.pixclock =	260000,
+	.xres =		240,
+	.yres =		320,
+	.bpp =		16,
+	.left_margin =	20,
+	.right_margin =	8,
+	.hsync_len =	4,
+	.upper_margin =	8,
+	.lower_margin = 7,
+	.vsync_len =	1,
+};
 
-		.lcdcon3=	S3C2410_LCDCON3_HBPD(19) | \
-				S3C2410_LCDCON3_HOZVAL(239) | \
-				S3C2410_LCDCON3_HFPD(7),
+static struct s3c2410fb_mach_info h1940_fb_info __initdata = {
+	.displays = &h1940_lcd,
+	.num_displays = 1,
+	.default_display = 0,
 
-		.lcdcon4=	S3C2410_LCDCON4_MVAL(0) | \
-				S3C2410_LCDCON4_HSPW(3),
-
-		.lcdcon5=	S3C2410_LCDCON5_FRM565 | \
-				S3C2410_LCDCON5_INVVLINE | \
-				S3C2410_LCDCON5_HWSWP,
-	},
 	.lpcsel=	0x02,
 	.gpccon=	0xaa940659,
 	.gpccon_mask=	0xffffffff,
@@ -165,12 +167,6 @@ static struct s3c2410fb_mach_info h1940_lcdcfg __initdata = {
 	.gpdcon_mask=	0xffffffff,
 	.gpdup=		0x0000faff,
 	.gpdup_mask=	0xffffffff,
-
-	.width=		240,
-	.height=	320,
-	.xres=		{240,240,240},
-	.yres=		{320,320,320},
-	.bpp=		{16,16,16},
 };
 
 static struct platform_device s3c_device_leds = {
@@ -217,7 +213,7 @@ static void __init h1940_init(void)
 {
 	u32 tmp;
 
-	s3c24xx_fb_set_platdata(&h1940_lcdcfg);
+	s3c24xx_fb_set_platdata(&h1940_fb_info);
  	s3c24xx_udc_set_platdata(&h1940_udc_cfg);
 
 	/* Turn off suspend on both USB ports, and switch the

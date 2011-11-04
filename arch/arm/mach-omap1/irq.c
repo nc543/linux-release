@@ -5,7 +5,7 @@
  *
  * Copyright (C) 2004 Nokia Corporation
  * Written by Tony Lindgren <tony@atomide.com>
- * Major cleanups by Juha Yrjölä <juha.yrjola@nokia.com>
+ * Major cleanups by Juha YrjÃ¶lÃ¤ <juha.yrjola@nokia.com>
  *
  * Completely re-written to support various OMAP chips with bank specific
  * interrupt handlers.
@@ -40,14 +40,13 @@
 #include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/interrupt.h>
+#include <linux/io.h>
 
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/irq.h>
 #include <asm/mach/irq.h>
-#include <asm/arch/gpio.h>
-#include <asm/arch/cpu.h>
-
-#include <asm/io.h>
+#include <mach/gpio.h>
+#include <mach/cpu.h>
 
 #define IRQ_BANK(irq) ((irq) >> 5)
 #define IRQ_BIT(irq)  ((irq) & 0x1f)

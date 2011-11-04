@@ -15,15 +15,15 @@
 #include <linux/init.h>
 #include <linux/device.h>
 #include <linux/serial_8250.h>
+#include <linux/io.h>
 
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
 #include <asm/mach/irq.h>
 #include <asm/mach/time.h>
 
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/hardware/iomd.h>
-#include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/mach-types.h>
 
@@ -193,7 +193,11 @@ static struct irq_chip clps7500_no_chip = {
 	.unmask	= cl7500_no_action,
 };
 
-static struct irqaction irq_isa = { no_action, 0, CPU_MASK_NONE, "isa", NULL, NULL };
+static struct irqaction irq_isa = {
+	.handler = no_action,
+	.mask = CPU_MASK_NONE,
+	.name = "isa",
+};
 
 static void __init clps7500_init_irq(void)
 {
@@ -271,9 +275,9 @@ static struct map_desc cl7500_io_desc[] __initdata = {
 		.length		= ISA_SIZE,
 		.type		= MT_DEVICE
 	}, {	/* Flash	*/
-		.virtual	= FLASH_BASE,
-		.pfn		= __phys_to_pfn(FLASH_START),
-		.length		= FLASH_SIZE,
+		.virtual	= CLPS7500_FLASH_BASE,
+		.pfn		= __phys_to_pfn(CLPS7500_FLASH_START),
+		.length		= CLPS7500_FLASH_SIZE,
 		.type		= MT_DEVICE
 	}, {	/* LED		*/
 		.virtual	= LED_BASE,
@@ -294,8 +298,6 @@ extern unsigned long ioc_timer_gettimeoffset(void);
 static irqreturn_t
 clps7500_timer_interrupt(int irq, void *dev_id)
 {
-	write_seqlock(&xtime_lock);
-
 	timer_tick();
 
 	/* Why not using do_leds interface?? */
@@ -308,8 +310,6 @@ clps7500_timer_interrupt(int irq, void *dev_id)
 			*((volatile unsigned int *)LED_ADDRESS) = state;
 		}
 	}
-
-	write_sequnlock(&xtime_lock);
 
 	return IRQ_HANDLED;
 }

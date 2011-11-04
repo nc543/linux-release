@@ -22,48 +22,20 @@
 #include <linux/errno.h>
 #include <linux/pm.h>
 #include <linux/suspend.h>
-#include <linux/acpi.h>
-#include <linux/pci-acpi.h>
 #include <linux/delay.h>
 #include "aerdrv.h"
 
 static int forceload;
 module_param(forceload, bool, 0);
 
-#define PCI_CFG_SPACE_SIZE	(0x100)
-int pci_find_aer_capability(struct pci_dev *dev)
-{
-	int pos;
-	u32 reg32 = 0;
-
-	/* Check if it's a pci-express device */
-	pos = pci_find_capability(dev, PCI_CAP_ID_EXP);
-	if (!pos)
-		return 0;
-
-	/* Check if it supports pci-express AER */
-	pos = PCI_CFG_SPACE_SIZE;
-	while (pos) {
-		if (pci_read_config_dword(dev, pos, &reg32))
-			return 0;
-
-		/* some broken boards return ~0 */
-		if (reg32 == 0xffffffff)
-			return 0;
-
-		if (PCI_EXT_CAP_ID(reg32) == PCI_EXT_CAP_ID_ERR)
-			break;
-
-		pos = reg32 >> 20;
-	}
-
-	return pos;
-}
-
 int pci_enable_pcie_error_reporting(struct pci_dev *dev)
 {
 	u16 reg16 = 0;
 	int pos;
+
+	pos = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_ERR);
+	if (!pos)
+		return -EIO;
 
 	pos = pci_find_capability(dev, PCI_CAP_ID_EXP);
 	if (!pos)
@@ -104,7 +76,7 @@ int pci_cleanup_aer_uncorrect_error_status(struct pci_dev *dev)
 	int pos;
 	u32 status, mask;
 
-	pos = pci_find_aer_capability(dev);
+	pos = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_ERR);
 	if (!pos)
 		return -EIO;
 
@@ -118,6 +90,23 @@ int pci_cleanup_aer_uncorrect_error_status(struct pci_dev *dev)
 
 	return 0;
 }
+
+#if 0
+int pci_cleanup_aer_correct_error_status(struct pci_dev *dev)
+{
+	int pos;
+	u32 status;
+
+	pos = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_ERR);
+	if (!pos)
+		return -EIO;
+
+	pci_read_config_dword(dev, pos + PCI_ERR_COR_STATUS, &status);
+	pci_write_config_dword(dev, pos + PCI_ERR_COR_STATUS, status);
+
+	return 0;
+}
+#endif  /*  0  */
 
 static int find_device_iter(struct device *device, void *data)
 {
@@ -155,11 +144,11 @@ static int find_device_iter(struct device *device, void *data)
 
 /**
  * find_source_device - search through device hierarchy for source device
- * @p_dev: pointer to Root Port pci_dev data structure
+ * @parent: pointer to Root Port pci_dev data structure
  * @id: device ID of agent who sends an error message to this Root Port
  *
  * Invoked when error is detected at the Root Port.
- **/
+ */
 static struct device* find_source_device(struct pci_dev *parent, u16 id)
 {
 	struct pci_dev *dev = parent;
@@ -206,9 +195,9 @@ static void report_error_detected(struct pci_dev *dev, void *data)
 			 * of a driver for this device is unaware of
 			 * its hw state.
 			 */
-			printk(KERN_DEBUG "Device ID[%s] has %s\n",
-					dev->dev.bus_id, (dev->driver) ?
-					"no AER-aware driver" : "no driver");
+			dev_printk(KERN_DEBUG, &dev->dev, "device has %s\n",
+				   dev->driver ?
+				   "no AER-aware driver" : "no driver");
 		}
 		return;
 	}
@@ -263,7 +252,7 @@ static void report_resume(struct pci_dev *dev, void *data)
 
 	if (!dev->driver ||
 		!dev->driver->err_handler ||
-		!dev->driver->err_handler->slot_reset)
+		!dev->driver->err_handler->resume)
 		return;
 
 	err_handler = dev->driver->err_handler;
@@ -273,14 +262,15 @@ static void report_resume(struct pci_dev *dev, void *data)
 
 /**
  * broadcast_error_message - handle message broadcast to downstream drivers
- * @device: pointer to from where in a hierarchy message is broadcasted down
- * @api: callback to be broadcasted
+ * @dev: pointer to from where in a hierarchy message is broadcasted down
  * @state: error state
+ * @error_mesg: message to print
+ * @cb: callback to be broadcasted
  *
  * Invoked during error recovery process. Once being invoked, the content
  * of error severity will be broadcasted to all downstream drivers in a
  * hierarchy in question.
- **/
+ */
 static pci_ers_result_t broadcast_error_message(struct pci_dev *dev,
 	enum pci_channel_state state,
 	char *error_mesg,
@@ -288,7 +278,7 @@ static pci_ers_result_t broadcast_error_message(struct pci_dev *dev,
 {
 	struct aer_broadcast_data result_data;
 
-	printk(KERN_DEBUG "Broadcast %s message\n", error_mesg);
+	dev_printk(KERN_DEBUG, &dev->dev, "broadcast %s message\n", error_mesg);
 	result_data.state = state;
 	if (cb == report_error_detected)
 		result_data.result = PCI_ERS_RESULT_CAN_RECOVER;
@@ -388,18 +378,16 @@ static pci_ers_result_t reset_link(struct pcie_device *aerdev,
 			data.aer_driver =
 				to_service_driver(aerdev->device.driver);
 		} else {
-			printk(KERN_DEBUG "No link-reset support to Device ID"
-				"[%s]\n",
-				dev->dev.bus_id);
+			dev_printk(KERN_DEBUG, &dev->dev, "no link-reset "
+				   "support\n");
 			return PCI_ERS_RESULT_DISCONNECT;
 		}
 	}
 
 	status = data.aer_driver->reset_link(udev);
 	if (status != PCI_ERS_RESULT_RECOVERED) {
-		printk(KERN_DEBUG "Link reset at upstream Device ID"
-			"[%s] failed\n",
-			udev->dev.bus_id);
+		dev_printk(KERN_DEBUG, &dev->dev, "link reset at upstream "
+			   "device %s failed\n", pci_name(udev));
 		return PCI_ERS_RESULT_DISCONNECT;
 	}
 
@@ -415,7 +403,7 @@ static pci_ers_result_t reset_link(struct pcie_device *aerdev,
  * Invoked when an error is nonfatal/fatal. Once being invoked, broadcast
  * error detected message to all downstream drivers within a hierarchy in
  * question and return the returned code.
- **/
+ */
 static pci_ers_result_t do_recovery(struct pcie_device *aerdev,
 		struct pci_dev *dev,
 		int severity)
@@ -475,7 +463,7 @@ static pci_ers_result_t do_recovery(struct pcie_device *aerdev,
  * @info: comprehensive error information
  *
  * Invoked when an error being detected by Root Port.
- **/
+ */
 static void handle_error_source(struct pcie_device * aerdev,
 	struct pci_dev *dev,
 	struct aer_err_info info)
@@ -488,17 +476,19 @@ static void handle_error_source(struct pcie_device * aerdev,
 		 * Correctable error does not need software intevention.
 		 * No need to go through error recovery process.
 		 */
-		pos = pci_find_aer_capability(dev);
+		pos = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_ERR);
 		if (pos)
 			pci_write_config_dword(dev, pos + PCI_ERR_COR_STATUS,
 					info.status);
 	} else {
 		status = do_recovery(aerdev, dev, info.severity);
 		if (status == PCI_ERS_RESULT_RECOVERED) {
-			printk(KERN_DEBUG "AER driver successfully recovered\n");
+			dev_printk(KERN_DEBUG, &dev->dev, "AER driver "
+				   "successfully recovered\n");
 		} else {
 			/* TODO: Should kernel panic here? */
-			printk(KERN_DEBUG "AER driver didn't recover\n");
+			dev_printk(KERN_DEBUG, &dev->dev, "AER driver didn't "
+				   "recover\n");
 		}
 	}
 }
@@ -508,7 +498,7 @@ static void handle_error_source(struct pcie_device * aerdev,
  * @rpc: pointer to a Root Port data structure
  *
  * Invoked when PCIE bus loads AER service driver.
- **/
+ */
 void aer_enable_rootport(struct aer_rpc *rpc)
 {
 	struct pci_dev *pdev = rpc->rpd->port;
@@ -526,7 +516,7 @@ void aer_enable_rootport(struct aer_rpc *rpc)
 	reg16 &= ~(SYSTEM_ERROR_INTR_ON_MESG_MASK);
 	pci_write_config_word(pdev, pos + PCI_EXP_RTCTL, reg16);
 
-	aer_pos = pci_find_aer_capability(pdev);
+	aer_pos = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_ERR);
 	/* Clear error status */
 	pci_read_config_dword(pdev, aer_pos + PCI_ERR_ROOT_STATUS, &reg32);
 	pci_write_config_dword(pdev, aer_pos + PCI_ERR_ROOT_STATUS, reg32);
@@ -556,14 +546,14 @@ void aer_enable_rootport(struct aer_rpc *rpc)
  * @rpc: pointer to a Root Port data structure
  *
  * Invoked when PCIE bus unloads AER service driver.
- **/
+ */
 static void disable_root_aer(struct aer_rpc *rpc)
 {
 	struct pci_dev *pdev = rpc->rpd->port;
 	u32 reg32;
 	int pos;
 
-	pos = pci_find_aer_capability(pdev);
+	pos = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_ERR);
 	/* Disable Root's interrupt in response to error messages */
 	pci_write_config_dword(pdev, pos + PCI_ERR_ROOT_COMMAND, 0);
 
@@ -577,7 +567,7 @@ static void disable_root_aer(struct aer_rpc *rpc)
  * @rpc: pointer to the root port which holds an error
  *
  * Invoked by DPC handler to consume an error.
- **/
+ */
 static struct aer_err_source* get_e_source(struct aer_rpc *rpc)
 {
 	struct aer_err_source *e_source;
@@ -602,7 +592,7 @@ static int get_device_error_info(struct pci_dev *dev, struct aer_err_info *info)
 {
 	int pos;
 
-	pos = pci_find_aer_capability(dev);
+	pos = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_ERR);
 
 	/* The device might not support AER */
 	if (!pos)
@@ -642,7 +632,7 @@ static int get_device_error_info(struct pci_dev *dev, struct aer_err_info *info)
  * aer_isr_one_error - consume an error detected by root port
  * @p_device: pointer to error root port service device
  * @e_src: pointer to an error source
- **/
+ */
 static void aer_isr_one_error(struct pcie_device *p_device,
 		struct aer_err_source *e_src)
 {
@@ -675,7 +665,7 @@ static void aer_isr_one_error(struct pcie_device *p_device,
 			e_info.flags |= AER_MULTI_ERROR_VALID_FLAG;
 		if (!(s_device = find_source_device(p_device->port, id))) {
 			printk(KERN_DEBUG "%s->can't find device of ID%04x\n",
-				__FUNCTION__, id);
+				__func__, id);
 			continue;
 		}
 		if (get_device_error_info(to_pci_dev(s_device), &e_info) ==
@@ -693,7 +683,7 @@ static void aer_isr_one_error(struct pcie_device *p_device,
  * @work: definition of this work item
  *
  * Invoked, as DPC, when root port records new detected error
- **/
+ */
 void aer_isr(struct work_struct *work)
 {
 	struct aer_rpc *rpc = container_of(work, struct aer_rpc, dpc_handler);
@@ -716,7 +706,7 @@ void aer_isr(struct work_struct *work)
  * @rpc: pointer to a root port device being deleted
  *
  * Invoked when AER service unloaded on a specific Root Port
- **/
+ */
 void aer_delete_rootport(struct aer_rpc *rpc)
 {
 	/* Disable root port AER itself */
@@ -730,28 +720,15 @@ void aer_delete_rootport(struct aer_rpc *rpc)
  * @dev: pointer to AER pcie device
  *
  * Invoked when AER service driver is loaded.
- **/
+ */
 int aer_init(struct pcie_device *dev)
 {
-	int status;
-
-	/* Run _OSC Method */
-	status = aer_osc_setup(dev->port);
-
-	if(status != OSC_METHOD_RUN_SUCCESS) {
-		printk(KERN_DEBUG "%s: AER service init fails - %s\n",
-		__FUNCTION__,
-		(status == OSC_METHOD_NOT_SUPPORTED) ?
-			"No ACPI _OSC support" : "Run ACPI _OSC fails");
-
-		if (!forceload)
-			return status;
-	}
+	if (aer_osc_setup(dev) && !forceload)
+		return -ENXIO;
 
 	return AER_SUCCESS;
 }
 
-EXPORT_SYMBOL_GPL(pci_find_aer_capability);
 EXPORT_SYMBOL_GPL(pci_enable_pcie_error_reporting);
 EXPORT_SYMBOL_GPL(pci_disable_pcie_error_reporting);
 EXPORT_SYMBOL_GPL(pci_cleanup_aer_uncorrect_error_status);

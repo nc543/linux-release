@@ -5,8 +5,6 @@
  *	Authors:
  *	Lennert Buytenhek		<buytenh@gnu.org>
  *
- *	$Id: br_input.c,v 1.10 2001/12/24 04:50:20 davem Exp $
- *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
  *	as published by the Free Software Foundation; either version
@@ -24,13 +22,13 @@ const u8 br_group_address[ETH_ALEN] = { 0x01, 0x80, 0xc2, 0x00, 0x00, 0x00 };
 
 static void br_pass_frame_up(struct net_bridge *br, struct sk_buff *skb)
 {
-	struct net_device *indev;
+	struct net_device *indev, *brdev = br->dev;
 
-	br->statistics.rx_packets++;
-	br->statistics.rx_bytes += skb->len;
+	brdev->stats.rx_packets++;
+	brdev->stats.rx_bytes += skb->len;
 
 	indev = skb->dev;
-	skb->dev = br->dev;
+	skb->dev = brdev;
 
 	NF_HOOK(PF_BRIDGE, NF_BR_LOCAL_IN, skb, indev, NULL,
 		netif_receive_skb);
@@ -43,7 +41,7 @@ int br_handle_frame_finish(struct sk_buff *skb)
 	struct net_bridge_port *p = rcu_dereference(skb->dev->br_port);
 	struct net_bridge *br;
 	struct net_bridge_fdb_entry *dst;
-	int passedup = 0;
+	struct sk_buff *skb2;
 
 	if (!p || p->state == BR_STATE_DISABLED)
 		goto drop;
@@ -55,39 +53,35 @@ int br_handle_frame_finish(struct sk_buff *skb)
 	if (p->state == BR_STATE_LEARNING)
 		goto drop;
 
-	if (br->dev->flags & IFF_PROMISC) {
-		struct sk_buff *skb2;
+	/* The packet skb2 goes to the local host (NULL to skip). */
+	skb2 = NULL;
 
-		skb2 = skb_clone(skb, GFP_ATOMIC);
-		if (skb2 != NULL) {
-			passedup = 1;
-			br_pass_frame_up(br, skb2);
-		}
-	}
+	if (br->dev->flags & IFF_PROMISC)
+		skb2 = skb;
+
+	dst = NULL;
 
 	if (is_multicast_ether_addr(dest)) {
-		br->statistics.multicast++;
-		br_flood_forward(br, skb, !passedup);
-		if (!passedup)
-			br_pass_frame_up(br, skb);
-		goto out;
+		br->dev->stats.multicast++;
+		skb2 = skb;
+	} else if ((dst = __br_fdb_get(br, dest)) && dst->is_local) {
+		skb2 = skb;
+		/* Do not forward the packet since it's local. */
+		skb = NULL;
 	}
 
-	dst = __br_fdb_get(br, dest);
-	if (dst != NULL && dst->is_local) {
-		if (!passedup)
-			br_pass_frame_up(br, skb);
+	if (skb2 == skb)
+		skb2 = skb_clone(skb, GFP_ATOMIC);
+
+	if (skb2)
+		br_pass_frame_up(br, skb2);
+
+	if (skb) {
+		if (dst)
+			br_forward(dst->dst, skb);
 		else
-			kfree_skb(skb);
-		goto out;
+			br_flood_forward(br, skb);
 	}
-
-	if (dst != NULL) {
-		br_forward(dst->dst, skb);
-		goto out;
-	}
-
-	br_flood_forward(br, skb, 0);
 
 out:
 	return 0;
@@ -101,9 +95,8 @@ static int br_handle_local_finish(struct sk_buff *skb)
 {
 	struct net_bridge_port *p = rcu_dereference(skb->dev->br_port);
 
-	if (p && p->state != BR_STATE_DISABLED)
+	if (p)
 		br_fdb_update(p->br, p, eth_hdr(skb)->h_source);
-
 	return 0;	 /* process further */
 }
 
@@ -112,9 +105,9 @@ static int br_handle_local_finish(struct sk_buff *skb)
  */
 static inline int is_link_local(const unsigned char *dest)
 {
-	const u16 *a = (const u16 *) dest;
-	static const u16 *const b = (const u16 *const ) br_group_address;
-	static const u16 m = __constant_cpu_to_be16(0xfff0);
+	__be16 *a = (__be16 *)dest;
+	static const __be16 *b = (const __be16 *)br_group_address;
+	static const __be16 m = cpu_to_be16(0xfff0);
 
 	return ((a[0] ^ b[0]) | (a[1] ^ b[1]) | ((a[2] ^ b[2]) & m)) == 0;
 }
@@ -127,30 +120,32 @@ static inline int is_link_local(const unsigned char *dest)
 struct sk_buff *br_handle_frame(struct net_bridge_port *p, struct sk_buff *skb)
 {
 	const unsigned char *dest = eth_hdr(skb)->h_dest;
+	int (*rhook)(struct sk_buff *skb);
 
 	if (!is_valid_ether_addr(eth_hdr(skb)->h_source))
 		goto drop;
+
+	skb = skb_share_check(skb, GFP_ATOMIC);
+	if (!skb)
+		return NULL;
 
 	if (unlikely(is_link_local(dest))) {
 		/* Pause frames shouldn't be passed up by driver anyway */
 		if (skb->protocol == htons(ETH_P_PAUSE))
 			goto drop;
 
-		/* Process STP BPDU's through normal netif_receive_skb() path */
-		if (p->br->stp_enabled != BR_NO_STP) {
-			if (NF_HOOK(PF_BRIDGE, NF_BR_LOCAL_IN, skb, skb->dev,
-				    NULL, br_handle_local_finish))
-				return NULL;
-			else
-				return skb;
-		}
+		if (NF_HOOK(PF_BRIDGE, NF_BR_LOCAL_IN, skb, skb->dev,
+			    NULL, br_handle_local_finish))
+			return NULL;	/* frame consumed by filter */
+		else
+			return skb;	/* continue processing */
 	}
 
 	switch (p->state) {
 	case BR_STATE_FORWARDING:
-
-		if (br_should_route_hook) {
-			if (br_should_route_hook(&skb))
+		rhook = rcu_dereference(br_should_route_hook);
+		if (rhook != NULL) {
+			if (rhook(skb))
 				return skb;
 			dest = eth_hdr(skb)->h_dest;
 		}

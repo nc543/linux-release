@@ -96,6 +96,11 @@ errors=remount-ro(*)	Remount the filesystem read-only on an error.
 errors=continue		Keep going on a filesystem error.
 errors=panic		Panic and halt the machine if an error occurs.
 
+data_err=ignore(*)	Just print an error message if an error occurs
+			in a file data buffer in ordered mode.
+data_err=abort		Abort the journal if an error occurs in a file
+			data buffer in ordered mode.
+
 grpid			Give objects the same group ID as their creator.
 bsdgroups
 
@@ -130,12 +135,12 @@ Device layer.
 
 Journaling Block Device layer
 -----------------------------
-The Journaling Block Device layer (JBD) isn't ext3 specific.  It was design to
-add journaling capabilities on a block device.  The ext3 filesystem code will
-inform the JBD of modifications it is performing (called a transaction).  The
-journal supports the transactions start and stop, and in case of crash, the
-journal can replayed the transactions to put the partition back in a
-consistent state fast.
+The Journaling Block Device layer (JBD) isn't ext3 specific.  It was designed
+to add journaling capabilities to a block device.  The ext3 filesystem code
+will inform the JBD of modifications it is performing (called a transaction).
+The journal supports the transactions start and stop, and in case of a crash,
+the journal can replay the transactions to quickly put the partition back into
+a consistent state.
 
 Handles represent a single atomic update to a filesystem.  JBD can handle an
 external journal on a block device.
@@ -164,7 +169,7 @@ written to the journal first, and then to its final location.
 In the event of a crash, the journal can be replayed, bringing both data and
 metadata into a consistent state.  This mode is the slowest except when data
 needs to be read from and written to disk at the same time where it
-outperforms all others modes.
+outperforms all other modes.
 
 Compatibility
 -------------
@@ -193,6 +198,5 @@ kernel source:	<file:fs/ext3/>
 programs: 	http://e2fsprogs.sourceforge.net/
 		http://ext2resize.sourceforge.net
 
-useful links:	http://www.zip.com.au/~akpm/linux/ext3/ext3-usage.html
-		http://www-106.ibm.com/developerworks/linux/library/l-fs7/
+useful links:	http://www-106.ibm.com/developerworks/linux/library/l-fs7/
 		http://www-106.ibm.com/developerworks/linux/library/l-fs8/

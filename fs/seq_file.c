@@ -25,6 +25,7 @@
  *	into the buffer.  In case of error ->start() and ->next() return
  *	ERR_PTR(error).  In the end of sequence they return %NULL. ->show()
  *	returns 0 in case of success and negative number in case of error.
+ *	Returning SEQ_SKIP means "discard this element and move on".
  */
 int seq_open(struct file *file, const struct seq_operations *op)
 {
@@ -107,15 +108,22 @@ ssize_t seq_read(struct file *file, char __user *buf, size_t size, loff_t *ppos)
 			goto Done;
 	}
 	/* we need at least one record in buffer */
+	pos = m->index;
+	p = m->op->start(m, &pos);
 	while (1) {
-		pos = m->index;
-		p = m->op->start(m, &pos);
 		err = PTR_ERR(p);
 		if (!p || IS_ERR(p))
 			break;
 		err = m->op->show(m, p);
-		if (err)
+		if (err < 0)
 			break;
+		if (unlikely(err))
+			m->count = 0;
+		if (unlikely(!m->count)) {
+			p = m->op->next(m, p, &pos);
+			m->index = pos;
+			continue;
+		}
 		if (m->count < m->size)
 			goto Fill;
 		m->op->stop(m, p);
@@ -125,6 +133,8 @@ ssize_t seq_read(struct file *file, char __user *buf, size_t size, loff_t *ppos)
 			goto Enomem;
 		m->count = 0;
 		m->version = 0;
+		pos = m->index;
+		p = m->op->start(m, &pos);
 	}
 	m->op->stop(m, p);
 	m->count = 0;
@@ -140,9 +150,10 @@ Fill:
 			break;
 		}
 		err = m->op->show(m, p);
-		if (err || m->count == m->size) {
+		if (m->count == m->size || err) {
 			m->count = offs;
-			break;
+			if (likely(err <= 0))
+				break;
 		}
 		pos = next;
 	}
@@ -177,42 +188,50 @@ EXPORT_SYMBOL(seq_read);
 
 static int traverse(struct seq_file *m, loff_t offset)
 {
-	loff_t pos = 0;
+	loff_t pos = 0, index;
 	int error = 0;
 	void *p;
 
 	m->version = 0;
-	m->index = 0;
+	index = 0;
 	m->count = m->from = 0;
-	if (!offset)
+	if (!offset) {
+		m->index = index;
 		return 0;
+	}
 	if (!m->buf) {
 		m->buf = kmalloc(m->size = PAGE_SIZE, GFP_KERNEL);
 		if (!m->buf)
 			return -ENOMEM;
 	}
-	p = m->op->start(m, &m->index);
+	p = m->op->start(m, &index);
 	while (p) {
 		error = PTR_ERR(p);
 		if (IS_ERR(p))
 			break;
 		error = m->op->show(m, p);
-		if (error)
+		if (error < 0)
 			break;
+		if (unlikely(error)) {
+			error = 0;
+			m->count = 0;
+		}
 		if (m->count == m->size)
 			goto Eoverflow;
 		if (pos + m->count > offset) {
 			m->from = offset - pos;
 			m->count -= m->from;
+			m->index = index;
 			break;
 		}
 		pos += m->count;
 		m->count = 0;
 		if (pos == offset) {
-			m->index++;
+			index++;
+			m->index = index;
 			break;
 		}
-		p = m->op->next(m, p, &m->index);
+		p = m->op->next(m, p, &index);
 	}
 	m->op->stop(m, p);
 	return error;
@@ -235,7 +254,7 @@ Eoverflow:
 loff_t seq_lseek(struct file *file, loff_t offset, int origin)
 {
 	struct seq_file *m = (struct seq_file *)file->private_data;
-	long long retval = -EINVAL;
+	loff_t retval = -EINVAL;
 
 	mutex_lock(&m->lock);
 	m->version = file->f_version;
@@ -260,8 +279,8 @@ loff_t seq_lseek(struct file *file, loff_t offset, int origin)
 				}
 			}
 	}
-	mutex_unlock(&m->lock);
 	file->f_version = m->version;
+	mutex_unlock(&m->lock);
 	return retval;
 }
 EXPORT_SYMBOL(seq_lseek);
@@ -338,30 +357,40 @@ int seq_printf(struct seq_file *m, const char *f, ...)
 }
 EXPORT_SYMBOL(seq_printf);
 
-int seq_path(struct seq_file *m,
-	     struct vfsmount *mnt, struct dentry *dentry,
-	     char *esc)
+static char *mangle_path(char *s, char *p, char *esc)
+{
+	while (s <= p) {
+		char c = *p++;
+		if (!c) {
+			return s;
+		} else if (!strchr(esc, c)) {
+			*s++ = c;
+		} else if (s + 4 > p) {
+			break;
+		} else {
+			*s++ = '\\';
+			*s++ = '0' + ((c & 0300) >> 6);
+			*s++ = '0' + ((c & 070) >> 3);
+			*s++ = '0' + (c & 07);
+		}
+	}
+	return NULL;
+}
+
+/*
+ * return the absolute path of 'dentry' residing in mount 'mnt'.
+ */
+int seq_path(struct seq_file *m, struct path *path, char *esc)
 {
 	if (m->count < m->size) {
 		char *s = m->buf + m->count;
-		char *p = d_path(dentry, mnt, s, m->size - m->count);
+		char *p = d_path(path, s, m->size - m->count);
 		if (!IS_ERR(p)) {
-			while (s <= p) {
-				char c = *p++;
-				if (!c) {
-					p = m->buf + m->count;
-					m->count = s - m->buf;
-					return s - p;
-				} else if (!strchr(esc, c)) {
-					*s++ = c;
-				} else if (s + 4 > p) {
-					break;
-				} else {
-					*s++ = '\\';
-					*s++ = '0' + ((c & 0300) >> 6);
-					*s++ = '0' + ((c & 070) >> 3);
-					*s++ = '0' + (c & 07);
-				}
+			s = mangle_path(s, p, esc);
+			if (s) {
+				p = m->buf + m->count;
+				m->count = s - m->buf;
+				return s - p;
 			}
 		}
 	}
@@ -369,6 +398,88 @@ int seq_path(struct seq_file *m,
 	return -1;
 }
 EXPORT_SYMBOL(seq_path);
+
+/*
+ * Same as seq_path, but relative to supplied root.
+ *
+ * root may be changed, see __d_path().
+ */
+int seq_path_root(struct seq_file *m, struct path *path, struct path *root,
+		  char *esc)
+{
+	int err = -ENAMETOOLONG;
+	if (m->count < m->size) {
+		char *s = m->buf + m->count;
+		char *p;
+
+		spin_lock(&dcache_lock);
+		p = __d_path(path, root, s, m->size - m->count);
+		spin_unlock(&dcache_lock);
+		err = PTR_ERR(p);
+		if (!IS_ERR(p)) {
+			s = mangle_path(s, p, esc);
+			if (s) {
+				p = m->buf + m->count;
+				m->count = s - m->buf;
+				return 0;
+			}
+		}
+	}
+	m->count = m->size;
+	return err;
+}
+
+/*
+ * returns the path of the 'dentry' from the root of its filesystem.
+ */
+int seq_dentry(struct seq_file *m, struct dentry *dentry, char *esc)
+{
+	if (m->count < m->size) {
+		char *s = m->buf + m->count;
+		char *p = dentry_path(dentry, s, m->size - m->count);
+		if (!IS_ERR(p)) {
+			s = mangle_path(s, p, esc);
+			if (s) {
+				p = m->buf + m->count;
+				m->count = s - m->buf;
+				return s - p;
+			}
+		}
+	}
+	m->count = m->size;
+	return -1;
+}
+
+int seq_bitmap(struct seq_file *m, unsigned long *bits, unsigned int nr_bits)
+{
+	if (m->count < m->size) {
+		int len = bitmap_scnprintf(m->buf + m->count,
+				m->size - m->count, bits, nr_bits);
+		if (m->count + len < m->size) {
+			m->count += len;
+			return 0;
+		}
+	}
+	m->count = m->size;
+	return -1;
+}
+EXPORT_SYMBOL(seq_bitmap);
+
+int seq_bitmap_list(struct seq_file *m, unsigned long *bits,
+		unsigned int nr_bits)
+{
+	if (m->count < m->size) {
+		int len = bitmap_scnlistprintf(m->buf + m->count,
+				m->size - m->count, bits, nr_bits);
+		if (m->count + len < m->size) {
+			m->count += len;
+			return 0;
+		}
+	}
+	m->count = m->size;
+	return -1;
+}
+EXPORT_SYMBOL(seq_bitmap_list);
 
 static void *single_start(struct seq_file *p, loff_t *pos)
 {
@@ -425,6 +536,39 @@ int seq_release_private(struct inode *inode, struct file *file)
 }
 EXPORT_SYMBOL(seq_release_private);
 
+void *__seq_open_private(struct file *f, const struct seq_operations *ops,
+		int psize)
+{
+	int rc;
+	void *private;
+	struct seq_file *seq;
+
+	private = kzalloc(psize, GFP_KERNEL);
+	if (private == NULL)
+		goto out;
+
+	rc = seq_open(f, ops);
+	if (rc < 0)
+		goto out_free;
+
+	seq = f->private_data;
+	seq->private = private;
+	return private;
+
+out_free:
+	kfree(private);
+out:
+	return NULL;
+}
+EXPORT_SYMBOL(__seq_open_private);
+
+int seq_open_private(struct file *filp, const struct seq_operations *ops,
+		int psize)
+{
+	return __seq_open_private(filp, ops, psize) ? 0 : -ENOMEM;
+}
+EXPORT_SYMBOL(seq_open_private);
+
 int seq_putc(struct seq_file *m, char c)
 {
 	if (m->count < m->size) {
@@ -447,3 +591,37 @@ int seq_puts(struct seq_file *m, const char *s)
 	return -1;
 }
 EXPORT_SYMBOL(seq_puts);
+
+struct list_head *seq_list_start(struct list_head *head, loff_t pos)
+{
+	struct list_head *lh;
+
+	list_for_each(lh, head)
+		if (pos-- == 0)
+			return lh;
+
+	return NULL;
+}
+
+EXPORT_SYMBOL(seq_list_start);
+
+struct list_head *seq_list_start_head(struct list_head *head, loff_t pos)
+{
+	if (!pos)
+		return head;
+
+	return seq_list_start(head, pos - 1);
+}
+
+EXPORT_SYMBOL(seq_list_start_head);
+
+struct list_head *seq_list_next(void *v, struct list_head *head, loff_t *ppos)
+{
+	struct list_head *lh;
+
+	lh = ((struct list_head *)v)->next;
+	++*ppos;
+	return lh == head ? NULL : lh;
+}
+
+EXPORT_SYMBOL(seq_list_next);

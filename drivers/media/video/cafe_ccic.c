@@ -3,6 +3,9 @@
  * multifunction chip.  Currently works with the Omnivision OV7670
  * sensor.
  *
+ * The data sheet for this device can be found at:
+ *    http://www.marvell.com/products/pcconn/88ALP01.jsp
+ *
  * Copyright 2006 One Laptop Per Child Association, Inc.
  * Copyright 2006-7 Jonathan Corbet <corbet@lwn.net>
  *
@@ -14,15 +17,16 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/moduleparam.h>
 #include <linux/init.h>
 #include <linux/fs.h>
+#include <linux/mm.h>
 #include <linux/pci.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
 #include <linux/spinlock.h>
 #include <linux/videodev2.h>
 #include <media/v4l2-common.h>
+#include <media/v4l2-ioctl.h>
 #include <media/v4l2-chip-ident.h>
 #include <linux/device.h>
 #include <linux/wait.h>
@@ -63,13 +67,13 @@ MODULE_SUPPORTED_DEVICE("Video");
  */
 
 #define MAX_DMA_BUFS 3
-static int alloc_bufs_at_load = 0;
-module_param(alloc_bufs_at_load, bool, 0444);
-MODULE_PARM_DESC(alloc_bufs_at_load,
-		"Non-zero value causes DMA buffers to be allocated at module "
-		"load time.  This increases the chances of successfully getting "
-		"those buffers, but at the cost of nailing down the memory from "
-		"the outset.");
+static int alloc_bufs_at_read;
+module_param(alloc_bufs_at_read, bool, 0444);
+MODULE_PARM_DESC(alloc_bufs_at_read,
+		"Non-zero value causes DMA buffers to be allocated when the "
+		"video capture device is read, rather than at module load "
+		"time.  This saves memory, but decreases the chances of "
+		"successfully getting those buffers.");
 
 static int n_dma_bufs = 3;
 module_param(n_dma_bufs, uint, 0644);
@@ -97,7 +101,7 @@ MODULE_PARM_DESC(max_buffers,
 		"will be allowed to allocate.  These buffers are big and live "
 		"in vmalloc space.");
 
-static int flip = 0;
+static int flip;
 module_param(flip, bool, 0444);
 MODULE_PARM_DESC(flip,
 		"If set, the sensor will be instructed to flip the image "
@@ -356,6 +360,7 @@ static int cafe_smbus_write_data(struct cafe_camera *cam,
 {
 	unsigned int rval;
 	unsigned long flags;
+	DEFINE_WAIT(the_wait);
 
 	spin_lock_irqsave(&cam->dev_lock, flags);
 	rval = TWSIC0_EN | ((addr << TWSIC0_SID_SHIFT) & TWSIC0_SID);
@@ -369,10 +374,29 @@ static int cafe_smbus_write_data(struct cafe_camera *cam,
 	rval = value | ((command << TWSIC1_ADDR_SHIFT) & TWSIC1_ADDR);
 	cafe_reg_write(cam, REG_TWSIC1, rval);
 	spin_unlock_irqrestore(&cam->dev_lock, flags);
-	msleep(2); /* Required or things flake */
 
+	/*
+	 * Time to wait for the write to complete.  THIS IS A RACY
+	 * WAY TO DO IT, but the sad fact is that reading the TWSIC1
+	 * register too quickly after starting the operation sends
+	 * the device into a place that may be kinder and better, but
+	 * which is absolutely useless for controlling the sensor.  In
+	 * practice we have plenty of time to get into our sleep state
+	 * before the interrupt hits, and the worst case is that we
+	 * time out and then see that things completed, so this seems
+	 * the best way for now.
+	 */
+	do {
+		prepare_to_wait(&cam->smbus_wait, &the_wait,
+				TASK_UNINTERRUPTIBLE);
+		schedule_timeout(1); /* even 1 jiffy is too long */
+		finish_wait(&cam->smbus_wait, &the_wait);
+	} while (!cafe_smbus_write_done(cam));
+
+#ifdef IF_THE_CAFE_HARDWARE_WORKED_RIGHT
 	wait_event_timeout(cam->smbus_wait, cafe_smbus_write_done(cam),
 			CAFE_SMBUS_TIMEOUT);
+#endif
 	spin_lock_irqsave(&cam->dev_lock, flags);
 	rval = cafe_reg_read(cam, REG_TWSIC1);
 	spin_unlock_irqrestore(&cam->dev_lock, flags);
@@ -710,7 +734,7 @@ static void cafe_ctlr_init(struct cafe_camera *cam)
 	 * Here we must wait a bit for the controller to come around.
 	 */
 	spin_unlock_irqrestore(&cam->dev_lock, flags);
-	mdelay(5);	/* FIXME revisit this */
+	msleep(5);
 	spin_lock_irqsave(&cam->dev_lock, flags);
 
 	cafe_reg_write(cam, REG_GL_CSR, GCSR_CCIC_EN|GCSR_SRC|GCSR_MRC);
@@ -1178,7 +1202,7 @@ static int cafe_setup_siobuf(struct cafe_camera *cam, int index)
 	buf->v4lbuf.field = V4L2_FIELD_NONE;
 	buf->v4lbuf.memory = V4L2_MEMORY_MMAP;
 	/*
-	 * Offset: must be 32-bit even on a 64-bit system.  video-buf
+	 * Offset: must be 32-bit even on a 64-bit system.  videobuf-dma-sg
 	 * just uses the length times the index, but the spec warns
 	 * against doing just that - vma merging problems.  So we
 	 * leave a gap between each pair of buffers.
@@ -1483,7 +1507,7 @@ static int cafe_v4l_release(struct inode *inode, struct file *filp)
 	}
 	if (cam->users == 0) {
 		cafe_ctlr_power_down(cam);
-		if (! alloc_bufs_at_load)
+		if (alloc_bufs_at_read)
 			cafe_free_dma_bufs(cam);
 	}
 	mutex_unlock(&cam->s_mutex);
@@ -1571,7 +1595,7 @@ static struct v4l2_pix_format cafe_def_pix_format = {
 	.sizeimage	= VGA_WIDTH*VGA_HEIGHT*2,
 };
 
-static int cafe_vidioc_enum_fmt_cap(struct file *filp,
+static int cafe_vidioc_enum_fmt_vid_cap(struct file *filp,
 		void *priv, struct v4l2_fmtdesc *fmt)
 {
 	struct cafe_camera *cam = priv;
@@ -1586,7 +1610,7 @@ static int cafe_vidioc_enum_fmt_cap(struct file *filp,
 }
 
 
-static int cafe_vidioc_try_fmt_cap (struct file *filp, void *priv,
+static int cafe_vidioc_try_fmt_vid_cap(struct file *filp, void *priv,
 		struct v4l2_format *fmt)
 {
 	struct cafe_camera *cam = priv;
@@ -1598,7 +1622,7 @@ static int cafe_vidioc_try_fmt_cap (struct file *filp, void *priv,
 	return ret;
 }
 
-static int cafe_vidioc_s_fmt_cap(struct file *filp, void *priv,
+static int cafe_vidioc_s_fmt_vid_cap(struct file *filp, void *priv,
 		struct v4l2_format *fmt)
 {
 	struct cafe_camera *cam = priv;
@@ -1613,7 +1637,7 @@ static int cafe_vidioc_s_fmt_cap(struct file *filp, void *priv,
 	/*
 	 * See if the formatting works in principle.
 	 */
-	ret = cafe_vidioc_try_fmt_cap(filp, priv, fmt);
+	ret = cafe_vidioc_try_fmt_vid_cap(filp, priv, fmt);
 	if (ret)
 		return ret;
 	/*
@@ -1648,7 +1672,7 @@ static int cafe_vidioc_s_fmt_cap(struct file *filp, void *priv,
  * The V4l2 spec wants us to be smarter, and actually get this from
  * the camera (and not mess with it at open time).  Someday.
  */
-static int cafe_vidioc_g_fmt_cap(struct file *filp, void *priv,
+static int cafe_vidioc_g_fmt_vid_cap(struct file *filp, void *priv,
 		struct v4l2_format *f)
 {
 	struct cafe_camera *cam = priv;
@@ -1746,22 +1770,12 @@ static const struct file_operations cafe_v4l_fops = {
 	.llseek = no_llseek,
 };
 
-static struct video_device cafe_v4l_template = {
-	.name = "cafe",
-	.type = VFL_TYPE_GRABBER,
-	.type2 = VID_TYPE_CAPTURE,
-	.minor = -1, /* Get one dynamically */
-	.tvnorms = V4L2_STD_NTSC_M,
-	.current_norm = V4L2_STD_NTSC_M,  /* make mplayer happy */
-
-	.fops = &cafe_v4l_fops,
-	.release = cafe_v4l_dev_release,
-
+static const struct v4l2_ioctl_ops cafe_v4l_ioctl_ops = {
 	.vidioc_querycap 	= cafe_vidioc_querycap,
-	.vidioc_enum_fmt_cap	= cafe_vidioc_enum_fmt_cap,
-	.vidioc_try_fmt_cap	= cafe_vidioc_try_fmt_cap,
-	.vidioc_s_fmt_cap	= cafe_vidioc_s_fmt_cap,
-	.vidioc_g_fmt_cap	= cafe_vidioc_g_fmt_cap,
+	.vidioc_enum_fmt_vid_cap = cafe_vidioc_enum_fmt_vid_cap,
+	.vidioc_try_fmt_vid_cap	= cafe_vidioc_try_fmt_vid_cap,
+	.vidioc_s_fmt_vid_cap	= cafe_vidioc_s_fmt_vid_cap,
+	.vidioc_g_fmt_vid_cap	= cafe_vidioc_g_fmt_vid_cap,
 	.vidioc_enum_input	= cafe_vidioc_enum_input,
 	.vidioc_g_input		= cafe_vidioc_g_input,
 	.vidioc_s_input		= cafe_vidioc_s_input,
@@ -1777,6 +1791,17 @@ static struct video_device cafe_v4l_template = {
 	.vidioc_s_ctrl		= cafe_vidioc_s_ctrl,
 	.vidioc_g_parm		= cafe_vidioc_g_parm,
 	.vidioc_s_parm		= cafe_vidioc_s_parm,
+};
+
+static struct video_device cafe_v4l_template = {
+	.name = "cafe",
+	.minor = -1, /* Get one dynamically */
+	.tvnorms = V4L2_STD_NTSC_M,
+	.current_norm = V4L2_STD_NTSC_M,  /* make mplayer happy */
+
+	.fops = &cafe_v4l_fops,
+	.ioctl_ops = &cafe_v4l_ioctl_ops,
+	.release = cafe_v4l_dev_release,
 };
 
 
@@ -2030,10 +2055,10 @@ static void cafe_dfs_cam_setup(struct cafe_camera *cam)
 
 	if (!cafe_dfs_root)
 		return;
-	sprintf(fname, "regs-%d", cam->v4ldev.minor);
+	sprintf(fname, "regs-%d", cam->v4ldev.num);
 	cam->dfs_regs = debugfs_create_file(fname, 0444, cafe_dfs_root,
 			cam, &cafe_dfs_reg_ops);
-	sprintf(fname, "cam-%d", cam->v4ldev.minor);
+	sprintf(fname, "cam-%d", cam->v4ldev.num);
 	cam->dfs_cam_regs = debugfs_create_file(fname, 0444, cafe_dfs_root,
 			cam, &cafe_dfs_cam_ops);
 }
@@ -2067,15 +2092,8 @@ static int cafe_pci_probe(struct pci_dev *pdev,
 		const struct pci_device_id *id)
 {
 	int ret;
-	u16 classword;
 	struct cafe_camera *cam;
-	/*
-	 * Make sure we have a camera here - we'll get calls for
-	 * the other cafe devices as well.
-	 */
-	pci_read_config_word(pdev, PCI_CLASS_DEVICE, &classword);
-	if (classword != PCI_CLASS_MULTIMEDIA_VIDEO)
-		return -ENODEV;
+
 	/*
 	 * Start putting together one of our big camera structures.
 	 */
@@ -2135,14 +2153,14 @@ static int cafe_pci_probe(struct pci_dev *pdev,
 	cam->v4ldev = cafe_v4l_template;
 	cam->v4ldev.debug = 0;
 //	cam->v4ldev.debug = V4L2_DEBUG_IOCTL_ARG;
-	cam->v4ldev.dev = &pdev->dev;
+	cam->v4ldev.parent = &pdev->dev;
 	ret = video_register_device(&cam->v4ldev, VFL_TYPE_GRABBER, -1);
 	if (ret)
 		goto out_smbus;
 	/*
 	 * If so requested, try to get our DMA buffers now.
 	 */
-	if (alloc_bufs_at_load) {
+	if (!alloc_bufs_at_read) {
 		if (cafe_alloc_dma_bufs(cam, 1))
 			cam_warn(cam, "Unable to alloc DMA buffers at load"
 					" will try again later.");
@@ -2213,13 +2231,16 @@ static int cafe_pci_suspend(struct pci_dev *pdev, pm_message_t state)
 {
 	struct cafe_camera *cam = cafe_find_by_pdev(pdev);
 	int ret;
+	enum cafe_state cstate;
 
 	ret = pci_save_state(pdev);
 	if (ret)
 		return ret;
+	cstate = cam->state; /* HACK - stop_dma sets to idle */
 	cafe_ctlr_stop_dma(cam);
 	cafe_ctlr_power_down(cam);
 	pci_disable_device(pdev);
+	cam->state = cstate;
 	return 0;
 }
 
@@ -2233,12 +2254,21 @@ static int cafe_pci_resume(struct pci_dev *pdev)
 	if (ret)
 		return ret;
 	ret = pci_enable_device(pdev);
+
 	if (ret) {
 		cam_warn(cam, "Unable to re-enable device on resume!\n");
 		return ret;
 	}
 	cafe_ctlr_init(cam);
-	cafe_ctlr_power_up(cam);
+	cafe_ctlr_power_down(cam);
+
+	mutex_lock(&cam->s_mutex);
+	if (cam->users > 0) {
+		cafe_ctlr_power_up(cam);
+		__cafe_cam_reset(cam);
+	}
+	mutex_unlock(&cam->s_mutex);
+
 	set_bit(CF_CONFIG_NEEDED, &cam->flags);
 	if (cam->state == S_SPECREAD)
 		cam->state = S_IDLE;  /* Don't bother restarting */
@@ -2251,8 +2281,8 @@ static int cafe_pci_resume(struct pci_dev *pdev)
 
 
 static struct pci_device_id cafe_ids[] = {
-	{ PCI_DEVICE(0x11ab, 0x4100) }, /* Eventual real ID */
-	{ PCI_DEVICE(0x11ab, 0x4102) }, /* Really eventual real ID */
+	{ PCI_DEVICE(PCI_VENDOR_ID_MARVELL,
+		     PCI_DEVICE_ID_MARVELL_88ALP01_CCIC) },
 	{ 0, }
 };
 

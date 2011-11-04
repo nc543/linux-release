@@ -73,6 +73,11 @@ static int usb_hcd_ppc_soc_probe(const struct hc_driver *driver,
 
 	ohci = hcd_to_ohci(hcd);
 	ohci->flags |= OHCI_QUIRK_BE_MMIO | OHCI_QUIRK_BE_DESC;
+
+#ifdef CONFIG_PPC_MPC52xx
+	/* MPC52xx doesn't need frame_no shift */
+	ohci->flags |= OHCI_QUIRK_FRAME_NO;
+#endif
 	ohci_hcd_init(ohci);
 
 	retval = usb_add_hcd(hcd, irq, IRQF_DISABLED);
@@ -167,7 +172,6 @@ static const struct hc_driver ohci_ppc_soc_hc_driver = {
 	 */
 	.hub_status_data =	ohci_hub_status_data,
 	.hub_control =		ohci_hub_control,
-	.hub_irq_enable =	ohci_rhsc_enable,
 #ifdef	CONFIG_PM
 	.bus_suspend =		ohci_bus_suspend,
 	.bus_resume =		ohci_bus_resume,
@@ -208,3 +212,4 @@ static struct platform_driver ohci_hcd_ppc_soc_driver = {
 	},
 };
 
+MODULE_ALIAS("platform:ppc-soc-ohci");

@@ -3,10 +3,10 @@
 
 #include <linux/list.h>
 #include <linux/ktime.h>
-#include <linux/spinlock.h>
 #include <linux/stddef.h>
+#include <linux/debugobjects.h>
 
-struct tvec_t_base_s;
+struct tvec_base;
 
 struct timer_list {
 	struct list_head entry;
@@ -15,7 +15,7 @@ struct timer_list {
 	void (*function)(unsigned long);
 	unsigned long data;
 
-	struct tvec_t_base_s *base;
+	struct tvec_base *base;
 #ifdef CONFIG_TIMER_STATS
 	void *start_site;
 	char start_comm[16];
@@ -23,9 +23,10 @@ struct timer_list {
 #endif
 };
 
-extern struct tvec_t_base_s boot_tvec_bases;
+extern struct tvec_base boot_tvec_bases;
 
 #define TIMER_INITIALIZER(_function, _expires, _data) {		\
+		.entry = { .prev = TIMER_ENTRY_STATIC },	\
 		.function = (_function),			\
 		.expires = (_expires),				\
 		.data = (_data),				\
@@ -36,8 +37,19 @@ extern struct tvec_t_base_s boot_tvec_bases;
 	struct timer_list _name =				\
 		TIMER_INITIALIZER(_function, _expires, _data)
 
-void fastcall init_timer(struct timer_list * timer);
-void fastcall init_timer_deferrable(struct timer_list *timer);
+void init_timer(struct timer_list *timer);
+void init_timer_deferrable(struct timer_list *timer);
+
+#ifdef CONFIG_DEBUG_OBJECTS_TIMERS
+extern void init_timer_on_stack(struct timer_list *timer);
+extern void destroy_timer_on_stack(struct timer_list *timer);
+#else
+static inline void destroy_timer_on_stack(struct timer_list *timer) { }
+static inline void init_timer_on_stack(struct timer_list *timer)
+{
+	init_timer(timer);
+}
+#endif
 
 static inline void setup_timer(struct timer_list * timer,
 				void (*function)(unsigned long),
@@ -46,6 +58,15 @@ static inline void setup_timer(struct timer_list * timer,
 	timer->function = function;
 	timer->data = data;
 	init_timer(timer);
+}
+
+static inline void setup_timer_on_stack(struct timer_list *timer,
+					void (*function)(unsigned long),
+					unsigned long data)
+{
+	timer->function = function;
+	timer->data = data;
+	init_timer_on_stack(timer);
 }
 
 /**
@@ -91,16 +112,13 @@ extern unsigned long get_next_timer_interrupt(unsigned long now);
  */
 #ifdef CONFIG_TIMER_STATS
 
+#define TIMER_STATS_FLAG_DEFERRABLE	0x1
+
 extern void init_timer_stats(void);
 
 extern void timer_stats_update_stats(void *timer, pid_t pid, void *startf,
-				     void *timerf, char * comm);
-
-static inline void timer_stats_account_timer(struct timer_list *timer)
-{
-	timer_stats_update_stats(timer, timer->start_pid, timer->start_site,
-				 timer->function, timer->start_comm);
-}
+				     void *timerf, char *comm,
+				     unsigned int timer_flag);
 
 extern void __timer_stats_timer_set_start_info(struct timer_list *timer,
 					       void *addr);
@@ -119,10 +137,6 @@ static inline void init_timer_stats(void)
 {
 }
 
-static inline void timer_stats_account_timer(struct timer_list *timer)
-{
-}
-
 static inline void timer_stats_timer_set_start_info(struct timer_list *timer)
 {
 }
@@ -131,8 +145,6 @@ static inline void timer_stats_timer_clear_start_info(struct timer_list *timer)
 {
 }
 #endif
-
-extern void delayed_work_timer_fn(unsigned long __data);
 
 /**
  * add_timer - start a timer
@@ -174,5 +186,9 @@ unsigned long __round_jiffies_relative(unsigned long j, int cpu);
 unsigned long round_jiffies(unsigned long j);
 unsigned long round_jiffies_relative(unsigned long j);
 
+unsigned long __round_jiffies_up(unsigned long j, int cpu);
+unsigned long __round_jiffies_up_relative(unsigned long j, int cpu);
+unsigned long round_jiffies_up(unsigned long j);
+unsigned long round_jiffies_up_relative(unsigned long j);
 
 #endif

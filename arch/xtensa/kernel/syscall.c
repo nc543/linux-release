@@ -49,7 +49,7 @@ asmlinkage long xtensa_pipe(int __user *userfds)
 	int fd[2];
 	int error;
 
-	error = do_pipe(fd);
+	error = do_pipe_flags(fd, 0);
 	if (!error) {
 		if (copy_to_user(userfds, fd, 2 * sizeof(int)))
 			error = -EFAULT;
@@ -91,5 +91,10 @@ asmlinkage long xtensa_shmat(int shmid, char __user *shmaddr, int shmflg)
 	if (err)
 		return err;
 	return (long)ret;
+}
+
+asmlinkage long xtensa_fadvise64_64(int fd, int advice, unsigned long long offset, unsigned long long len)
+{
+	return sys_fadvise64_64(fd, offset, len, advice);
 }
 

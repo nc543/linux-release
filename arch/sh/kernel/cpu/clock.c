@@ -83,10 +83,12 @@ static void propagate_rate(struct clk *clk)
 			continue;
 		if (likely(clkp->ops && clkp->ops->recalc))
 			clkp->ops->recalc(clkp);
+		if (unlikely(clkp->flags & CLK_RATE_PROPAGATES))
+			propagate_rate(clkp);
 	}
 }
 
-int __clk_enable(struct clk *clk)
+static int __clk_enable(struct clk *clk)
 {
 	/*
 	 * See if this is the first time we're enabling the clock, some
@@ -109,7 +111,6 @@ int __clk_enable(struct clk *clk)
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(__clk_enable);
 
 int clk_enable(struct clk *clk)
 {
@@ -129,7 +130,7 @@ static void clk_kref_release(struct kref *kref)
 	/* Nothing to do */
 }
 
-void __clk_disable(struct clk *clk)
+static void __clk_disable(struct clk *clk)
 {
 	int count = kref_put(&clk->kref, clk_kref_release);
 
@@ -141,7 +142,6 @@ void __clk_disable(struct clk *clk)
 			clk->ops->disable(clk);
 	}
 }
-EXPORT_SYMBOL_GPL(__clk_disable);
 
 void clk_disable(struct clk *clk)
 {
@@ -229,6 +229,22 @@ void clk_recalc_rate(struct clk *clk)
 }
 EXPORT_SYMBOL_GPL(clk_recalc_rate);
 
+long clk_round_rate(struct clk *clk, unsigned long rate)
+{
+	if (likely(clk->ops && clk->ops->round_rate)) {
+		unsigned long flags, rounded;
+
+		spin_lock_irqsave(&clock_lock, flags);
+		rounded = clk->ops->round_rate(clk, rate);
+		spin_unlock_irqrestore(&clock_lock, flags);
+
+		return rounded;
+	}
+
+	return clk_get_rate(clk);
+}
+EXPORT_SYMBOL_GPL(clk_round_rate);
+
 /*
  * Returns a clock. Note that we first try to use device id on the bus
  * and clock name. If this fails, we try to use clock name only.
@@ -278,9 +294,10 @@ arch_init_clk_ops(struct clk_ops **ops, int type)
 {
 }
 
-void __init __attribute__ ((weak))
+int __init __attribute__ ((weak))
 arch_clk_init(void)
 {
+	return 0;
 }
 
 static int show_clocks(char *buf, char **start, off_t off,
@@ -292,15 +309,11 @@ static int show_clocks(char *buf, char **start, off_t off,
 	list_for_each_entry_reverse(clk, &clock_list, node) {
 		unsigned long rate = clk_get_rate(clk);
 
-		/*
-		 * Don't bother listing dummy clocks with no ancestry
-		 * that only support enable and disable ops.
-		 */
-		if (unlikely(!rate && !clk->parent))
-			continue;
-
-		p += sprintf(p, "%-12s\t: %ld.%02ldMHz\n", clk->name,
-			     rate / 1000000, (rate % 1000000) / 10000);
+		p += sprintf(p, "%-12s\t: %ld.%02ldMHz\t%s\n", clk->name,
+			     rate / 1000000, (rate % 1000000) / 10000,
+			     ((clk->flags & CLK_ALWAYS_ENABLED) ||
+			      (atomic_read(&clk->kref.refcount) != 1)) ?
+			     "enabled" : "disabled");
 	}
 
 	return p - buf;
@@ -319,7 +332,7 @@ int __init clk_init(void)
 		ret |= clk_register(clk);
 	}
 
-	arch_clk_init();
+	ret |= arch_clk_init();
 
 	/* Kick the child clocks.. */
 	propagate_rate(&master_clk);

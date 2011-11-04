@@ -35,10 +35,14 @@ static int hfs_readpage(struct file *file, struct page *page)
 	return block_read_full_page(page, hfs_get_block);
 }
 
-static int hfs_prepare_write(struct file *file, struct page *page, unsigned from, unsigned to)
+static int hfs_write_begin(struct file *file, struct address_space *mapping,
+			loff_t pos, unsigned len, unsigned flags,
+			struct page **pagep, void **fsdata)
 {
-	return cont_prepare_write(page, from, to, hfs_get_block,
-				  &HFS_I(page->mapping->host)->phys_size);
+	*pagep = NULL;
+	return cont_write_begin(file, mapping, pos, len, flags, pagep, fsdata,
+				hfs_get_block,
+				&HFS_I(mapping->host)->phys_size);
 }
 
 static sector_t hfs_bmap(struct address_space *mapping, sector_t block)
@@ -119,8 +123,8 @@ const struct address_space_operations hfs_btree_aops = {
 	.readpage	= hfs_readpage,
 	.writepage	= hfs_writepage,
 	.sync_page	= block_sync_page,
-	.prepare_write	= hfs_prepare_write,
-	.commit_write	= generic_commit_write,
+	.write_begin	= hfs_write_begin,
+	.write_end	= generic_write_end,
 	.bmap		= hfs_bmap,
 	.releasepage	= hfs_releasepage,
 };
@@ -129,8 +133,8 @@ const struct address_space_operations hfs_aops = {
 	.readpage	= hfs_readpage,
 	.writepage	= hfs_writepage,
 	.sync_page	= block_sync_page,
-	.prepare_write	= hfs_prepare_write,
-	.commit_write	= generic_commit_write,
+	.write_begin	= hfs_write_begin,
+	.write_end	= generic_write_end,
 	.bmap		= hfs_bmap,
 	.direct_IO	= hfs_direct_IO,
 	.writepages	= hfs_writepages,
@@ -146,7 +150,7 @@ struct inode *hfs_new_inode(struct inode *dir, struct qstr *name, int mode)
 	if (!inode)
 		return NULL;
 
-	init_MUTEX(&HFS_I(inode)->extents_lock);
+	mutex_init(&HFS_I(inode)->extents_lock);
 	INIT_LIST_HEAD(&HFS_I(inode)->open_dir_list);
 	hfs_cat_build_key(sb, (btree_key *)&HFS_I(inode)->cat_key, dir->i_ino, name);
 	inode->i_ino = HFS_SB(sb)->next_id++;
@@ -277,7 +281,7 @@ static int hfs_read_inode(struct inode *inode, void *data)
 
 	HFS_I(inode)->flags = 0;
 	HFS_I(inode)->rsrc_inode = NULL;
-	init_MUTEX(&HFS_I(inode)->extents_lock);
+	mutex_init(&HFS_I(inode)->extents_lock);
 	INIT_LIST_HEAD(&HFS_I(inode)->open_dir_list);
 
 	/* Initialize the inode */
@@ -507,20 +511,10 @@ void hfs_clear_inode(struct inode *inode)
 	}
 }
 
-static int hfs_permission(struct inode *inode, int mask,
-			  struct nameidata *nd)
-{
-	if (S_ISREG(inode->i_mode) && mask & MAY_EXEC)
-		return 0;
-	return generic_permission(inode, mask, NULL);
-}
-
 static int hfs_file_open(struct inode *inode, struct file *file)
 {
 	if (HFS_IS_RSRC(inode))
 		inode = HFS_I(inode)->rsrc_inode;
-	if (atomic_read(&file->f_count) != 1)
-		return 0;
 	atomic_inc(&HFS_I(inode)->opencnt);
 	return 0;
 }
@@ -531,8 +525,6 @@ static int hfs_file_release(struct inode *inode, struct file *file)
 
 	if (HFS_IS_RSRC(inode))
 		inode = HFS_I(inode)->rsrc_inode;
-	if (atomic_read(&file->f_count) != 0)
-		return 0;
 	if (atomic_dec_and_test(&HFS_I(inode)->opencnt)) {
 		mutex_lock(&inode->i_mutex);
 		hfs_file_truncate(inode);
@@ -607,7 +599,7 @@ static const struct file_operations hfs_file_operations = {
 	.write		= do_sync_write,
 	.aio_write	= generic_file_aio_write,
 	.mmap		= generic_file_mmap,
-	.sendfile	= generic_file_sendfile,
+	.splice_read	= generic_file_splice_read,
 	.fsync		= file_fsync,
 	.open		= hfs_file_open,
 	.release	= hfs_file_release,
@@ -617,7 +609,6 @@ static const struct inode_operations hfs_file_inode_operations = {
 	.lookup		= hfs_file_lookup,
 	.truncate	= hfs_file_truncate,
 	.setattr	= hfs_inode_setattr,
-	.permission	= hfs_permission,
 	.setxattr	= hfs_setxattr,
 	.getxattr	= hfs_getxattr,
 	.listxattr	= hfs_listxattr,

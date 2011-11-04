@@ -139,7 +139,8 @@ static int orinoco_pci_init_one(struct pci_dev *pdev,
 	}
 
 	/* Allocate network device */
-	dev = alloc_orinocodev(sizeof(*card), orinoco_pci_cor_reset);
+	dev = alloc_orinocodev(sizeof(*card), &pdev->dev,
+			       orinoco_pci_cor_reset, NULL);
 	if (!dev) {
 		printk(KERN_ERR PFX "Cannot allocate network device\n");
 		err = -ENOMEM;
@@ -148,7 +149,6 @@ static int orinoco_pci_init_one(struct pci_dev *pdev,
 
 	priv = netdev_priv(dev);
 	card = priv->card;
-	SET_MODULE_OWNER(dev);
 	SET_NETDEV_DEV(dev, &pdev->dev);
 
 	hermes_struct_init(&priv->hw, hermes_io, HERMES_32BIT_REGSPACING);

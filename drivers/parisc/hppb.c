@@ -16,6 +16,7 @@
 #include <linux/init.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
+#include <linux/dma-mapping.h>
 #include <linux/ioport.h>
 
 #include <asm/io.h>
@@ -94,7 +95,7 @@ static struct parisc_driver hppb_driver = {
 };
 
 /**
- * hppb_init - HP-PB bus initalization procedure.
+ * hppb_init - HP-PB bus initialization procedure.
  *
  * Register this driver.   
  */

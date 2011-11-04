@@ -8,12 +8,11 @@
  * for 64bit hardware platforms.
  *
  * TODO
- *	Big-endian support
  *	rx_copybreak/alignment
  *	Scatter gather
  *	More testing
  *
- * The changes are (c) Copyright 2004, Red Hat Inc. <alan@redhat.com>
+ * The changes are (c) Copyright 2004, Red Hat Inc. <alan@lxorguk.ukuu.org.uk>
  * Additional fixes and clean up: Francois Romieu
  *
  * This source has not been verified for use in safety critical systems.
@@ -72,6 +71,7 @@
 #include <linux/mii.h>
 #include <linux/in.h>
 #include <linux/if_arp.h>
+#include <linux/if_vlan.h>
 #include <linux/ip.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
@@ -84,6 +84,163 @@
 static int velocity_nics = 0;
 static int msglevel = MSG_LEVEL_INFO;
 
+/**
+ *	mac_get_cam_mask	-	Read a CAM mask
+ *	@regs: register block for this velocity
+ *	@mask: buffer to store mask
+ *
+ *	Fetch the mask bits of the selected CAM and store them into the
+ *	provided mask buffer.
+ */
+
+static void mac_get_cam_mask(struct mac_regs __iomem * regs, u8 * mask)
+{
+	int i;
+
+	/* Select CAM mask */
+	BYTE_REG_BITS_SET(CAMCR_PS_CAM_MASK, CAMCR_PS1 | CAMCR_PS0, &regs->CAMCR);
+
+	writeb(0, &regs->CAMADDR);
+
+	/* read mask */
+	for (i = 0; i < 8; i++)
+		*mask++ = readb(&(regs->MARCAM[i]));
+
+	/* disable CAMEN */
+	writeb(0, &regs->CAMADDR);
+
+	/* Select mar */
+	BYTE_REG_BITS_SET(CAMCR_PS_MAR, CAMCR_PS1 | CAMCR_PS0, &regs->CAMCR);
+
+}
+
+
+/**
+ *	mac_set_cam_mask	-	Set a CAM mask
+ *	@regs: register block for this velocity
+ *	@mask: CAM mask to load
+ *
+ *	Store a new mask into a CAM
+ */
+
+static void mac_set_cam_mask(struct mac_regs __iomem * regs, u8 * mask)
+{
+	int i;
+	/* Select CAM mask */
+	BYTE_REG_BITS_SET(CAMCR_PS_CAM_MASK, CAMCR_PS1 | CAMCR_PS0, &regs->CAMCR);
+
+	writeb(CAMADDR_CAMEN, &regs->CAMADDR);
+
+	for (i = 0; i < 8; i++) {
+		writeb(*mask++, &(regs->MARCAM[i]));
+	}
+	/* disable CAMEN */
+	writeb(0, &regs->CAMADDR);
+
+	/* Select mar */
+	BYTE_REG_BITS_SET(CAMCR_PS_MAR, CAMCR_PS1 | CAMCR_PS0, &regs->CAMCR);
+}
+
+static void mac_set_vlan_cam_mask(struct mac_regs __iomem * regs, u8 * mask)
+{
+	int i;
+	/* Select CAM mask */
+	BYTE_REG_BITS_SET(CAMCR_PS_CAM_MASK, CAMCR_PS1 | CAMCR_PS0, &regs->CAMCR);
+
+	writeb(CAMADDR_CAMEN | CAMADDR_VCAMSL, &regs->CAMADDR);
+
+	for (i = 0; i < 8; i++) {
+		writeb(*mask++, &(regs->MARCAM[i]));
+	}
+	/* disable CAMEN */
+	writeb(0, &regs->CAMADDR);
+
+	/* Select mar */
+	BYTE_REG_BITS_SET(CAMCR_PS_MAR, CAMCR_PS1 | CAMCR_PS0, &regs->CAMCR);
+}
+
+/**
+ *	mac_set_cam	-	set CAM data
+ *	@regs: register block of this velocity
+ *	@idx: Cam index
+ *	@addr: 2 or 6 bytes of CAM data
+ *
+ *	Load an address or vlan tag into a CAM
+ */
+
+static void mac_set_cam(struct mac_regs __iomem * regs, int idx, const u8 *addr)
+{
+	int i;
+
+	/* Select CAM mask */
+	BYTE_REG_BITS_SET(CAMCR_PS_CAM_DATA, CAMCR_PS1 | CAMCR_PS0, &regs->CAMCR);
+
+	idx &= (64 - 1);
+
+	writeb(CAMADDR_CAMEN | idx, &regs->CAMADDR);
+
+	for (i = 0; i < 6; i++) {
+		writeb(*addr++, &(regs->MARCAM[i]));
+	}
+	BYTE_REG_BITS_ON(CAMCR_CAMWR, &regs->CAMCR);
+
+	udelay(10);
+
+	writeb(0, &regs->CAMADDR);
+
+	/* Select mar */
+	BYTE_REG_BITS_SET(CAMCR_PS_MAR, CAMCR_PS1 | CAMCR_PS0, &regs->CAMCR);
+}
+
+static void mac_set_vlan_cam(struct mac_regs __iomem * regs, int idx,
+			     const u8 *addr)
+{
+
+	/* Select CAM mask */
+	BYTE_REG_BITS_SET(CAMCR_PS_CAM_DATA, CAMCR_PS1 | CAMCR_PS0, &regs->CAMCR);
+
+	idx &= (64 - 1);
+
+	writeb(CAMADDR_CAMEN | CAMADDR_VCAMSL | idx, &regs->CAMADDR);
+	writew(*((u16 *) addr), &regs->MARCAM[0]);
+
+	BYTE_REG_BITS_ON(CAMCR_CAMWR, &regs->CAMCR);
+
+	udelay(10);
+
+	writeb(0, &regs->CAMADDR);
+
+	/* Select mar */
+	BYTE_REG_BITS_SET(CAMCR_PS_MAR, CAMCR_PS1 | CAMCR_PS0, &regs->CAMCR);
+}
+
+
+/**
+ *	mac_wol_reset	-	reset WOL after exiting low power
+ *	@regs: register block of this velocity
+ *
+ *	Called after we drop out of wake on lan mode in order to
+ *	reset the Wake on lan features. This function doesn't restore
+ *	the rest of the logic from the result of sleep/wakeup
+ */
+
+static void mac_wol_reset(struct mac_regs __iomem * regs)
+{
+
+	/* Turn off SWPTAG right after leaving power mode */
+	BYTE_REG_BITS_OFF(STICKHW_SWPTAG, &regs->STICKHW);
+	/* clear sticky bits */
+	BYTE_REG_BITS_OFF((STICKHW_DS1 | STICKHW_DS0), &regs->STICKHW);
+
+	BYTE_REG_BITS_OFF(CHIPGCR_FCGMII, &regs->CHIPGCR);
+	BYTE_REG_BITS_OFF(CHIPGCR_FCMODE, &regs->CHIPGCR);
+	/* disable force PME-enable */
+	writeb(WOLCFG_PMEOVR, &regs->WOLCFGClr);
+	/* disable power-event config bit */
+	writew(0xFFFF, &regs->WOLCRClr);
+	/* clear power status */
+	writew(0xFFFF, &regs->WOLSRClr);
+}
 
 static int velocity_mii_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd);
 static const struct ethtool_ops velocity_ethtool_ops;
@@ -111,15 +268,6 @@ VELOCITY_PARAM(RxDescriptors, "Number of receive descriptors");
 #define TX_DESC_DEF     64
 VELOCITY_PARAM(TxDescriptors, "Number of transmit descriptors");
 
-#define VLAN_ID_MIN     0
-#define VLAN_ID_MAX     4095
-#define VLAN_ID_DEF     0
-/* VID_setting[] is used for setting the VID of NIC.
-   0: default VID.
-   1-4094: other VIDs.
-*/
-VELOCITY_PARAM(VID_setting, "802.1Q VLAN ID");
-
 #define RX_THRESH_MIN   0
 #define RX_THRESH_MAX   3
 #define RX_THRESH_DEF   0
@@ -146,13 +294,6 @@ VELOCITY_PARAM(rx_thresh, "Receive fifo threshold");
    7: SF(flush till emply)
 */
 VELOCITY_PARAM(DMA_length, "DMA length");
-
-#define TAGGING_DEF     0
-/* enable_tagging[] is used for enabling 802.1Q VID tagging.
-   0: disable VID seeting(default).
-   1: enable VID setting.
-*/
-VELOCITY_PARAM(enable_tagging, "Enable 802.1Q tagging");
 
 #define IP_ALIG_DEF     0
 /* IP_byte_align[] is used for IP header DWORD byte aligned
@@ -299,7 +440,7 @@ static void velocity_unregister_notifier(void)
  *	Internal board variants. At the moment we have only one
  */
 
-static const struct velocity_info_tbl chip_info_table[] __devinitdata = {
+static struct velocity_info_tbl chip_info_table[] = {
 	{CHIP_TYPE_VT6110, "VIA Networking Velocity Family Gigabit Ethernet Adapter", 1, 0x00FFFFFFUL},
 	{ }
 };
@@ -324,7 +465,7 @@ MODULE_DEVICE_TABLE(pci, velocity_id_table);
  *	a pointer a static string valid while the driver is loaded.
  */
 
-static char __devinit *get_chip_name(enum chip_type chip_id)
+static const char __devinit *get_chip_name(enum chip_type chip_id)
 {
 	int i;
 	for (i = 0; chip_info_table[i].name != NULL; i++)
@@ -380,7 +521,7 @@ static void __devexit velocity_remove1(struct pci_dev *pdev)
  *	we don't duplicate code for each option.
  */
 
-static void __devinit velocity_set_int_opt(int *opt, int val, int min, int max, int def, char *name, char *devname)
+static void __devinit velocity_set_int_opt(int *opt, int val, int min, int max, int def, char *name, const char *devname)
 {
 	if (val == -1)
 		*opt = def;
@@ -409,7 +550,7 @@ static void __devinit velocity_set_int_opt(int *opt, int val, int min, int max, 
  *	we don't duplicate code for each option.
  */
 
-static void __devinit velocity_set_bool_opt(u32 * opt, int val, int def, u32 flag, char *name, char *devname)
+static void __devinit velocity_set_bool_opt(u32 * opt, int val, int def, u32 flag, char *name, const char *devname)
 {
 	(*opt) &= (~flag);
 	if (val == -1)
@@ -435,15 +576,14 @@ static void __devinit velocity_set_bool_opt(u32 * opt, int val, int def, u32 fla
  *	for the current device
  */
 
-static void __devinit velocity_get_options(struct velocity_opt *opts, int index, char *devname)
+static void __devinit velocity_get_options(struct velocity_opt *opts, int index, const char *devname)
 {
 
 	velocity_set_int_opt(&opts->rx_thresh, rx_thresh[index], RX_THRESH_MIN, RX_THRESH_MAX, RX_THRESH_DEF, "rx_thresh", devname);
 	velocity_set_int_opt(&opts->DMA_length, DMA_length[index], DMA_LENGTH_MIN, DMA_LENGTH_MAX, DMA_LENGTH_DEF, "DMA_length", devname);
 	velocity_set_int_opt(&opts->numrx, RxDescriptors[index], RX_DESC_MIN, RX_DESC_MAX, RX_DESC_DEF, "RxDescriptors", devname);
 	velocity_set_int_opt(&opts->numtx, TxDescriptors[index], TX_DESC_MIN, TX_DESC_MAX, TX_DESC_DEF, "TxDescriptors", devname);
-	velocity_set_int_opt(&opts->vid, VID_setting[index], VLAN_ID_MIN, VLAN_ID_MAX, VLAN_ID_DEF, "VID_setting", devname);
-	velocity_set_bool_opt(&opts->flags, enable_tagging[index], TAGGING_DEF, VELOCITY_FLAGS_TAGGING, "enable_tagging", devname);
+
 	velocity_set_bool_opt(&opts->flags, txcsum_offload[index], TX_CSUM_DEF, VELOCITY_FLAGS_TX_CSUM, "txcsum_offload", devname);
 	velocity_set_int_opt(&opts->flow_cntl, flow_control[index], FLOW_CNTL_MIN, FLOW_CNTL_MAX, FLOW_CNTL_DEF, "flow_control", devname);
 	velocity_set_bool_opt(&opts->flags, IP_byte_align[index], IP_ALIG_DEF, VELOCITY_FLAGS_IP_ALIGN, "IP_byte_align", devname);
@@ -473,25 +613,58 @@ static void velocity_init_cam_filter(struct velocity_info *vptr)
 	/* Disable all CAMs */
 	memset(vptr->vCAMmask, 0, sizeof(u8) * 8);
 	memset(vptr->mCAMmask, 0, sizeof(u8) * 8);
-	mac_set_cam_mask(regs, vptr->vCAMmask, VELOCITY_VLAN_ID_CAM);
-	mac_set_cam_mask(regs, vptr->mCAMmask, VELOCITY_MULTICAST_CAM);
+	mac_set_vlan_cam_mask(regs, vptr->vCAMmask);
+	mac_set_cam_mask(regs, vptr->mCAMmask);
 
-	/* Enable first VCAM */
-	if (vptr->flags & VELOCITY_FLAGS_TAGGING) {
-		/* If Tagging option is enabled and VLAN ID is not zero, then
-		   turn on MCFG_RTGOPT also */
-		if (vptr->options.vid != 0)
+	/* Enable VCAMs */
+	if (vptr->vlgrp) {
+		unsigned int vid, i = 0;
+
+		if (!vlan_group_get_device(vptr->vlgrp, 0))
 			WORD_REG_BITS_ON(MCFG_RTGOPT, &regs->MCFG);
 
-		mac_set_cam(regs, 0, (u8 *) & (vptr->options.vid), VELOCITY_VLAN_ID_CAM);
-		vptr->vCAMmask[0] |= 1;
-		mac_set_cam_mask(regs, vptr->vCAMmask, VELOCITY_VLAN_ID_CAM);
-	} else {
-		u16 temp = 0;
-		mac_set_cam(regs, 0, (u8 *) &temp, VELOCITY_VLAN_ID_CAM);
-		temp = 1;
-		mac_set_cam_mask(regs, (u8 *) &temp, VELOCITY_VLAN_ID_CAM);
+		for (vid = 1; (vid < VLAN_VID_MASK); vid++) {
+			if (vlan_group_get_device(vptr->vlgrp, vid)) {
+				mac_set_vlan_cam(regs, i, (u8 *) &vid);
+				vptr->vCAMmask[i / 8] |= 0x1 << (i % 8);
+				if (++i >= VCAM_SIZE)
+					break;
+			}
+		}
+		mac_set_vlan_cam_mask(regs, vptr->vCAMmask);
 	}
+}
+
+static void velocity_vlan_rx_register(struct net_device *dev,
+				      struct vlan_group *grp)
+{
+	struct velocity_info *vptr = netdev_priv(dev);
+
+	vptr->vlgrp = grp;
+}
+
+static void velocity_vlan_rx_add_vid(struct net_device *dev, unsigned short vid)
+{
+	struct velocity_info *vptr = netdev_priv(dev);
+
+        spin_lock_irq(&vptr->lock);
+	velocity_init_cam_filter(vptr);
+        spin_unlock_irq(&vptr->lock);
+}
+
+static void velocity_vlan_rx_kill_vid(struct net_device *dev, unsigned short vid)
+{
+	struct velocity_info *vptr = netdev_priv(dev);
+
+        spin_lock_irq(&vptr->lock);
+	vlan_group_set_device(vptr->vlgrp, vid, NULL);
+	velocity_init_cam_filter(vptr);
+        spin_unlock_irq(&vptr->lock);
+}
+
+static void velocity_init_rx_ring_indexes(struct velocity_info *vptr)
+{
+	vptr->rx.dirty = vptr->rx.filled = vptr->rx.curr = 0;
 }
 
 /**
@@ -508,16 +681,16 @@ static void velocity_rx_reset(struct velocity_info *vptr)
 	struct mac_regs __iomem * regs = vptr->mac_regs;
 	int i;
 
-	vptr->rd_dirty = vptr->rd_filled = vptr->rd_curr = 0;
+	velocity_init_rx_ring_indexes(vptr);
 
 	/*
 	 *	Init state, all RD entries belong to the NIC
 	 */
 	for (i = 0; i < vptr->options.numrx; ++i)
-		vptr->rd_ring[i].rdesc0.owner = OWNED_BY_NIC;
+		vptr->rx.ring[i].rdesc0.len |= OWNED_BY_NIC;
 
 	writew(vptr->options.numrx, &regs->RBRDU);
-	writel(vptr->rd_pool_dma, &regs->RDBaseLo);
+	writel(vptr->rx.pool_dma, &regs->RDBaseLo);
 	writew(0, &regs->RDIdx);
 	writew(vptr->options.numrx - 1, &regs->RDCSize);
 }
@@ -610,15 +783,15 @@ static void velocity_init_registers(struct velocity_info *vptr,
 
 		vptr->int_mask = INT_MASK_DEF;
 
-		writel(cpu_to_le32(vptr->rd_pool_dma), &regs->RDBaseLo);
+		writel(vptr->rx.pool_dma, &regs->RDBaseLo);
 		writew(vptr->options.numrx - 1, &regs->RDCSize);
 		mac_rx_queue_run(regs);
 		mac_rx_queue_wake(regs);
 
 		writew(vptr->options.numtx - 1, &regs->TDCSize);
 
-		for (i = 0; i < vptr->num_txq; i++) {
-			writel(cpu_to_le32(vptr->td_pool_dma[i]), &(regs->TDBaseLo[i]));
+		for (i = 0; i < vptr->tx.numq; i++) {
+			writel(vptr->tx.pool_dma[i], &regs->TDBaseLo[i]);
 			mac_tx_queue_run(regs, i);
 		}
 
@@ -690,6 +863,7 @@ static int __devinit velocity_found1(struct pci_dev *pdev, const struct pci_devi
 	static int first = 1;
 	struct net_device *dev;
 	int i;
+	const char *drv_string;
 	const struct velocity_info_tbl *info = &chip_info_table[ent->driver_data];
 	struct velocity_info *vptr;
 	struct mac_regs __iomem * regs;
@@ -712,7 +886,6 @@ static int __devinit velocity_found1(struct pci_dev *pdev, const struct pci_devi
 
 	/* Chain it all together */
 
-	SET_MODULE_OWNER(dev);
 	SET_NETDEV_DEV(dev, &pdev->dev);
 	vptr = netdev_priv(dev);
 
@@ -763,7 +936,9 @@ static int __devinit velocity_found1(struct pci_dev *pdev, const struct pci_devi
 		dev->dev_addr[i] = readb(&regs->PAR[i]);
 
 
-	velocity_get_options(&vptr->options, velocity_nics, dev->name);
+	drv_string = dev_driver_string(&pdev->dev);
+
+	velocity_get_options(&vptr->options, velocity_nics, drv_string);
 
 	/*
 	 *	Mask out the options cannot be set to the chip
@@ -791,13 +966,19 @@ static int __devinit velocity_found1(struct pci_dev *pdev, const struct pci_devi
 	dev->do_ioctl = velocity_ioctl;
 	dev->ethtool_ops = &velocity_ethtool_ops;
 	dev->change_mtu = velocity_change_mtu;
+
+	dev->vlan_rx_add_vid = velocity_vlan_rx_add_vid;
+	dev->vlan_rx_kill_vid = velocity_vlan_rx_kill_vid;
+	dev->vlan_rx_register = velocity_vlan_rx_register;
+
 #ifdef  VELOCITY_ZERO_COPY_SUPPORT
 	dev->features |= NETIF_F_SG;
 #endif
+	dev->features |= NETIF_F_HW_VLAN_TX | NETIF_F_HW_VLAN_FILTER |
+		NETIF_F_HW_VLAN_RX;
 
-	if (vptr->flags & VELOCITY_FLAGS_TX_CSUM) {
+	if (vptr->flags & VELOCITY_FLAGS_TX_CSUM)
 		dev->features |= NETIF_F_IP_CSUM;
-	}
 
 	ret = register_netdev(dev);
 	if (ret < 0)
@@ -873,7 +1054,7 @@ static void __devinit velocity_init_info(struct pci_dev *pdev,
 
 	vptr->pdev = pdev;
 	vptr->chip_id = info->chip_id;
-	vptr->num_txq = info->txqueue;
+	vptr->tx.numq = info->txqueue;
 	vptr->multicast_limit = MCAM_SIZE;
 	spin_lock_init(&vptr->lock);
 	INIT_LIST_HEAD(&vptr->list);
@@ -890,8 +1071,7 @@ static void __devinit velocity_init_info(struct pci_dev *pdev,
 
 static int __devinit velocity_get_pci_info(struct velocity_info *vptr, struct pci_dev *pdev)
 {
-	if (pci_read_config_byte(pdev, PCI_REVISION_ID, &vptr->rev_id) < 0)
-		return -EIO;
+	vptr->rev_id = pdev->revision;
 
 	pci_set_master(pdev);
 
@@ -920,95 +1100,69 @@ static int __devinit velocity_get_pci_info(struct velocity_info *vptr, struct pc
 }
 
 /**
- *	velocity_init_rings	-	set up DMA rings
+ *	velocity_init_dma_rings	-	set up DMA rings
  *	@vptr: Velocity to set up
  *
  *	Allocate PCI mapped DMA rings for the receive and transmit layer
  *	to use.
  */
 
-static int velocity_init_rings(struct velocity_info *vptr)
+static int velocity_init_dma_rings(struct velocity_info *vptr)
 {
-	int i;
-	unsigned int psize;
-	unsigned int tsize;
+	struct velocity_opt *opt = &vptr->options;
+	const unsigned int rx_ring_size = opt->numrx * sizeof(struct rx_desc);
+	const unsigned int tx_ring_size = opt->numtx * sizeof(struct tx_desc);
+	struct pci_dev *pdev = vptr->pdev;
 	dma_addr_t pool_dma;
-	u8 *pool;
+	void *pool;
+	unsigned int i;
 
 	/*
-	 *	Allocate all RD/TD rings a single pool
-	 */
-
-	psize = vptr->options.numrx * sizeof(struct rx_desc) +
-		vptr->options.numtx * sizeof(struct tx_desc) * vptr->num_txq;
-
-	/*
+	 * Allocate all RD/TD rings a single pool.
+	 *
 	 * pci_alloc_consistent() fulfills the requirement for 64 bytes
 	 * alignment
 	 */
-	pool = pci_alloc_consistent(vptr->pdev, psize, &pool_dma);
-
-	if (pool == NULL) {
-		printk(KERN_ERR "%s : DMA memory allocation failed.\n",
-					vptr->dev->name);
+	pool = pci_alloc_consistent(pdev, tx_ring_size * vptr->tx.numq +
+				    rx_ring_size, &pool_dma);
+	if (!pool) {
+		dev_err(&pdev->dev, "%s : DMA memory allocation failed.\n",
+			vptr->dev->name);
 		return -ENOMEM;
 	}
 
-	memset(pool, 0, psize);
+	vptr->rx.ring = pool;
+	vptr->rx.pool_dma = pool_dma;
 
-	vptr->rd_ring = (struct rx_desc *) pool;
+	pool += rx_ring_size;
+	pool_dma += rx_ring_size;
 
-	vptr->rd_pool_dma = pool_dma;
-
-	tsize = vptr->options.numtx * PKT_BUF_SZ * vptr->num_txq;
-	vptr->tx_bufs = pci_alloc_consistent(vptr->pdev, tsize,
-						&vptr->tx_bufs_dma);
-
-	if (vptr->tx_bufs == NULL) {
-		printk(KERN_ERR "%s: DMA memory allocation failed.\n",
-					vptr->dev->name);
-		pci_free_consistent(vptr->pdev, psize, pool, pool_dma);
-		return -ENOMEM;
+	for (i = 0; i < vptr->tx.numq; i++) {
+		vptr->tx.rings[i] = pool;
+		vptr->tx.pool_dma[i] = pool_dma;
+		pool += tx_ring_size;
+		pool_dma += tx_ring_size;
 	}
 
-	memset(vptr->tx_bufs, 0, vptr->options.numtx * PKT_BUF_SZ * vptr->num_txq);
-
-	i = vptr->options.numrx * sizeof(struct rx_desc);
-	pool += i;
-	pool_dma += i;
-	for (i = 0; i < vptr->num_txq; i++) {
-		int offset = vptr->options.numtx * sizeof(struct tx_desc);
-
-		vptr->td_pool_dma[i] = pool_dma;
-		vptr->td_rings[i] = (struct tx_desc *) pool;
-		pool += offset;
-		pool_dma += offset;
-	}
 	return 0;
 }
 
 /**
- *	velocity_free_rings	-	free PCI ring pointers
+ *	velocity_free_dma_rings	-	free PCI ring pointers
  *	@vptr: Velocity to free from
  *
  *	Clean up the PCI ring buffers allocated to this velocity.
  */
 
-static void velocity_free_rings(struct velocity_info *vptr)
+static void velocity_free_dma_rings(struct velocity_info *vptr)
 {
-	int size;
+	const int size = vptr->options.numrx * sizeof(struct rx_desc) +
+		vptr->options.numtx * sizeof(struct tx_desc) * vptr->tx.numq;
 
-	size = vptr->options.numrx * sizeof(struct rx_desc) +
-	       vptr->options.numtx * sizeof(struct tx_desc) * vptr->num_txq;
-
-	pci_free_consistent(vptr->pdev, size, vptr->rd_ring, vptr->rd_pool_dma);
-
-	size = vptr->options.numtx * PKT_BUF_SZ * vptr->num_txq;
-
-	pci_free_consistent(vptr->pdev, size, vptr->tx_bufs, vptr->tx_bufs_dma);
+	pci_free_consistent(vptr->pdev, size, vptr->rx.ring, vptr->rx.pool_dma);
 }
 
-static inline void velocity_give_many_rx_descs(struct velocity_info *vptr)
+static void velocity_give_many_rx_descs(struct velocity_info *vptr)
 {
 	struct mac_regs __iomem *regs = vptr->mac_regs;
 	int avail, dirty, unusable;
@@ -1017,49 +1171,52 @@ static inline void velocity_give_many_rx_descs(struct velocity_info *vptr)
 	 * RD number must be equal to 4X per hardware spec
 	 * (programming guide rev 1.20, p.13)
 	 */
-	if (vptr->rd_filled < 4)
+	if (vptr->rx.filled < 4)
 		return;
 
 	wmb();
 
-	unusable = vptr->rd_filled & 0x0003;
-	dirty = vptr->rd_dirty - unusable;
-	for (avail = vptr->rd_filled & 0xfffc; avail; avail--) {
+	unusable = vptr->rx.filled & 0x0003;
+	dirty = vptr->rx.dirty - unusable;
+	for (avail = vptr->rx.filled & 0xfffc; avail; avail--) {
 		dirty = (dirty > 0) ? dirty - 1 : vptr->options.numrx - 1;
-		vptr->rd_ring[dirty].rdesc0.owner = OWNED_BY_NIC;
+		vptr->rx.ring[dirty].rdesc0.len |= OWNED_BY_NIC;
 	}
 
-	writew(vptr->rd_filled & 0xfffc, &regs->RBRDU);
-	vptr->rd_filled = unusable;
+	writew(vptr->rx.filled & 0xfffc, &regs->RBRDU);
+	vptr->rx.filled = unusable;
 }
 
 static int velocity_rx_refill(struct velocity_info *vptr)
 {
-	int dirty = vptr->rd_dirty, done = 0, ret = 0;
+	int dirty = vptr->rx.dirty, done = 0;
 
 	do {
-		struct rx_desc *rd = vptr->rd_ring + dirty;
+		struct rx_desc *rd = vptr->rx.ring + dirty;
 
 		/* Fine for an all zero Rx desc at init time as well */
-		if (rd->rdesc0.owner == OWNED_BY_NIC)
+		if (rd->rdesc0.len & OWNED_BY_NIC)
 			break;
 
-		if (!vptr->rd_info[dirty].skb) {
-			ret = velocity_alloc_rx_buf(vptr, dirty);
-			if (ret < 0)
+		if (!vptr->rx.info[dirty].skb) {
+			if (velocity_alloc_rx_buf(vptr, dirty) < 0)
 				break;
 		}
 		done++;
 		dirty = (dirty < vptr->options.numrx - 1) ? dirty + 1 : 0;
-	} while (dirty != vptr->rd_curr);
+	} while (dirty != vptr->rx.curr);
 
 	if (done) {
-		vptr->rd_dirty = dirty;
-		vptr->rd_filled += done;
-		velocity_give_many_rx_descs(vptr);
+		vptr->rx.dirty = dirty;
+		vptr->rx.filled += done;
 	}
 
-	return ret;
+	return done;
+}
+
+static void velocity_set_rxbufsize(struct velocity_info *vptr, int mtu)
+{
+	vptr->rx.buf_sz = (mtu <= ETH_DATA_LEN) ? PKT_BUF_SZ : mtu + 32;
 }
 
 /**
@@ -1073,22 +1230,22 @@ static int velocity_rx_refill(struct velocity_info *vptr)
 static int velocity_init_rd_ring(struct velocity_info *vptr)
 {
 	int ret = -ENOMEM;
-	unsigned int rsize = sizeof(struct velocity_rd_info) *
-					vptr->options.numrx;
 
-	vptr->rd_info = kmalloc(rsize, GFP_KERNEL);
-	if(vptr->rd_info == NULL)
+	vptr->rx.info = kcalloc(vptr->options.numrx,
+				sizeof(struct velocity_rd_info), GFP_KERNEL);
+	if (!vptr->rx.info)
 		goto out;
-	memset(vptr->rd_info, 0, rsize);
 
-	vptr->rd_filled = vptr->rd_dirty = vptr->rd_curr = 0;
+	velocity_init_rx_ring_indexes(vptr);
 
-	ret = velocity_rx_refill(vptr);
-	if (ret < 0) {
+	if (velocity_rx_refill(vptr) != vptr->options.numrx) {
 		VELOCITY_PRT(MSG_LEVEL_ERR, KERN_ERR
 			"%s: failed to allocate RX buffer.\n", vptr->dev->name);
 		velocity_free_rd_ring(vptr);
+		goto out;
 	}
+
+	ret = 0;
 out:
 	return ret;
 }
@@ -1105,27 +1262,27 @@ static void velocity_free_rd_ring(struct velocity_info *vptr)
 {
 	int i;
 
-	if (vptr->rd_info == NULL)
+	if (vptr->rx.info == NULL)
 		return;
 
 	for (i = 0; i < vptr->options.numrx; i++) {
-		struct velocity_rd_info *rd_info = &(vptr->rd_info[i]);
-		struct rx_desc *rd = vptr->rd_ring + i;
+		struct velocity_rd_info *rd_info = &(vptr->rx.info[i]);
+		struct rx_desc *rd = vptr->rx.ring + i;
 
 		memset(rd, 0, sizeof(*rd));
 
 		if (!rd_info->skb)
 			continue;
-		pci_unmap_single(vptr->pdev, rd_info->skb_dma, vptr->rx_buf_sz,
+		pci_unmap_single(vptr->pdev, rd_info->skb_dma, vptr->rx.buf_sz,
 				 PCI_DMA_FROMDEVICE);
-		rd_info->skb_dma = (dma_addr_t) NULL;
+		rd_info->skb_dma = 0;
 
 		dev_kfree_skb(rd_info->skb);
 		rd_info->skb = NULL;
 	}
 
-	kfree(vptr->rd_info);
-	vptr->rd_info = NULL;
+	kfree(vptr->rx.info);
+	vptr->rx.info = NULL;
 }
 
 /**
@@ -1139,35 +1296,23 @@ static void velocity_free_rd_ring(struct velocity_info *vptr)
 
 static int velocity_init_td_ring(struct velocity_info *vptr)
 {
-	int i, j;
 	dma_addr_t curr;
-	struct tx_desc *td;
-	struct velocity_td_info *td_info;
-	unsigned int tsize = sizeof(struct velocity_td_info) *
-					vptr->options.numtx;
+	unsigned int j;
 
 	/* Init the TD ring entries */
-	for (j = 0; j < vptr->num_txq; j++) {
-		curr = vptr->td_pool_dma[j];
+	for (j = 0; j < vptr->tx.numq; j++) {
+		curr = vptr->tx.pool_dma[j];
 
-		vptr->td_infos[j] = kmalloc(tsize, GFP_KERNEL);
-		if(vptr->td_infos[j] == NULL)
-		{
+		vptr->tx.infos[j] = kcalloc(vptr->options.numtx,
+					    sizeof(struct velocity_td_info),
+					    GFP_KERNEL);
+		if (!vptr->tx.infos[j])	{
 			while(--j >= 0)
-				kfree(vptr->td_infos[j]);
+				kfree(vptr->tx.infos[j]);
 			return -ENOMEM;
 		}
-		memset(vptr->td_infos[j], 0, tsize);
 
-		for (i = 0; i < vptr->options.numtx; i++, curr += sizeof(struct tx_desc)) {
-			td = &(vptr->td_rings[j][i]);
-			td_info = &(vptr->td_infos[j][i]);
-			td_info->buf = vptr->tx_bufs +
-				(j * vptr->options.numtx + i) * PKT_BUF_SZ;
-			td_info->buf_dma = vptr->tx_bufs_dma +
-				(j * vptr->options.numtx + i) * PKT_BUF_SZ;
-		}
-		vptr->td_tail[j] = vptr->td_curr[j] = vptr->td_used[j] = 0;
+		vptr->tx.tail[j] = vptr->tx.curr[j] = vptr->tx.used[j] = 0;
 	}
 	return 0;
 }
@@ -1179,7 +1324,7 @@ static int velocity_init_td_ring(struct velocity_info *vptr)
 static void velocity_free_td_ring_entry(struct velocity_info *vptr,
 							 int q, int n)
 {
-	struct velocity_td_info * td_info = &(vptr->td_infos[q][n]);
+	struct velocity_td_info * td_info = &(vptr->tx.infos[q][n]);
 	int i;
 
 	if (td_info == NULL)
@@ -1191,7 +1336,7 @@ static void velocity_free_td_ring_entry(struct velocity_info *vptr,
 			if (td_info->skb_dma[i]) {
 				pci_unmap_single(vptr->pdev, td_info->skb_dma[i],
 					td_info->skb->len, PCI_DMA_TODEVICE);
-				td_info->skb_dma[i] = (dma_addr_t) NULL;
+				td_info->skb_dma[i] = 0;
 			}
 		}
 		dev_kfree_skb(td_info->skb);
@@ -1211,15 +1356,15 @@ static void velocity_free_td_ring(struct velocity_info *vptr)
 {
 	int i, j;
 
-	for (j = 0; j < vptr->num_txq; j++) {
-		if (vptr->td_infos[j] == NULL)
+	for (j = 0; j < vptr->tx.numq; j++) {
+		if (vptr->tx.infos[j] == NULL)
 			continue;
 		for (i = 0; i < vptr->options.numtx; i++) {
 			velocity_free_td_ring_entry(vptr, j, i);
 
 		}
-		kfree(vptr->td_infos[j]);
-		vptr->td_infos[j] = NULL;
+		kfree(vptr->tx.infos[j]);
+		vptr->tx.infos[j] = NULL;
 	}
 }
 
@@ -1236,16 +1381,16 @@ static void velocity_free_td_ring(struct velocity_info *vptr)
 static int velocity_rx_srv(struct velocity_info *vptr, int status)
 {
 	struct net_device_stats *stats = &vptr->stats;
-	int rd_curr = vptr->rd_curr;
+	int rd_curr = vptr->rx.curr;
 	int works = 0;
 
 	do {
-		struct rx_desc *rd = vptr->rd_ring + rd_curr;
+		struct rx_desc *rd = vptr->rx.ring + rd_curr;
 
-		if (!vptr->rd_info[rd_curr].skb)
+		if (!vptr->rx.info[rd_curr].skb)
 			break;
 
-		if (rd->rdesc0.owner == OWNED_BY_NIC)
+		if (rd->rdesc0.len & OWNED_BY_NIC)
 			break;
 
 		rmb();
@@ -1253,7 +1398,7 @@ static int velocity_rx_srv(struct velocity_info *vptr, int status)
 		/*
 		 *	Don't drop CE or RL error frame although RXOK is off
 		 */
-		if ((rd->rdesc0.RSR & RSR_RXOK) || (!(rd->rdesc0.RSR & RSR_RXOK) && (rd->rdesc0.RSR & (RSR_CE | RSR_RL)))) {
+		if (rd->rdesc0.RSR & (RSR_RXOK | RSR_CE | RSR_RL)) {
 			if (velocity_receive_frame(vptr, rd_curr) < 0)
 				stats->rx_dropped++;
 		} else {
@@ -1265,7 +1410,7 @@ static int velocity_rx_srv(struct velocity_info *vptr, int status)
 			stats->rx_dropped++;
 		}
 
-		rd->inten = 1;
+		rd->size |= RX_INTEN;
 
 		vptr->dev->last_rx = jiffies;
 
@@ -1274,12 +1419,10 @@ static int velocity_rx_srv(struct velocity_info *vptr, int status)
 			rd_curr = 0;
 	} while (++works <= 15);
 
-	vptr->rd_curr = rd_curr;
+	vptr->rx.curr = rd_curr;
 
-	if (works > 0 && velocity_rx_refill(vptr) < 0) {
-		VELOCITY_PRT(MSG_LEVEL_ERR, KERN_ERR
-			"%s: rx buf allocation failure\n", vptr->dev->name);
-	}
+	if ((works > 0) && (velocity_rx_refill(vptr) > 0))
+		velocity_give_many_rx_descs(vptr);
 
 	VAR_USED(stats);
 	return works;
@@ -1323,24 +1466,18 @@ static inline void velocity_rx_csum(struct rx_desc *rd, struct sk_buff *skb)
  *	enough. This function returns a negative value if the received
  *	packet is too big or if memory is exhausted.
  */
-static inline int velocity_rx_copy(struct sk_buff **rx_skb, int pkt_size,
-				   struct velocity_info *vptr)
+static int velocity_rx_copy(struct sk_buff **rx_skb, int pkt_size,
+			    struct velocity_info *vptr)
 {
 	int ret = -1;
-
 	if (pkt_size < rx_copybreak) {
 		struct sk_buff *new_skb;
 
-		new_skb = dev_alloc_skb(pkt_size + 2);
+		new_skb = netdev_alloc_skb(vptr->dev, pkt_size + 2);
 		if (new_skb) {
-			new_skb->dev = vptr->dev;
 			new_skb->ip_summed = rx_skb[0]->ip_summed;
-
-			if (vptr->flags & VELOCITY_FLAGS_IP_ALIGN)
-				skb_reserve(new_skb, 2);
-
-			skb_copy_from_linear_data(rx_skb[0], new_skb->data,
-						  pkt_size);
+			skb_reserve(new_skb, 2);
+			skb_copy_from_linear_data(*rx_skb, new_skb->data, pkt_size);
 			*rx_skb = new_skb;
 			ret = 0;
 		}
@@ -1361,12 +1498,8 @@ static inline int velocity_rx_copy(struct sk_buff **rx_skb, int pkt_size,
 static inline void velocity_iph_realign(struct velocity_info *vptr,
 					struct sk_buff *skb, int pkt_size)
 {
-	/* FIXME - memmove ? */
 	if (vptr->flags & VELOCITY_FLAGS_IP_ALIGN) {
-		int i;
-
-		for (i = pkt_size; i >= 0; i--)
-			*(skb->data + i + 2) = *(skb->data + i);
+		memmove(skb->data + 2, skb->data, pkt_size);
 		skb_reserve(skb, 2);
 	}
 }
@@ -1384,9 +1517,9 @@ static int velocity_receive_frame(struct velocity_info *vptr, int idx)
 {
 	void (*pci_action)(struct pci_dev *, dma_addr_t, size_t, int);
 	struct net_device_stats *stats = &vptr->stats;
-	struct velocity_rd_info *rd_info = &(vptr->rd_info[idx]);
-	struct rx_desc *rd = &(vptr->rd_ring[idx]);
-	int pkt_len = rd->rdesc0.len;
+	struct velocity_rd_info *rd_info = &(vptr->rx.info[idx]);
+	struct rx_desc *rd = &(vptr->rx.ring[idx]);
+	int pkt_len = le16_to_cpu(rd->rdesc0.len) & 0x3fff;
 	struct sk_buff *skb;
 
 	if (rd->rdesc0.RSR & (RSR_STP | RSR_EDP)) {
@@ -1401,7 +1534,7 @@ static int velocity_receive_frame(struct velocity_info *vptr, int idx)
 	skb = rd_info->skb;
 
 	pci_dma_sync_single_for_cpu(vptr->pdev, rd_info->skb_dma,
-				    vptr->rx_buf_sz, PCI_DMA_FROMDEVICE);
+				    vptr->rx.buf_sz, PCI_DMA_FROMDEVICE);
 
 	/*
 	 *	Drop frame not meeting IEEE 802.3
@@ -1424,14 +1557,19 @@ static int velocity_receive_frame(struct velocity_info *vptr, int idx)
 		rd_info->skb = NULL;
 	}
 
-	pci_action(vptr->pdev, rd_info->skb_dma, vptr->rx_buf_sz,
+	pci_action(vptr->pdev, rd_info->skb_dma, vptr->rx.buf_sz,
 		   PCI_DMA_FROMDEVICE);
 
 	skb_put(skb, pkt_len - 4);
 	skb->protocol = eth_type_trans(skb, vptr->dev);
 
+	if (vptr->vlgrp && (rd->rdesc0.RSR & RSR_DETAG)) {
+		vlan_hwaccel_rx(skb, vptr->vlgrp,
+				swab16(le16_to_cpu(rd->rdesc1.PQTAG)));
+	} else
+		netif_rx(skb);
+
 	stats->rx_bytes += pkt_len;
-	netif_rx(skb);
 
 	return 0;
 }
@@ -1449,10 +1587,10 @@ static int velocity_receive_frame(struct velocity_info *vptr, int idx)
 
 static int velocity_alloc_rx_buf(struct velocity_info *vptr, int idx)
 {
-	struct rx_desc *rd = &(vptr->rd_ring[idx]);
-	struct velocity_rd_info *rd_info = &(vptr->rd_info[idx]);
+	struct rx_desc *rd = &(vptr->rx.ring[idx]);
+	struct velocity_rd_info *rd_info = &(vptr->rx.info[idx]);
 
-	rd_info->skb = dev_alloc_skb(vptr->rx_buf_sz + 64);
+	rd_info->skb = dev_alloc_skb(vptr->rx.buf_sz + 64);
 	if (rd_info->skb == NULL)
 		return -ENOMEM;
 
@@ -1461,16 +1599,15 @@ static int velocity_alloc_rx_buf(struct velocity_info *vptr, int idx)
 	 *	64byte alignment.
 	 */
 	skb_reserve(rd_info->skb, (unsigned long) rd_info->skb->data & 63);
-	rd_info->skb->dev = vptr->dev;
-	rd_info->skb_dma = pci_map_single(vptr->pdev, rd_info->skb->data, vptr->rx_buf_sz, PCI_DMA_FROMDEVICE);
+	rd_info->skb_dma = pci_map_single(vptr->pdev, rd_info->skb->data,
+					vptr->rx.buf_sz, PCI_DMA_FROMDEVICE);
 
 	/*
 	 *	Fill in the descriptor to match
- 	 */
+	 */
 
 	*((u32 *) & (rd->rdesc0)) = 0;
-	rd->len = cpu_to_le32(vptr->rx_buf_sz);
-	rd->inten = 1;
+	rd->size = cpu_to_le16(vptr->rx.buf_sz) | RX_INTEN;
 	rd->pa_low = cpu_to_le32(rd_info->skb_dma);
 	rd->pa_high = 0;
 	return 0;
@@ -1483,7 +1620,7 @@ static int velocity_alloc_rx_buf(struct velocity_info *vptr, int idx)
  *
  *	Scan the queues looking for transmitted packets that
  *	we can complete and clean up. Update any statistics as
- *	neccessary/
+ *	necessary/
  */
 
 static int velocity_tx_srv(struct velocity_info *vptr, u32 status)
@@ -1496,17 +1633,17 @@ static int velocity_tx_srv(struct velocity_info *vptr, u32 status)
 	struct velocity_td_info *tdinfo;
 	struct net_device_stats *stats = &vptr->stats;
 
-	for (qnum = 0; qnum < vptr->num_txq; qnum++) {
-		for (idx = vptr->td_tail[qnum]; vptr->td_used[qnum] > 0;
+	for (qnum = 0; qnum < vptr->tx.numq; qnum++) {
+		for (idx = vptr->tx.tail[qnum]; vptr->tx.used[qnum] > 0;
 			idx = (idx + 1) % vptr->options.numtx) {
 
 			/*
 			 *	Get Tx Descriptor
 			 */
-			td = &(vptr->td_rings[qnum][idx]);
-			tdinfo = &(vptr->td_infos[qnum][idx]);
+			td = &(vptr->tx.rings[qnum][idx]);
+			tdinfo = &(vptr->tx.infos[qnum][idx]);
 
-			if (td->tdesc0.owner == OWNED_BY_NIC)
+			if (td->tdesc0.len & OWNED_BY_NIC)
 				break;
 
 			if ((works++ > 15))
@@ -1528,9 +1665,9 @@ static int velocity_tx_srv(struct velocity_info *vptr, u32 status)
 				stats->tx_bytes += tdinfo->skb->len;
 			}
 			velocity_free_tx_buf(vptr, tdinfo);
-			vptr->td_used[qnum]--;
+			vptr->tx.used[qnum]--;
 		}
-		vptr->td_tail[qnum] = idx;
+		vptr->tx.tail[qnum] = idx;
 
 		if (AVAIL_TD(vptr, qnum) < 1) {
 			full = 1;
@@ -1614,7 +1751,7 @@ static void velocity_error(struct velocity_info *vptr, int status)
 	if (status & ISR_TXSTLI) {
 		struct mac_regs __iomem * regs = vptr->mac_regs;
 
-		printk(KERN_ERR "TD structure errror TDindex=%hx\n", readw(&regs->TDIdx[0]));
+		printk(KERN_ERR "TD structure error TDindex=%hx\n", readw(&regs->TDIdx[0]));
 		BYTE_REG_BITS_ON(TXESR_TDSTR, &regs->TXESR);
 		writew(TRDCSR_RUN, &regs->TDCSRClr);
 		netif_stop_queue(vptr->dev);
@@ -1702,11 +1839,11 @@ static void velocity_free_tx_buf(struct velocity_info *vptr, struct velocity_td_
 	/*
 	 *	Don't unmap the pre-allocated tx_bufs
 	 */
-	if (tdinfo->skb_dma && (tdinfo->skb_dma[0] != tdinfo->buf_dma)) {
+	if (tdinfo->skb_dma) {
 
 		for (i = 0; i < tdinfo->nskb_dma; i++) {
 #ifdef VELOCITY_ZERO_COPY_SUPPORT
-			pci_unmap_single(vptr->pdev, tdinfo->skb_dma[i], td->tdesc1.len, PCI_DMA_TODEVICE);
+			pci_unmap_single(vptr->pdev, tdinfo->skb_dma[i], le16_to_cpu(td->tdesc1.len), PCI_DMA_TODEVICE);
 #else
 			pci_unmap_single(vptr->pdev, tdinfo->skb_dma[i], skb->len, PCI_DMA_TODEVICE);
 #endif
@@ -1715,6 +1852,40 @@ static void velocity_free_tx_buf(struct velocity_info *vptr, struct velocity_td_
 	}
 	dev_kfree_skb_irq(skb);
 	tdinfo->skb = NULL;
+}
+
+static int velocity_init_rings(struct velocity_info *vptr, int mtu)
+{
+	int ret;
+
+	velocity_set_rxbufsize(vptr, mtu);
+
+	ret = velocity_init_dma_rings(vptr);
+	if (ret < 0)
+		goto out;
+
+	ret = velocity_init_rd_ring(vptr);
+	if (ret < 0)
+		goto err_free_dma_rings_0;
+
+	ret = velocity_init_td_ring(vptr);
+	if (ret < 0)
+		goto err_free_rd_ring_1;
+out:
+	return ret;
+
+err_free_rd_ring_1:
+	velocity_free_rd_ring(vptr);
+err_free_dma_rings_0:
+	velocity_free_dma_rings(vptr);
+	goto out;
+}
+
+static void velocity_free_rings(struct velocity_info *vptr)
+{
+	velocity_free_td_ring(vptr);
+	velocity_free_rd_ring(vptr);
+	velocity_free_dma_rings(vptr);
 }
 
 /**
@@ -1733,22 +1904,14 @@ static int velocity_open(struct net_device *dev)
 	struct velocity_info *vptr = netdev_priv(dev);
 	int ret;
 
-	vptr->rx_buf_sz = (dev->mtu <= 1504 ? PKT_BUF_SZ : dev->mtu + 32);
-
-	ret = velocity_init_rings(vptr);
+	ret = velocity_init_rings(vptr, dev->mtu);
 	if (ret < 0)
 		goto out;
 
-	ret = velocity_init_rd_ring(vptr);
-	if (ret < 0)
-		goto err_free_desc_rings;
-
-	ret = velocity_init_td_ring(vptr);
-	if (ret < 0)
-		goto err_free_rd_ring;
-
 	/* Ensure chip is running */
 	pci_set_power_state(vptr->pdev, PCI_D0);
+
+	velocity_give_many_rx_descs(vptr);
 
 	velocity_init_registers(vptr, VELOCITY_INIT_COLD);
 
@@ -1757,7 +1920,8 @@ static int velocity_open(struct net_device *dev)
 	if (ret < 0) {
 		/* Power down the chip */
 		pci_set_power_state(vptr->pdev, PCI_D3hot);
-		goto err_free_td_ring;
+		velocity_free_rings(vptr);
+		goto out;
 	}
 
 	mac_enable_int(vptr->mac_regs);
@@ -1765,14 +1929,6 @@ static int velocity_open(struct net_device *dev)
 	vptr->flags |= VELOCITY_FLAGS_OPENED;
 out:
 	return ret;
-
-err_free_td_ring:
-	velocity_free_td_ring(vptr);
-err_free_rd_ring:
-	velocity_free_rd_ring(vptr);
-err_free_desc_rings:
-	velocity_free_rings(vptr);
-	goto out;
 }
 
 /**
@@ -1788,49 +1944,72 @@ err_free_desc_rings:
 static int velocity_change_mtu(struct net_device *dev, int new_mtu)
 {
 	struct velocity_info *vptr = netdev_priv(dev);
-	unsigned long flags;
-	int oldmtu = dev->mtu;
 	int ret = 0;
 
 	if ((new_mtu < VELOCITY_MIN_MTU) || new_mtu > (VELOCITY_MAX_MTU)) {
 		VELOCITY_PRT(MSG_LEVEL_ERR, KERN_NOTICE "%s: Invalid MTU.\n",
 				vptr->dev->name);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto out_0;
 	}
 
-	if (new_mtu != oldmtu) {
+	if (!netif_running(dev)) {
+		dev->mtu = new_mtu;
+		goto out_0;
+	}
+
+	if (dev->mtu != new_mtu) {
+		struct velocity_info *tmp_vptr;
+		unsigned long flags;
+		struct rx_info rx;
+		struct tx_info tx;
+
+		tmp_vptr = kzalloc(sizeof(*tmp_vptr), GFP_KERNEL);
+		if (!tmp_vptr) {
+			ret = -ENOMEM;
+			goto out_0;
+		}
+
+		tmp_vptr->dev = dev;
+		tmp_vptr->pdev = vptr->pdev;
+		tmp_vptr->options = vptr->options;
+		tmp_vptr->tx.numq = vptr->tx.numq;
+
+		ret = velocity_init_rings(tmp_vptr, new_mtu);
+		if (ret < 0)
+			goto out_free_tmp_vptr_1;
+
 		spin_lock_irqsave(&vptr->lock, flags);
 
 		netif_stop_queue(dev);
 		velocity_shutdown(vptr);
 
-		velocity_free_td_ring(vptr);
-		velocity_free_rd_ring(vptr);
+		rx = vptr->rx;
+		tx = vptr->tx;
+
+		vptr->rx = tmp_vptr->rx;
+		vptr->tx = tmp_vptr->tx;
+
+		tmp_vptr->rx = rx;
+		tmp_vptr->tx = tx;
 
 		dev->mtu = new_mtu;
-		if (new_mtu > 8192)
-			vptr->rx_buf_sz = 9 * 1024;
-		else if (new_mtu > 4096)
-			vptr->rx_buf_sz = 8192;
-		else
-			vptr->rx_buf_sz = 4 * 1024;
 
-		ret = velocity_init_rd_ring(vptr);
-		if (ret < 0)
-			goto out_unlock;
-
-		ret = velocity_init_td_ring(vptr);
-		if (ret < 0)
-			goto out_unlock;
+		velocity_give_many_rx_descs(vptr);
 
 		velocity_init_registers(vptr, VELOCITY_INIT_COLD);
 
 		mac_enable_int(vptr->mac_regs);
 		netif_start_queue(dev);
-out_unlock:
-		spin_unlock_irqrestore(&vptr->lock, flags);
-	}
 
+		spin_unlock_irqrestore(&vptr->lock, flags);
+
+		velocity_free_rings(tmp_vptr);
+
+out_free_tmp_vptr_1:
+		kfree(tmp_vptr);
+	}
+out_0:
 	return ret;
 }
 
@@ -1876,9 +2055,6 @@ static int velocity_close(struct net_device *dev)
 	/* Power down the chip */
 	pci_set_power_state(vptr->pdev, PCI_D3hot);
 
-	/* Free the resources */
-	velocity_free_td_ring(vptr);
-	velocity_free_rd_ring(vptr);
 	velocity_free_rings(vptr);
 
 	vptr->flags &= (~VELOCITY_FLAGS_OPENED);
@@ -1901,9 +2077,19 @@ static int velocity_xmit(struct sk_buff *skb, struct net_device *dev)
 	struct tx_desc *td_ptr;
 	struct velocity_td_info *tdinfo;
 	unsigned long flags;
+	int pktlen = skb->len;
+	__le16 len;
 	int index;
 
-	int pktlen = skb->len;
+
+
+	if (skb->len < ETH_ZLEN) {
+		if (skb_padto(skb, ETH_ZLEN))
+			goto out;
+		pktlen = ETH_ZLEN;
+	}
+
+	len = cpu_to_le16(pktlen);
 
 #ifdef VELOCITY_ZERO_COPY_SUPPORT
 	if (skb_shinfo(skb)->nr_frags > 6 && __skb_linearize(skb)) {
@@ -1914,31 +2100,13 @@ static int velocity_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	spin_lock_irqsave(&vptr->lock, flags);
 
-	index = vptr->td_curr[qnum];
-	td_ptr = &(vptr->td_rings[qnum][index]);
-	tdinfo = &(vptr->td_infos[qnum][index]);
+	index = vptr->tx.curr[qnum];
+	td_ptr = &(vptr->tx.rings[qnum][index]);
+	tdinfo = &(vptr->tx.infos[qnum][index]);
 
-	td_ptr->tdesc1.TCPLS = TCPLS_NORMAL;
 	td_ptr->tdesc1.TCR = TCR0_TIC;
-	td_ptr->td_buf[0].queue = 0;
+	td_ptr->td_buf[0].size &= ~TD_QUEUE;
 
-	/*
-	 *	Pad short frames.
-	 */
-	if (pktlen < ETH_ZLEN) {
-		/* Cannot occur until ZC support */
-		pktlen = ETH_ZLEN;
-		skb_copy_from_linear_data(skb, tdinfo->buf, skb->len);
-		memset(tdinfo->buf + skb->len, 0, ETH_ZLEN - skb->len);
-		tdinfo->skb = skb;
-		tdinfo->skb_dma[0] = tdinfo->buf_dma;
-		td_ptr->tdesc0.pktsize = pktlen;
-		td_ptr->td_buf[0].pa_low = cpu_to_le32(tdinfo->skb_dma[0]);
-		td_ptr->td_buf[0].pa_high = 0;
-		td_ptr->td_buf[0].bufsize = td_ptr->tdesc0.pktsize;
-		tdinfo->nskb_dma = 1;
-		td_ptr->tdesc1.CMDZ = 2;
-	} else
 #ifdef VELOCITY_ZERO_COPY_SUPPORT
 	if (skb_shinfo(skb)->nr_frags > 0) {
 		int nfrags = skb_shinfo(skb)->nr_frags;
@@ -1946,36 +2114,35 @@ static int velocity_xmit(struct sk_buff *skb, struct net_device *dev)
 		if (nfrags > 6) {
 			skb_copy_from_linear_data(skb, tdinfo->buf, skb->len);
 			tdinfo->skb_dma[0] = tdinfo->buf_dma;
-			td_ptr->tdesc0.pktsize =
-			td_ptr->td_buf[0].pa_low = cpu_to_le32(tdinfo->skb_dma[0]);
-			td_ptr->td_buf[0].pa_high = 0;
-			td_ptr->td_buf[0].bufsize = td_ptr->tdesc0.pktsize;
+			td_ptr->tdesc0.len = len;
+			td_ptr->tx.buf[0].pa_low = cpu_to_le32(tdinfo->skb_dma[0]);
+			td_ptr->tx.buf[0].pa_high = 0;
+			td_ptr->tx.buf[0].size = len;	/* queue is 0 anyway */
 			tdinfo->nskb_dma = 1;
-			td_ptr->tdesc1.CMDZ = 2;
 		} else {
 			int i = 0;
 			tdinfo->nskb_dma = 0;
-			tdinfo->skb_dma[i] = pci_map_single(vptr->pdev, skb->data, skb->len - skb->data_len, PCI_DMA_TODEVICE);
+			tdinfo->skb_dma[i] = pci_map_single(vptr->pdev, skb->data,
+						skb_headlen(skb), PCI_DMA_TODEVICE);
 
-			td_ptr->tdesc0.pktsize = pktlen;
+			td_ptr->tdesc0.len = len;
 
 			/* FIXME: support 48bit DMA later */
-			td_ptr->td_buf[i].pa_low = cpu_to_le32(tdinfo->skb_dma);
-			td_ptr->td_buf[i].pa_high = 0;
-			td_ptr->td_buf[i].bufsize = skb->len->skb->data_len;
+			td_ptr->tx.buf[i].pa_low = cpu_to_le32(tdinfo->skb_dma);
+			td_ptr->tx.buf[i].pa_high = 0;
+			td_ptr->tx.buf[i].size = cpu_to_le16(skb_headlen(skb));
 
 			for (i = 0; i < nfrags; i++) {
 				skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
-				void *addr = ((void *) page_address(frag->page + frag->page_offset));
+				void *addr = (void *)page_address(frag->page) + frag->page_offset;
 
 				tdinfo->skb_dma[i + 1] = pci_map_single(vptr->pdev, addr, frag->size, PCI_DMA_TODEVICE);
 
-				td_ptr->td_buf[i + 1].pa_low = cpu_to_le32(tdinfo->skb_dma[i + 1]);
-				td_ptr->td_buf[i + 1].pa_high = 0;
-				td_ptr->td_buf[i + 1].bufsize = frag->size;
+				td_ptr->tx.buf[i + 1].pa_low = cpu_to_le32(tdinfo->skb_dma[i + 1]);
+				td_ptr->tx.buf[i + 1].pa_high = 0;
+				td_ptr->tx.buf[i + 1].size = cpu_to_le16(frag->size);
 			}
 			tdinfo->nskb_dma = i - 1;
-			td_ptr->tdesc1.CMDZ = i;
 		}
 
 	} else
@@ -1987,18 +2154,16 @@ static int velocity_xmit(struct sk_buff *skb, struct net_device *dev)
 		 */
 		tdinfo->skb = skb;
 		tdinfo->skb_dma[0] = pci_map_single(vptr->pdev, skb->data, pktlen, PCI_DMA_TODEVICE);
-		td_ptr->tdesc0.pktsize = pktlen;
+		td_ptr->tdesc0.len = len;
 		td_ptr->td_buf[0].pa_low = cpu_to_le32(tdinfo->skb_dma[0]);
 		td_ptr->td_buf[0].pa_high = 0;
-		td_ptr->td_buf[0].bufsize = td_ptr->tdesc0.pktsize;
+		td_ptr->td_buf[0].size = len;
 		tdinfo->nskb_dma = 1;
-		td_ptr->tdesc1.CMDZ = 2;
 	}
+	td_ptr->tdesc1.cmd = TCPLS_NORMAL + (tdinfo->nskb_dma + 1) * 16;
 
-	if (vptr->flags & VELOCITY_FLAGS_TAGGING) {
-		td_ptr->tdesc1.pqinf.VID = (vptr->options.vid & 0xfff);
-		td_ptr->tdesc1.pqinf.priority = 0;
-		td_ptr->tdesc1.pqinf.CFI = 0;
+	if (vptr->vlgrp && vlan_tx_tag_present(skb)) {
+		td_ptr->tdesc1.vlan = cpu_to_le16(vlan_tx_tag_get(skb));
 		td_ptr->tdesc1.TCR |= TCR0_VETAG;
 	}
 
@@ -2020,20 +2185,21 @@ static int velocity_xmit(struct sk_buff *skb, struct net_device *dev)
 
 		if (prev < 0)
 			prev = vptr->options.numtx - 1;
-		td_ptr->tdesc0.owner = OWNED_BY_NIC;
-		vptr->td_used[qnum]++;
-		vptr->td_curr[qnum] = (index + 1) % vptr->options.numtx;
+		td_ptr->tdesc0.len |= OWNED_BY_NIC;
+		vptr->tx.used[qnum]++;
+		vptr->tx.curr[qnum] = (index + 1) % vptr->options.numtx;
 
 		if (AVAIL_TD(vptr, qnum) < 1)
 			netif_stop_queue(dev);
 
-		td_ptr = &(vptr->td_rings[qnum][prev]);
-		td_ptr->td_buf[0].queue = 1;
+		td_ptr = &(vptr->tx.rings[qnum][prev]);
+		td_ptr->td_buf[0].size |= TD_QUEUE;
 		mac_tx_queue_wake(vptr->mac_regs, qnum);
 	}
 	dev->trans_start = jiffies;
 	spin_unlock_irqrestore(&vptr->lock, flags);
-	return 0;
+out:
+	return NETDEV_TX_OK;
 }
 
 /**
@@ -2122,15 +2288,15 @@ static void velocity_set_multi(struct net_device *dev)
 		rx_mode = (RCR_AM | RCR_AB);
 	} else {
 		int offset = MCAM_SIZE - vptr->multicast_limit;
-		mac_get_cam_mask(regs, vptr->mCAMmask, VELOCITY_MULTICAST_CAM);
+		mac_get_cam_mask(regs, vptr->mCAMmask);
 
 		for (i = 0, mclist = dev->mc_list; mclist && i < dev->mc_count; i++, mclist = mclist->next) {
-			mac_set_cam(regs, i + offset, mclist->dmi_addr, VELOCITY_MULTICAST_CAM);
+			mac_set_cam(regs, i + offset, mclist->dmi_addr);
 			vptr->mCAMmask[(offset + i) / 8] |= 1 << ((offset + i) & 7);
 		}
 
-		mac_set_cam_mask(regs, vptr->mCAMmask, VELOCITY_MULTICAST_CAM);
-		rx_mode = (RCR_AM | RCR_AB);
+		mac_set_cam_mask(regs, vptr->mCAMmask);
+		rx_mode = RCR_AM | RCR_AB | RCR_AP;
 	}
 	if (dev->mtu > 1500)
 		rx_mode |= RCR_AL;
@@ -3245,7 +3411,7 @@ static int velocity_suspend(struct pci_dev *pdev, pm_message_t state)
 		velocity_save_context(vptr, &vptr->context);
 		velocity_shutdown(vptr);
 		velocity_set_wol(vptr);
-		pci_enable_wake(pdev, 3, 1);
+		pci_enable_wake(pdev, PCI_D3hot, 1);
 		pci_set_power_state(pdev, PCI_D3hot);
 	} else {
 		velocity_save_context(vptr, &vptr->context);
@@ -3283,8 +3449,8 @@ static int velocity_resume(struct pci_dev *pdev)
 
 	velocity_tx_srv(vptr, 0);
 
-	for (i = 0; i < vptr->num_txq; i++) {
-		if (vptr->td_used[i]) {
+	for (i = 0; i < vptr->tx.numq; i++) {
+		if (vptr->tx.used[i]) {
 			mac_tx_queue_wake(vptr->mac_regs, i);
 		}
 	}
@@ -3301,21 +3467,22 @@ static int velocity_resume(struct pci_dev *pdev)
 static int velocity_netdev_event(struct notifier_block *nb, unsigned long notification, void *ptr)
 {
 	struct in_ifaddr *ifa = (struct in_ifaddr *) ptr;
+	struct net_device *dev = ifa->ifa_dev->dev;
+	struct velocity_info *vptr;
+	unsigned long flags;
 
-	if (ifa) {
-		struct net_device *dev = ifa->ifa_dev->dev;
-		struct velocity_info *vptr;
-		unsigned long flags;
+	if (dev_net(dev) != &init_net)
+		return NOTIFY_DONE;
 
-		spin_lock_irqsave(&velocity_dev_list_lock, flags);
-		list_for_each_entry(vptr, &velocity_dev_list, list) {
-			if (vptr->dev == dev) {
-				velocity_get_ip(vptr);
-				break;
-			}
+	spin_lock_irqsave(&velocity_dev_list_lock, flags);
+	list_for_each_entry(vptr, &velocity_dev_list, list) {
+		if (vptr->dev == dev) {
+			velocity_get_ip(vptr);
+			break;
 		}
-		spin_unlock_irqrestore(&velocity_dev_list_lock, flags);
 	}
+	spin_unlock_irqrestore(&velocity_dev_list_lock, flags);
+
 	return NOTIFY_DONE;
 }
 

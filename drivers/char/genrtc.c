@@ -51,6 +51,7 @@
 #include <linux/init.h>
 #include <linux/poll.h>
 #include <linux/proc_fs.h>
+#include <linux/smp_lock.h>
 #include <linux/workqueue.h>
 
 #include <asm/uaccess.h>
@@ -173,7 +174,6 @@ static void gen_rtc_interrupt(unsigned long arg)
 static ssize_t gen_rtc_read(struct file *file, char __user *buf,
 			size_t count, loff_t *ppos)
 {
-	DECLARE_WAITQUEUE(wait, current);
 	unsigned long data;
 	ssize_t retval;
 
@@ -183,18 +183,10 @@ static ssize_t gen_rtc_read(struct file *file, char __user *buf,
 	if (file->f_flags & O_NONBLOCK && !gen_rtc_irq_data)
 		return -EAGAIN;
 
-	add_wait_queue(&gen_rtc_wait, &wait);
-	retval = -ERESTARTSYS;
-
-	while (1) {
-		set_current_state(TASK_INTERRUPTIBLE);
-		data = xchg(&gen_rtc_irq_data, 0);
-		if (data)
-			break;
-		if (signal_pending(current))
-			goto out;
-		schedule();
-	}
+	retval = wait_event_interruptible(gen_rtc_wait,
+			(data = xchg(&gen_rtc_irq_data, 0)));
+	if (retval)
+		goto out;
 
 	/* first test allows optimizer to nuke this case for 32-bit machines */
 	if (sizeof (int) != sizeof (long) && count == sizeof (unsigned int)) {
@@ -206,10 +198,7 @@ static ssize_t gen_rtc_read(struct file *file, char __user *buf,
 		retval = put_user(data, (unsigned long __user *)buf) ?:
 			sizeof(unsigned long);
 	}
- out:
-	__set_current_state(TASK_RUNNING);
-	remove_wait_queue(&gen_rtc_wait, &wait);
-
+out:
 	return retval;
 }
 
@@ -350,12 +339,16 @@ static int gen_rtc_ioctl(struct inode *inode, struct file *file,
 
 static int gen_rtc_open(struct inode *inode, struct file *file)
 {
-	if (gen_rtc_status & RTC_IS_OPEN)
+	lock_kernel();
+	if (gen_rtc_status & RTC_IS_OPEN) {
+		unlock_kernel();
 		return -EBUSY;
+	}
 
 	gen_rtc_status |= RTC_IS_OPEN;
 	gen_rtc_irq_data = 0;
 	irq_active = 0;
+	unlock_kernel();
 
 	return 0;
 }

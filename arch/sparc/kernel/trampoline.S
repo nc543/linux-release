@@ -1,4 +1,4 @@
-/* $Id: trampoline.S,v 1.14 2002/01/11 08:45:38 davem Exp $
+/*
  * trampoline.S: SMP cpu boot-up trampoline code.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -18,7 +18,7 @@
 	.globl sun4m_cpu_startup, __smp4m_processor_id
 	.globl sun4d_cpu_startup, __smp4d_processor_id
 
-	__INIT
+	__CPUINIT
 	.align 4
 
 /* When we start up a cpu for the first time it enters this routine.
@@ -109,7 +109,7 @@ __smp4d_processor_id:
 /* CPUID in bootbus can be found at PA 0xff0140000 */
 #define SUN4D_BOOTBUS_CPUID	0xf0140000
 
-	__INIT
+	__CPUINIT
 	.align	4
 
 sun4d_cpu_startup:

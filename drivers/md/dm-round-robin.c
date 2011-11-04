@@ -9,7 +9,8 @@
  * Round-robin path selector.
  */
 
-#include "dm.h"
+#include <linux/device-mapper.h>
+
 #include "dm-path-selector.h"
 
 #include <linux/slab.h>
@@ -205,7 +206,7 @@ static void __exit dm_rr_exit(void)
 	int r = dm_unregister_path_selector(&rr_ps);
 
 	if (r < 0)
-		DMERR("round-robin: unregister failed %d", r);
+		DMERR("unregister failed %d", r);
 }
 
 module_init(dm_rr_init);

@@ -3,6 +3,7 @@
 #define _ST_H
 
 #include <linux/completion.h>
+#include <linux/mutex.h>
 #include <linux/kref.h>
 #include <scsi/scsi_cmnd.h>
 
@@ -11,6 +12,7 @@ struct st_cmdstatus {
 	int midlevel_result;
 	struct scsi_sense_hdr sense_hdr;
 	int have_sense;
+	int residual;
 	u64 uremainder64;
 	u8 flags;
 	u8 remainder_valid;
@@ -33,6 +35,7 @@ struct st_request {
 struct st_buffer {
 	unsigned char dma;	/* DMA-able buffer */
 	unsigned char do_dio;   /* direct i/o set up? */
+	unsigned char cleared;  /* internal buffer cleared after open? */
 	int buffer_size;
 	int buffer_blocks;
 	int buffer_bytes;
@@ -98,7 +101,7 @@ struct st_partstat {
 struct scsi_tape {
 	struct scsi_driver *driver;
 	struct scsi_device *device;
-	struct semaphore lock;	/* For serialization */
+	struct mutex lock;	/* For serialization */
 	struct completion wait;	/* For SCSI commands */
 	struct st_buffer *buffer;
 
@@ -121,6 +124,7 @@ struct scsi_tape {
 	unsigned char try_dio_now;		/* try direct i/o before next close? */
 	unsigned char c_algo;			/* compression algorithm */
 	unsigned char pos_unknown;			/* after reset position unknown */
+	unsigned char sili;			/* use SILI when reading in variable b mode */
 	int tape_type;
 	int long_timeout;	/* timeout for commands known to take long time */
 
@@ -163,7 +167,6 @@ struct scsi_tape {
 	int nbr_requests;
 	int nbr_dio;
 	int nbr_pages;
-	int nbr_combinable;
 	unsigned char last_cmnd[6];
 	unsigned char last_sense[16];
 #endif

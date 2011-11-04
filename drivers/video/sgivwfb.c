@@ -21,8 +21,7 @@
 
 #include <asm/io.h>
 #include <asm/mtrr.h>
-
-#include <setup_arch.h>
+#include <asm/visws/sgivw.h>
 
 #define INCLUDE_TIMING_TABLE_DATA
 #define DBE_REG_BASE par->regs
@@ -752,7 +751,7 @@ static int __init sgivwfb_probe(struct platform_device *dev)
 	struct fb_info *info;
 	char *monitor;
 
-	info = framebuffer_alloc(sizeof(struct sgivw_par) + sizeof(u32) * 256, &dev->dev);
+	info = framebuffer_alloc(sizeof(struct sgivw_par) + sizeof(u32) * 16, &dev->dev);
 	if (!info)
 		return -ENOMEM;
 	par = info->par;

@@ -74,7 +74,6 @@ struct mlog_attribute {
 #define define_mask(_name) {			\
 	.attr = {				\
 		.name = #_name,			\
-		.owner = THIS_MODULE,		\
 		.mode = S_IRUGO | S_IWUSR,	\
 	},					\
 	.mask = ML_##_name,			\
@@ -110,6 +109,7 @@ static struct mlog_attribute mlog_attrs[MLOG_MAX_BITS] = {
 	define_mask(CONN),
 	define_mask(QUORUM),
 	define_mask(EXPORT),
+	define_mask(XATTR),
 	define_mask(ERROR),
 	define_mask(NOTICE),
 	define_mask(KTHREAD),
@@ -144,10 +144,10 @@ static struct kobj_type mlog_ktype = {
 };
 
 static struct kset mlog_kset = {
-	.kobj   = {.name = "logmask", .ktype = &mlog_ktype},
+	.kobj   = {.ktype = &mlog_ktype},
 };
 
-int mlog_sys_init(struct kset *o2cb_subsys)
+int mlog_sys_init(struct kset *o2cb_kset)
 {
 	int i = 0;
 
@@ -157,7 +157,8 @@ int mlog_sys_init(struct kset *o2cb_subsys)
 	}
 	mlog_attr_ptrs[i] = NULL;
 
-	kobj_set_kset_s(&mlog_kset, *o2cb_subsys);
+	kobject_set_name(&mlog_kset.kobj, "logmask");
+	mlog_kset.kobj.kset = o2cb_kset;
 	return kset_register(&mlog_kset);
 }
 

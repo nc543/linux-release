@@ -29,6 +29,8 @@ static struct op_powerpc_model *model;
 static struct op_counter_config ctr[OP_MAX_COUNTER];
 static struct op_system_config sys;
 
+static int op_per_cpu_rc;
+
 static void op_handle_interrupt(struct pt_regs *regs)
 {
 	model->handle_interrupt(regs, ctr);
@@ -36,12 +38,19 @@ static void op_handle_interrupt(struct pt_regs *regs)
 
 static void op_powerpc_cpu_setup(void *dummy)
 {
-	model->cpu_setup(ctr);
+	int ret;
+
+	ret = model->cpu_setup(ctr);
+
+	if (ret != 0)
+		op_per_cpu_rc = ret;
 }
 
 static int op_powerpc_setup(void)
 {
 	int err;
+
+	op_per_cpu_rc = 0;
 
 	/* Grab the hardware */
 	err = reserve_pmc_hardware(op_handle_interrupt);
@@ -49,12 +58,21 @@ static int op_powerpc_setup(void)
 		return err;
 
 	/* Pre-compute the values to stuff in the hardware registers.  */
-	model->reg_setup(ctr, &sys, model->num_counters);
+	op_per_cpu_rc = model->reg_setup(ctr, &sys, model->num_counters);
 
-	/* Configure the registers on all cpus.  */
-	on_each_cpu(op_powerpc_cpu_setup, NULL, 0, 1);
+	if (op_per_cpu_rc)
+		goto out;
 
-	return 0;
+	/* Configure the registers on all cpus.	 If an error occurs on one
+	 * of the cpus, op_per_cpu_rc will be set to the error */
+	on_each_cpu(op_powerpc_cpu_setup, NULL, 1);
+
+out:	if (op_per_cpu_rc) {
+		/* error on setup release the performance counter hardware */
+		release_pmc_hardware();
+	}
+
+	return op_per_cpu_rc;
 }
 
 static void op_powerpc_shutdown(void)
@@ -64,16 +82,29 @@ static void op_powerpc_shutdown(void)
 
 static void op_powerpc_cpu_start(void *dummy)
 {
-	model->start(ctr);
+	/* If any of the cpus have return an error, set the
+	 * global flag to the error so it can be returned
+	 * to the generic OProfile caller.
+	 */
+	int ret;
+
+	ret = model->start(ctr);
+	if (ret != 0)
+		op_per_cpu_rc = ret;
 }
 
 static int op_powerpc_start(void)
 {
+	op_per_cpu_rc = 0;
+
 	if (model->global_start)
-		model->global_start(ctr);
-	if (model->start)
-		on_each_cpu(op_powerpc_cpu_start, NULL, 0, 1);
-	return 0;
+		return model->global_start(ctr);
+	if (model->start) {
+		on_each_cpu(op_powerpc_cpu_start, NULL, 1);
+		return op_per_cpu_rc;
+	}
+	return -EIO; /* No start function is defined for this
+			power architecture */
 }
 
 static inline void op_powerpc_cpu_stop(void *dummy)
@@ -84,7 +115,7 @@ static inline void op_powerpc_cpu_stop(void *dummy)
 static void op_powerpc_stop(void)
 {
 	if (model->stop)
-		on_each_cpu(op_powerpc_cpu_stop, NULL, 0, 1);
+		on_each_cpu(op_powerpc_cpu_stop, NULL, 1);
         if (model->global_stop)
                 model->global_stop();
 }
@@ -147,11 +178,13 @@ int __init oprofile_arch_init(struct oprofile_operations *ops)
 
 	switch (cur_cpu_spec->oprofile_type) {
 #ifdef CONFIG_PPC64
-#ifdef CONFIG_PPC_CELL_NATIVE
+#ifdef CONFIG_OPROFILE_CELL
 		case PPC_OPROFILE_CELL:
 			if (firmware_has_feature(FW_FEATURE_LPAR))
 				return -ENODEV;
 			model = &op_model_cell;
+			ops->sync_start = model->sync_start;
+			ops->sync_stop = model->sync_stop;
 			break;
 #endif
 		case PPC_OPROFILE_RS64:
@@ -169,9 +202,9 @@ int __init oprofile_arch_init(struct oprofile_operations *ops)
 			model = &op_model_7450;
 			break;
 #endif
-#ifdef CONFIG_FSL_BOOKE
-		case PPC_OPROFILE_BOOKE:
-			model = &op_model_fsl_booke;
+#if defined(CONFIG_FSL_EMB_PERFMON)
+		case PPC_OPROFILE_FSL_EMB:
+			model = &op_model_fsl_emb;
 			break;
 #endif
 		default:

@@ -41,6 +41,11 @@ unsigned long clockevent_delta2ns(unsigned long latch,
 {
 	u64 clc = ((u64) latch << evt->shift);
 
+	if (unlikely(!evt->mult)) {
+		evt->mult = 1;
+		WARN_ON(1);
+	}
+
 	do_div(clc, evt->mult);
 	if (clc < 1000)
 		clc = 1000;
@@ -67,6 +72,16 @@ void clockevents_set_mode(struct clock_event_device *dev,
 }
 
 /**
+ * clockevents_shutdown - shutdown the device and clear next_event
+ * @dev:	device to shutdown
+ */
+void clockevents_shutdown(struct clock_event_device *dev)
+{
+	clockevents_set_mode(dev, CLOCK_EVT_MODE_SHUTDOWN);
+	dev->next_event.tv64 = KTIME_MAX;
+}
+
+/**
  * clockevents_program_event - Reprogram the clock event device.
  * @expires:	absolute expiry time (monotonic clock)
  *
@@ -77,6 +92,11 @@ int clockevents_program_event(struct clock_event_device *dev, ktime_t expires,
 {
 	unsigned long long clc;
 	int64_t delta;
+
+	if (unlikely(expires.tv64 < 0)) {
+		WARN_ON_ONCE(1);
+		return -ETIME;
+	}
 
 	delta = ktime_to_ns(ktime_sub(expires, now));
 
@@ -113,16 +133,6 @@ int clockevents_register_notifier(struct notifier_block *nb)
 	return ret;
 }
 
-/**
- * clockevents_unregister_notifier - unregister a clock events change listener
- */
-void clockevents_unregister_notifier(struct notifier_block *nb)
-{
-	spin_lock(&clockevents_lock);
-	raw_notifier_chain_unregister(&clockevents_chain, nb);
-	spin_unlock(&clockevents_lock);
-}
-
 /*
  * Notify about a clock event change. Called with clockevents_lock
  * held.
@@ -133,7 +143,7 @@ static void clockevents_do_notify(unsigned long reason, void *dev)
 }
 
 /*
- * Called after a notify add to make devices availble which were
+ * Called after a notify add to make devices available which were
  * released from the notifier call.
  */
 static void clockevents_notify_released(void)
@@ -156,6 +166,14 @@ static void clockevents_notify_released(void)
 void clockevents_register_device(struct clock_event_device *dev)
 {
 	BUG_ON(dev->mode != CLOCK_EVT_MODE_UNUSED);
+	/*
+	 * A nsec2cyc multiplicator of 0 is invalid and we'd crash
+	 * on it, so fix it up and emit a warning:
+	 */
+	if (unlikely(!dev->mult)) {
+		dev->mult = 1;
+		WARN_ON(1);
+	}
 
 	spin_lock(&clockevents_lock);
 
@@ -169,7 +187,7 @@ void clockevents_register_device(struct clock_event_device *dev)
 /*
  * Noop handler when we shut down an event device
  */
-static void clockevents_handle_noop(struct clock_event_device *dev)
+void clockevents_handle_noop(struct clock_event_device *dev)
 {
 }
 
@@ -191,7 +209,6 @@ void clockevents_exchange_device(struct clock_event_device *old,
 	 * released list and do a notify add later.
 	 */
 	if (old) {
-		old->event_handler = clockevents_handle_noop;
 		clockevents_set_mode(old, CLOCK_EVT_MODE_UNUSED);
 		list_del(&old->list);
 		list_add(&old->list, &clockevents_released);
@@ -199,57 +216,19 @@ void clockevents_exchange_device(struct clock_event_device *old,
 
 	if (new) {
 		BUG_ON(new->mode != CLOCK_EVT_MODE_UNUSED);
-		clockevents_set_mode(new, CLOCK_EVT_MODE_SHUTDOWN);
+		clockevents_shutdown(new);
 	}
 	local_irq_restore(flags);
 }
 
-/**
- * clockevents_request_device
- */
-struct clock_event_device *clockevents_request_device(unsigned int features,
-						      cpumask_t cpumask)
-{
-	struct clock_event_device *cur, *dev = NULL;
-	struct list_head *tmp;
-
-	spin_lock(&clockevents_lock);
-
-	list_for_each(tmp, &clockevent_devices) {
-		cur = list_entry(tmp, struct clock_event_device, list);
-
-		if ((cur->features & features) == features &&
-		    cpus_equal(cpumask, cur->cpumask)) {
-			if (!dev || dev->rating < cur->rating)
-				dev = cur;
-		}
-	}
-
-	clockevents_exchange_device(NULL, dev);
-
-	spin_unlock(&clockevents_lock);
-
-	return dev;
-}
-
-/**
- * clockevents_release_device
- */
-void clockevents_release_device(struct clock_event_device *dev)
-{
-	spin_lock(&clockevents_lock);
-
-	clockevents_exchange_device(dev, NULL);
-	clockevents_notify_released();
-
-	spin_unlock(&clockevents_lock);
-}
-
+#ifdef CONFIG_GENERIC_CLOCKEVENTS
 /**
  * clockevents_notify - notification about relevant events
  */
 void clockevents_notify(unsigned long reason, void *arg)
 {
+	struct list_head *node, *tmp;
+
 	spin_lock(&clockevents_lock);
 	clockevents_do_notify(reason, arg);
 
@@ -259,13 +238,8 @@ void clockevents_notify(unsigned long reason, void *arg)
 		 * Unregister the clock event devices which were
 		 * released from the users in the notify chain.
 		 */
-		while (!list_empty(&clockevents_released)) {
-			struct clock_event_device *dev;
-
-			dev = list_entry(clockevents_released.next,
-					 struct clock_event_device, list);
-			list_del(&dev->list);
-		}
+		list_for_each_safe(node, tmp, &clockevents_released)
+			list_del(node);
 		break;
 	default:
 		break;
@@ -273,4 +247,4 @@ void clockevents_notify(unsigned long reason, void *arg)
 	spin_unlock(&clockevents_lock);
 }
 EXPORT_SYMBOL_GPL(clockevents_notify);
-
+#endif

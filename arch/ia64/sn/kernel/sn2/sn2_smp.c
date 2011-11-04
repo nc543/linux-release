@@ -40,6 +40,7 @@
 #include <asm/sn/shub_mmr.h>
 #include <asm/sn/nodepda.h>
 #include <asm/sn/rw_mmr.h>
+#include <asm/sn/sn_feature_sets.h>
 
 DEFINE_PER_CPU(struct ptc_stats, ptcstats);
 DECLARE_PER_CPU(struct ptc_stats, ptcstats);
@@ -429,6 +430,31 @@ void sn2_send_IPI(int cpuid, int vector, int delivery_mode, int redirect)
 	sn_send_IPI_phys(nasid, physid, vector, delivery_mode);
 }
 
+#ifdef CONFIG_HOTPLUG_CPU
+/**
+ * sn_cpu_disable_allowed - Determine if a CPU can be disabled.
+ * @cpu - CPU that is requested to be disabled.
+ *
+ * CPU disable is only allowed on SHub2 systems running with a PROM
+ * that supports CPU disable. It is not permitted to disable the boot processor.
+ */
+bool sn_cpu_disable_allowed(int cpu)
+{
+	if (is_shub2() && sn_prom_feature_available(PRF_CPU_DISABLE_SUPPORT)) {
+		if (cpu != 0)
+			return true;
+		else
+			printk(KERN_WARNING
+			      "Disabling the boot processor is not allowed.\n");
+
+	} else
+		printk(KERN_WARNING
+		       "CPU disable is not supported on this system.\n");
+
+	return false;
+}
+#endif /* CONFIG_HOTPLUG_CPU */
+
 #ifdef CONFIG_PROC_FS
 
 #define PTC_BASENAME	"sgi_sn/ptc_statistics"
@@ -486,6 +512,8 @@ static ssize_t sn2_ptc_proc_write(struct file *file, const char __user *user, si
 	int cpu;
 	char optstr[64];
 
+	if (count == 0 || count > sizeof(optstr))
+		return -EINVAL;
 	if (copy_from_user(optstr, user, count))
 		return -EFAULT;
 	optstr[count - 1] = '\0';
@@ -497,7 +525,7 @@ static ssize_t sn2_ptc_proc_write(struct file *file, const char __user *user, si
 	return count;
 }
 
-static struct seq_operations sn2_ptc_seq_ops = {
+static const struct seq_operations sn2_ptc_seq_ops = {
 	.start = sn2_ptc_seq_start,
 	.next = sn2_ptc_seq_next,
 	.stop = sn2_ptc_seq_stop,
@@ -524,11 +552,12 @@ static int __init sn2_ptc_init(void)
 	if (!ia64_platform_is("sn2"))
 		return 0;
 
-	if (!(proc_sn2_ptc = create_proc_entry(PTC_BASENAME, 0444, NULL))) {
+	proc_sn2_ptc = proc_create(PTC_BASENAME, 0444,
+				   NULL, &proc_sn2_ptc_operations);
+	if (!&proc_sn2_ptc_operations) {
 		printk(KERN_ERR "unable to create %s proc entry", PTC_BASENAME);
 		return -EINVAL;
 	}
-	proc_sn2_ptc->proc_fops = &proc_sn2_ptc_operations;
 	spin_lock_init(&sn2_global_ptc_lock);
 	return 0;
 }

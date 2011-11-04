@@ -194,6 +194,20 @@ gss_mech_get_by_pseudoflavor(u32 pseudoflavor)
 EXPORT_SYMBOL(gss_mech_get_by_pseudoflavor);
 
 u32
+gss_svc_to_pseudoflavor(struct gss_api_mech *gm, u32 service)
+{
+	int i;
+
+	for (i = 0; i < gm->gm_pf_num; i++) {
+		if (gm->gm_pfs[i].service == service) {
+			return gm->gm_pfs[i].pseudoflavor;
+		}
+	}
+	return RPC_AUTH_MAXFLAVOR; /* illegal value */
+}
+EXPORT_SYMBOL(gss_svc_to_pseudoflavor);
+
+u32
 gss_pseudoflavor_to_service(struct gss_api_mech *gm, u32 pseudoflavor)
 {
 	int i;
@@ -303,7 +317,7 @@ gss_delete_sec_context(struct gss_ctx	**context_handle)
 
 	if (!*context_handle)
 		return(GSS_S_NO_CONTEXT);
-	if ((*context_handle)->internal_ctx_id != 0)
+	if ((*context_handle)->internal_ctx_id)
 		(*context_handle)->mech_type->gm_ops
 			->gss_delete_sec_context((*context_handle)
 							->internal_ctx_id);

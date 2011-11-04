@@ -20,9 +20,9 @@
 #include <linux/spi/spi.h>
 
 #include <asm/io.h>
-#include <asm/arch/board.h>
-#include <asm/arch/gpio.h>
-#include <asm/arch/cpu.h>
+#include <mach/board.h>
+#include <mach/gpio.h>
+#include <mach/cpu.h>
 
 #include "atmel_spi.h"
 
@@ -46,11 +46,14 @@ struct atmel_spi {
 	struct clk		*clk;
 	struct platform_device	*pdev;
 	unsigned		new_1:1;
+	struct spi_device	*stay;
 
 	u8			stopping;
 	struct list_head	queue;
 	struct spi_transfer	*current_transfer;
-	unsigned long		remaining_bytes;
+	unsigned long		current_remaining_bytes;
+	struct spi_transfer	*next_transfer;
+	unsigned long		next_remaining_bytes;
 
 	void			*buffer;
 	dma_addr_t		buffer_dma;
@@ -62,29 +65,114 @@ struct atmel_spi {
 /*
  * Earlier SPI controllers (e.g. on at91rm9200) have a design bug whereby
  * they assume that spi slave device state will not change on deselect, so
- * that automagic deselection is OK.  Not so!  Workaround uses nCSx pins
- * as GPIOs; or newer controllers have CSAAT and friends.
+ * that automagic deselection is OK.  ("NPCSx rises if no data is to be
+ * transmitted")  Not so!  Workaround uses nCSx pins as GPIOs; or newer
+ * controllers have CSAAT and friends.
  *
- * Since the CSAAT functionality is a bit weird on newer controllers
- * as well, we use GPIO to control nCSx pins on all controllers.
+ * Since the CSAAT functionality is a bit weird on newer controllers as
+ * well, we use GPIO to control nCSx pins on all controllers, updating
+ * MR.PCS to avoid confusing the controller.  Using GPIOs also lets us
+ * support active-high chipselects despite the controller's belief that
+ * only active-low devices/systems exists.
+ *
+ * However, at91rm9200 has a second erratum whereby nCS0 doesn't work
+ * right when driven with GPIO.  ("Mode Fault does not allow more than one
+ * Master on Chip Select 0.")  No workaround exists for that ... so for
+ * nCS0 on that chip, we (a) don't use the GPIO, (b) can't support CS_HIGH,
+ * and (c) will trigger that first erratum in some cases.
  */
 
-static inline void cs_activate(struct spi_device *spi)
+static void cs_activate(struct atmel_spi *as, struct spi_device *spi)
 {
 	unsigned gpio = (unsigned) spi->controller_data;
 	unsigned active = spi->mode & SPI_CS_HIGH;
+	u32 mr;
+	int i;
+	u32 csr;
+	u32 cpol = (spi->mode & SPI_CPOL) ? SPI_BIT(CPOL) : 0;
 
-	dev_dbg(&spi->dev, "activate %u%s\n", gpio, active ? " (high)" : "");
-	gpio_set_value(gpio, active);
+	/* Make sure clock polarity is correct */
+	for (i = 0; i < spi->master->num_chipselect; i++) {
+		csr = spi_readl(as, CSR0 + 4 * i);
+		if ((csr ^ cpol) & SPI_BIT(CPOL))
+			spi_writel(as, CSR0 + 4 * i, csr ^ SPI_BIT(CPOL));
+	}
+
+	mr = spi_readl(as, MR);
+	mr = SPI_BFINS(PCS, ~(1 << spi->chip_select), mr);
+
+	dev_dbg(&spi->dev, "activate %u%s, mr %08x\n",
+			gpio, active ? " (high)" : "",
+			mr);
+
+	if (!(cpu_is_at91rm9200() && spi->chip_select == 0))
+		gpio_set_value(gpio, active);
+	spi_writel(as, MR, mr);
 }
 
-static inline void cs_deactivate(struct spi_device *spi)
+static void cs_deactivate(struct atmel_spi *as, struct spi_device *spi)
 {
 	unsigned gpio = (unsigned) spi->controller_data;
 	unsigned active = spi->mode & SPI_CS_HIGH;
+	u32 mr;
 
-	dev_dbg(&spi->dev, "DEactivate %u%s\n", gpio, active ? " (low)" : "");
-	gpio_set_value(gpio, !active);
+	/* only deactivate *this* device; sometimes transfers to
+	 * another device may be active when this routine is called.
+	 */
+	mr = spi_readl(as, MR);
+	if (~SPI_BFEXT(PCS, mr) & (1 << spi->chip_select)) {
+		mr = SPI_BFINS(PCS, 0xf, mr);
+		spi_writel(as, MR, mr);
+	}
+
+	dev_dbg(&spi->dev, "DEactivate %u%s, mr %08x\n",
+			gpio, active ? " (low)" : "",
+			mr);
+
+	if (!(cpu_is_at91rm9200() && spi->chip_select == 0))
+		gpio_set_value(gpio, !active);
+}
+
+static inline int atmel_spi_xfer_is_last(struct spi_message *msg,
+					struct spi_transfer *xfer)
+{
+	return msg->transfers.prev == &xfer->transfer_list;
+}
+
+static inline int atmel_spi_xfer_can_be_chained(struct spi_transfer *xfer)
+{
+	return xfer->delay_usecs == 0 && !xfer->cs_change;
+}
+
+static void atmel_spi_next_xfer_data(struct spi_master *master,
+				struct spi_transfer *xfer,
+				dma_addr_t *tx_dma,
+				dma_addr_t *rx_dma,
+				u32 *plen)
+{
+	struct atmel_spi	*as = spi_master_get_devdata(master);
+	u32			len = *plen;
+
+	/* use scratch buffer only when rx or tx data is unspecified */
+	if (xfer->rx_buf)
+		*rx_dma = xfer->rx_dma + xfer->len - len;
+	else {
+		*rx_dma = as->buffer_dma;
+		if (len > BUFFER_SIZE)
+			len = BUFFER_SIZE;
+	}
+	if (xfer->tx_buf)
+		*tx_dma = xfer->tx_dma + xfer->len - len;
+	else {
+		*tx_dma = as->buffer_dma;
+		if (len > BUFFER_SIZE)
+			len = BUFFER_SIZE;
+		memset(as->buffer, 0, len);
+		dma_sync_single_for_device(&as->pdev->dev,
+				as->buffer_dma, len, DMA_TO_DEVICE);
+	}
+
+	*plen = len;
 }
 
 /*
@@ -96,52 +184,85 @@ static void atmel_spi_next_xfer(struct spi_master *master,
 {
 	struct atmel_spi	*as = spi_master_get_devdata(master);
 	struct spi_transfer	*xfer;
-	u32			len;
+	u32			len, remaining;
+	u32			ieval;
 	dma_addr_t		tx_dma, rx_dma;
 
-	xfer = as->current_transfer;
-	if (!xfer || as->remaining_bytes == 0) {
-		if (xfer)
-			xfer = list_entry(xfer->transfer_list.next,
-					struct spi_transfer, transfer_list);
-		else
-			xfer = list_entry(msg->transfers.next,
-					struct spi_transfer, transfer_list);
-		as->remaining_bytes = xfer->len;
-		as->current_transfer = xfer;
+	if (!as->current_transfer)
+		xfer = list_entry(msg->transfers.next,
+				struct spi_transfer, transfer_list);
+	else if (!as->next_transfer)
+		xfer = list_entry(as->current_transfer->transfer_list.next,
+				struct spi_transfer, transfer_list);
+	else
+		xfer = NULL;
+
+	if (xfer) {
+		spi_writel(as, PTCR, SPI_BIT(RXTDIS) | SPI_BIT(TXTDIS));
+
+		len = xfer->len;
+		atmel_spi_next_xfer_data(master, xfer, &tx_dma, &rx_dma, &len);
+		remaining = xfer->len - len;
+
+		spi_writel(as, RPR, rx_dma);
+		spi_writel(as, TPR, tx_dma);
+
+		if (msg->spi->bits_per_word > 8)
+			len >>= 1;
+		spi_writel(as, RCR, len);
+		spi_writel(as, TCR, len);
+
+		dev_dbg(&msg->spi->dev,
+			"  start xfer %p: len %u tx %p/%08x rx %p/%08x\n",
+			xfer, xfer->len, xfer->tx_buf, xfer->tx_dma,
+			xfer->rx_buf, xfer->rx_dma);
+	} else {
+		xfer = as->next_transfer;
+		remaining = as->next_remaining_bytes;
 	}
 
-	len = as->remaining_bytes;
+	as->current_transfer = xfer;
+	as->current_remaining_bytes = remaining;
 
-	tx_dma = xfer->tx_dma + xfer->len - len;
-	rx_dma = xfer->rx_dma + xfer->len - len;
+	if (remaining > 0)
+		len = remaining;
+	else if (!atmel_spi_xfer_is_last(msg, xfer)
+			&& atmel_spi_xfer_can_be_chained(xfer)) {
+		xfer = list_entry(xfer->transfer_list.next,
+				struct spi_transfer, transfer_list);
+		len = xfer->len;
+	} else
+		xfer = NULL;
 
-	/* use scratch buffer only when rx or tx data is unspecified */
-	if (!xfer->rx_buf) {
-		rx_dma = as->buffer_dma;
-		if (len > BUFFER_SIZE)
-			len = BUFFER_SIZE;
+	as->next_transfer = xfer;
+
+	if (xfer) {
+		u32	total;
+
+		total = len;
+		atmel_spi_next_xfer_data(master, xfer, &tx_dma, &rx_dma, &len);
+		as->next_remaining_bytes = total - len;
+
+		spi_writel(as, RNPR, rx_dma);
+		spi_writel(as, TNPR, tx_dma);
+
+		if (msg->spi->bits_per_word > 8)
+			len >>= 1;
+		spi_writel(as, RNCR, len);
+		spi_writel(as, TNCR, len);
+
+		dev_dbg(&msg->spi->dev,
+			"  next xfer %p: len %u tx %p/%08x rx %p/%08x\n",
+			xfer, xfer->len, xfer->tx_buf, xfer->tx_dma,
+			xfer->rx_buf, xfer->rx_dma);
+		ieval = SPI_BIT(ENDRX) | SPI_BIT(OVRES);
+	} else {
+		spi_writel(as, RNCR, 0);
+		spi_writel(as, TNCR, 0);
+		ieval = SPI_BIT(RXBUFF) | SPI_BIT(ENDRX) | SPI_BIT(OVRES);
 	}
-	if (!xfer->tx_buf) {
-		tx_dma = as->buffer_dma;
-		if (len > BUFFER_SIZE)
-			len = BUFFER_SIZE;
-		memset(as->buffer, 0, len);
-		dma_sync_single_for_device(&as->pdev->dev,
-				as->buffer_dma, len, DMA_TO_DEVICE);
-	}
 
-	spi_writel(as, RPR, rx_dma);
-	spi_writel(as, TPR, tx_dma);
-
-	as->remaining_bytes -= len;
-	if (msg->spi->bits_per_word > 8)
-		len >>= 1;
-
-	/* REVISIT: when xfer->delay_usecs == 0, the PDC "next transfer"
-	 * mechanism might help avoid the IRQ latency between transfers
-	 *
-	 * We're also waiting for ENDRX before we start the next
+	/* REVISIT: We're waiting for ENDRX before we start the next
 	 * transfer because we need to handle some difficult timing
 	 * issues otherwise. If we wait for ENDTX in one transfer and
 	 * then starts waiting for ENDRX in the next, it's difficult
@@ -151,17 +272,7 @@ static void atmel_spi_next_xfer(struct spi_master *master,
 	 *
 	 * It should be doable, though. Just not now...
 	 */
-	spi_writel(as, TNCR, 0);
-	spi_writel(as, RNCR, 0);
-	spi_writel(as, IER, SPI_BIT(ENDRX) | SPI_BIT(OVRES));
-
-	dev_dbg(&msg->spi->dev,
-		"  start xfer %p: len %u tx %p/%08x rx %p/%08x imr %03x\n",
-		xfer, xfer->len, xfer->tx_buf, xfer->tx_dma,
-		xfer->rx_buf, xfer->rx_dma, spi_readl(as, IMR));
-
-	spi_writel(as, TCR, len);
-	spi_writel(as, RCR, len);
+	spi_writel(as, IER, ieval);
 	spi_writel(as, PTCR, SPI_BIT(TXTEN) | SPI_BIT(RXTEN));
 }
 
@@ -169,55 +280,88 @@ static void atmel_spi_next_message(struct spi_master *master)
 {
 	struct atmel_spi	*as = spi_master_get_devdata(master);
 	struct spi_message	*msg;
-	u32			mr;
+	struct spi_device	*spi;
 
 	BUG_ON(as->current_transfer);
 
 	msg = list_entry(as->queue.next, struct spi_message, queue);
+	spi = msg->spi;
 
-	/* Select the chip */
-	mr = spi_readl(as, MR);
-	mr = SPI_BFINS(PCS, ~(1 << msg->spi->chip_select), mr);
-	spi_writel(as, MR, mr);
-	cs_activate(msg->spi);
+	dev_dbg(master->dev.parent, "start message %p for %s\n",
+			msg, spi->dev.bus_id);
+
+	/* select chip if it's not still active */
+	if (as->stay) {
+		if (as->stay != spi) {
+			cs_deactivate(as, as->stay);
+			cs_activate(as, spi);
+		}
+		as->stay = NULL;
+	} else
+		cs_activate(as, spi);
 
 	atmel_spi_next_xfer(master, msg);
 }
 
-static void
+/*
+ * For DMA, tx_buf/tx_dma have the same relationship as rx_buf/rx_dma:
+ *  - The buffer is either valid for CPU access, else NULL
+ *  - If the buffer is valid, so is its DMA addresss
+ *
+ * This driver manages the dma addresss unless message->is_dma_mapped.
+ */
+static int
 atmel_spi_dma_map_xfer(struct atmel_spi *as, struct spi_transfer *xfer)
 {
+	struct device	*dev = &as->pdev->dev;
+
 	xfer->tx_dma = xfer->rx_dma = INVALID_DMA_ADDRESS;
-	if (xfer->tx_buf)
-		xfer->tx_dma = dma_map_single(&as->pdev->dev,
+	if (xfer->tx_buf) {
+		xfer->tx_dma = dma_map_single(dev,
 				(void *) xfer->tx_buf, xfer->len,
 				DMA_TO_DEVICE);
-	if (xfer->rx_buf)
-		xfer->rx_dma = dma_map_single(&as->pdev->dev,
+		if (dma_mapping_error(dev, xfer->tx_dma))
+			return -ENOMEM;
+	}
+	if (xfer->rx_buf) {
+		xfer->rx_dma = dma_map_single(dev,
 				xfer->rx_buf, xfer->len,
 				DMA_FROM_DEVICE);
+		if (dma_mapping_error(dev, xfer->rx_dma)) {
+			if (xfer->tx_buf)
+				dma_unmap_single(dev,
+						xfer->tx_dma, xfer->len,
+						DMA_TO_DEVICE);
+			return -ENOMEM;
+		}
+	}
+	return 0;
 }
 
 static void atmel_spi_dma_unmap_xfer(struct spi_master *master,
 				     struct spi_transfer *xfer)
 {
 	if (xfer->tx_dma != INVALID_DMA_ADDRESS)
-		dma_unmap_single(master->cdev.dev, xfer->tx_dma,
+		dma_unmap_single(master->dev.parent, xfer->tx_dma,
 				 xfer->len, DMA_TO_DEVICE);
 	if (xfer->rx_dma != INVALID_DMA_ADDRESS)
-		dma_unmap_single(master->cdev.dev, xfer->rx_dma,
+		dma_unmap_single(master->dev.parent, xfer->rx_dma,
 				 xfer->len, DMA_FROM_DEVICE);
 }
 
 static void
 atmel_spi_msg_done(struct spi_master *master, struct atmel_spi *as,
-		   struct spi_message *msg, int status)
+		struct spi_message *msg, int status, int stay)
 {
-	cs_deactivate(msg->spi);
+	if (!stay || status < 0)
+		cs_deactivate(as, msg->spi);
+	else
+		as->stay = msg->spi;
+
 	list_del(&msg->queue);
 	msg->status = status;
 
-	dev_dbg(master->cdev.dev,
+	dev_dbg(master->dev.parent,
 		"xfer complete: %u bytes transferred\n",
 		msg->actual_length);
 
@@ -226,6 +370,7 @@ atmel_spi_msg_done(struct spi_master *master, struct atmel_spi *as,
 	spin_lock(&as->lock);
 
 	as->current_transfer = NULL;
+	as->next_transfer = NULL;
 
 	/* continue if needed */
 	if (list_empty(&as->queue) || as->stopping)
@@ -258,7 +403,7 @@ atmel_spi_interrupt(int irq, void *dev_id)
 
 		ret = IRQ_HANDLED;
 
-		spi_writel(as, IDR, (SPI_BIT(ENDTX) | SPI_BIT(ENDRX)
+		spi_writel(as, IDR, (SPI_BIT(RXBUFF) | SPI_BIT(ENDRX)
 				     | SPI_BIT(OVRES)));
 
 		/*
@@ -280,7 +425,7 @@ atmel_spi_interrupt(int irq, void *dev_id)
 		if (xfer->delay_usecs)
 			udelay(xfer->delay_usecs);
 
-		dev_warn(master->cdev.dev, "fifo overrun (%u/%u remaining)\n",
+		dev_warn(master->dev.parent, "overrun (%u/%u remaining)\n",
 			 spi_readl(as, TCR), spi_readl(as, RCR));
 
 		/*
@@ -295,7 +440,7 @@ atmel_spi_interrupt(int irq, void *dev_id)
 			if (spi_readl(as, SR) & SPI_BIT(TXEMPTY))
 				break;
 		if (!timeout)
-			dev_warn(master->cdev.dev,
+			dev_warn(master->dev.parent,
 				 "timeout waiting for TXEMPTY");
 		while (spi_readl(as, SR) & SPI_BIT(RDRF))
 			spi_readl(as, RDR);
@@ -303,13 +448,13 @@ atmel_spi_interrupt(int irq, void *dev_id)
 		/* Clear any overrun happening while cleaning up */
 		spi_readl(as, SR);
 
-		atmel_spi_msg_done(master, as, msg, -EIO);
-	} else if (pending & SPI_BIT(ENDRX)) {
+		atmel_spi_msg_done(master, as, msg, -EIO, 0);
+	} else if (pending & (SPI_BIT(RXBUFF) | SPI_BIT(ENDRX))) {
 		ret = IRQ_HANDLED;
 
 		spi_writel(as, IDR, pending);
 
-		if (as->remaining_bytes == 0) {
+		if (as->current_remaining_bytes == 0) {
 			msg->actual_length += xfer->len;
 
 			if (!msg->is_dma_mapped)
@@ -319,14 +464,15 @@ atmel_spi_interrupt(int irq, void *dev_id)
 			if (xfer->delay_usecs)
 				udelay(xfer->delay_usecs);
 
-			if (msg->transfers.prev == &xfer->transfer_list) {
+			if (atmel_spi_xfer_is_last(msg, xfer)) {
 				/* report completed message */
-				atmel_spi_msg_done(master, as, msg, 0);
+				atmel_spi_msg_done(master, as, msg, 0,
+						xfer->cs_change);
 			} else {
 				if (xfer->cs_change) {
-					cs_deactivate(msg->spi);
+					cs_deactivate(as, msg->spi);
 					udelay(1);
-					cs_activate(msg->spi);
+					cs_activate(as, msg->spi);
 				}
 
 				/*
@@ -350,6 +496,7 @@ atmel_spi_interrupt(int irq, void *dev_id)
 	return ret;
 }
 
+/* the spi->mode bits understood by this driver: */
 #define MODEBITS (SPI_CPOL | SPI_CPHA | SPI_CS_HIGH)
 
 static int atmel_spi_setup(struct spi_device *spi)
@@ -357,7 +504,7 @@ static int atmel_spi_setup(struct spi_device *spi)
 	struct atmel_spi	*as;
 	u32			scbr, csr;
 	unsigned int		bits = spi->bits_per_word;
-	unsigned long		bus_hz, sck_hz;
+	unsigned long		bus_hz;
 	unsigned int		npcs_pin;
 	int			ret;
 
@@ -388,22 +535,42 @@ static int atmel_spi_setup(struct spi_device *spi)
 		return -EINVAL;
 	}
 
-	/* speed zero convention is used by some upper layers */
+	/* see notes above re chipselect */
+	if (cpu_is_at91rm9200()
+			&& spi->chip_select == 0
+			&& (spi->mode & SPI_CS_HIGH)) {
+		dev_dbg(&spi->dev, "setup: can't be active-high\n");
+		return -EINVAL;
+	}
+
+	/*
+	 * Pre-new_1 chips start out at half the peripheral
+	 * bus speed.
+	 */
 	bus_hz = clk_get_rate(as->clk);
+	if (!as->new_1)
+		bus_hz /= 2;
+
 	if (spi->max_speed_hz) {
-		/* assume div32/fdiv/mbz == 0 */
-		if (!as->new_1)
-			bus_hz /= 2;
-		scbr = ((bus_hz + spi->max_speed_hz - 1)
-			/ spi->max_speed_hz);
+		/*
+		 * Calculate the lowest divider that satisfies the
+		 * constraint, assuming div32/fdiv/mbz == 0.
+		 */
+		scbr = DIV_ROUND_UP(bus_hz, spi->max_speed_hz);
+
+		/*
+		 * If the resulting divider doesn't fit into the
+		 * register bitfield, we can't satisfy the constraint.
+		 */
 		if (scbr >= (1 << SPI_SCBR_SIZE)) {
-			dev_dbg(&spi->dev, "setup: %d Hz too slow, scbr %u\n",
-					spi->max_speed_hz, scbr);
+			dev_dbg(&spi->dev,
+				"setup: %d Hz too slow, scbr %u; min %ld Hz\n",
+				spi->max_speed_hz, scbr, bus_hz/255);
 			return -EINVAL;
 		}
 	} else
+		/* speed zero means "as slow as possible" */
 		scbr = 0xff;
-	sck_hz = bus_hz / scbr;
 
 	csr = SPI_BF(SCBR, scbr) | SPI_BF(BITS, bits - 8);
 	if (spi->mode & SPI_CPOL)
@@ -411,23 +578,36 @@ static int atmel_spi_setup(struct spi_device *spi)
 	if (!(spi->mode & SPI_CPHA))
 		csr |= SPI_BIT(NCPHA);
 
-	/* TODO: DLYBS and DLYBCT */
-	csr |= SPI_BF(DLYBS, 10);
-	csr |= SPI_BF(DLYBCT, 10);
+	/* DLYBS is mostly irrelevant since we manage chipselect using GPIOs.
+	 *
+	 * DLYBCT would add delays between words, slowing down transfers.
+	 * It could potentially be useful to cope with DMA bottlenecks, but
+	 * in those cases it's probably best to just use a lower bitrate.
+	 */
+	csr |= SPI_BF(DLYBS, 0);
+	csr |= SPI_BF(DLYBCT, 0);
 
 	/* chipselect must have been muxed as GPIO (e.g. in board setup) */
 	npcs_pin = (unsigned int)spi->controller_data;
 	if (!spi->controller_state) {
-		ret = gpio_request(npcs_pin, "spi_npcs");
+		ret = gpio_request(npcs_pin, spi->dev.bus_id);
 		if (ret)
 			return ret;
 		spi->controller_state = (void *)npcs_pin;
 		gpio_direction_output(npcs_pin, !(spi->mode & SPI_CS_HIGH));
+	} else {
+		unsigned long		flags;
+
+		spin_lock_irqsave(&as->lock, flags);
+		if (as->stay == spi)
+			as->stay = NULL;
+		cs_deactivate(as, spi);
+		spin_unlock_irqrestore(&as->lock, flags);
 	}
 
 	dev_dbg(&spi->dev,
 		"setup: %lu Hz bpw %u mode 0x%x -> csr%d %08x\n",
-		sck_hz, bits, spi->mode, spi->chip_select, csr);
+		bus_hz / scbr, bits, spi->mode, spi->chip_select, csr);
 
 	spi_writel(as, CSR0 + 4 * spi->chip_select, csr);
 
@@ -439,7 +619,7 @@ static int atmel_spi_transfer(struct spi_device *spi, struct spi_message *msg)
 	struct atmel_spi	*as;
 	struct spi_transfer	*xfer;
 	unsigned long		flags;
-	struct device		*controller = spi->master->cdev.dev;
+	struct device		*controller = spi->master->dev.parent;
 
 	as = spi_master_get_devdata(spi->master);
 
@@ -454,7 +634,7 @@ static int atmel_spi_transfer(struct spi_device *spi, struct spi_message *msg)
 		return -ESHUTDOWN;
 
 	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
-		if (!(xfer->tx_buf || xfer->rx_buf)) {
+		if (!(xfer->tx_buf || xfer->rx_buf) && xfer->len) {
 			dev_dbg(&spi->dev, "missing rx or tx buf\n");
 			return -EINVAL;
 		}
@@ -464,14 +644,22 @@ static int atmel_spi_transfer(struct spi_device *spi, struct spi_message *msg)
 			dev_dbg(&spi->dev, "no protocol options yet\n");
 			return -ENOPROTOOPT;
 		}
+
+		/*
+		 * DMA map early, for performance (empties dcache ASAP) and
+		 * better fault reporting.  This is a DMA-only driver.
+		 *
+		 * NOTE that if dma_unmap_single() ever starts to do work on
+		 * platforms supported by this driver, we would need to clean
+		 * up mappings for previously-mapped transfers.
+		 */
+		if (!msg->is_dma_mapped) {
+			if (atmel_spi_dma_map_xfer(as, xfer) < 0)
+				return -ENOMEM;
+		}
 	}
 
-	/* scrub dcache "early" */
-	if (!msg->is_dma_mapped) {
-		list_for_each_entry(xfer, &msg->transfers, transfer_list)
-			atmel_spi_dma_map_xfer(as, xfer);
-	}
-
+#ifdef VERBOSE
 	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
 		dev_dbg(controller,
 			"  xfer %p: len %u tx %p/%08x rx %p/%08x\n",
@@ -479,6 +667,7 @@ static int atmel_spi_transfer(struct spi_device *spi, struct spi_message *msg)
 			xfer->tx_buf, xfer->tx_dma,
 			xfer->rx_buf, xfer->rx_dma);
 	}
+#endif
 
 	msg->status = -EINPROGRESS;
 	msg->actual_length = 0;
@@ -494,8 +683,21 @@ static int atmel_spi_transfer(struct spi_device *spi, struct spi_message *msg)
 
 static void atmel_spi_cleanup(struct spi_device *spi)
 {
-	if (spi->controller_state)
-		gpio_free((unsigned int)spi->controller_data);
+	struct atmel_spi	*as = spi_master_get_devdata(spi->master);
+	unsigned		gpio = (unsigned) spi->controller_data;
+	unsigned long		flags;
+
+	if (!spi->controller_state)
+		return;
+
+	spin_lock_irqsave(&as->lock, flags);
+	if (as->stay == spi) {
+		as->stay = NULL;
+		cs_deactivate(as, spi);
+	}
+	spin_unlock_irqrestore(&as->lock, flags);
+
+	gpio_free(gpio);
 }
 
 /*-------------------------------------------------------------------------*/
@@ -536,6 +738,10 @@ static int __init atmel_spi_probe(struct platform_device *pdev)
 
 	as = spi_master_get_devdata(master);
 
+	/*
+	 * Scratch buffer is used for throwaway rx and tx data.
+	 * It's coherent to minimize dcache pollution.
+	 */
 	as->buffer = dma_alloc_coherent(&pdev->dev, BUFFER_SIZE,
 					&as->buffer_dma, GFP_KERNEL);
 	if (!as->buffer)
@@ -560,6 +766,7 @@ static int __init atmel_spi_probe(struct platform_device *pdev)
 	/* Initialize the hardware */
 	clk_enable(clk);
 	spi_writel(as, CR, SPI_BIT(SWRST));
+	spi_writel(as, CR, SPI_BIT(SWRST)); /* AT91SAM9263 Rev B workaround */
 	spi_writel(as, MR, SPI_BIT(MSTR) | SPI_BIT(MODFDIS));
 	spi_writel(as, PTCR, SPI_BIT(RXTDIS) | SPI_BIT(TXTDIS));
 	spi_writel(as, CR, SPI_BIT(SPIEN));
@@ -576,6 +783,7 @@ static int __init atmel_spi_probe(struct platform_device *pdev)
 
 out_reset_hw:
 	spi_writel(as, CR, SPI_BIT(SWRST));
+	spi_writel(as, CR, SPI_BIT(SWRST)); /* AT91SAM9263 Rev B workaround */
 	clk_disable(clk);
 	free_irq(irq, master);
 out_unmap_regs:
@@ -599,6 +807,7 @@ static int __exit atmel_spi_remove(struct platform_device *pdev)
 	spin_lock_irq(&as->lock);
 	as->stopping = 1;
 	spi_writel(as, CR, SPI_BIT(SWRST));
+	spi_writel(as, CR, SPI_BIT(SWRST)); /* AT91SAM9263 Rev B workaround */
 	spi_readl(as, SR);
 	spin_unlock_irq(&as->lock);
 
@@ -675,3 +884,4 @@ module_exit(atmel_spi_exit);
 MODULE_DESCRIPTION("Atmel AT32/AT91 SPI Controller driver");
 MODULE_AUTHOR("Haavard Skinnemoen <hskinnemoen@atmel.com>");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("platform:atmel_spi");

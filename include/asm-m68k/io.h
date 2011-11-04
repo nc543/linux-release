@@ -7,15 +7,12 @@
  *            - added skeleton for GG-II and Amiga PCMCIA
  * 2/3/01 RZ: - moved a few more defs into raw_io.h
  *
- * inX/outX/readX/writeX should not be used by any driver unless it does
- * ISA or PCI access. Other drivers should use function defined in raw_io.h
+ * inX/outX should not be used by any driver unless it does
+ * ISA access. Other drivers should use function defined in raw_io.h
  * or define its own macros on top of these.
  *
- *    inX(),outX()              are for PCI and ISA I/O
- *    readX(),writeX()          are for PCI memory
+ *    inX(),outX()              are for ISA I/O
  *    isa_readX(),isa_writeX()  are for ISA memory
- *
- * moved mem{cpy,set}_*io inside CONFIG_PCI
  */
 
 #ifndef _IO_H
@@ -27,6 +24,7 @@
 #include <asm/raw_io.h>
 #include <asm/virtconvert.h>
 
+#include <asm-generic/iomap.h>
 
 #ifdef CONFIG_ATARI
 #include <asm/atarihw.h>
@@ -90,20 +88,20 @@ extern unsigned long gg2_isa_base;
 #undef MULTI_ISA
 #endif
 
-#define Q40_ISA (1)
-#define GG2_ISA (2)
-#define AG_ISA  (3)
+#define ISA_TYPE_Q40 (1)
+#define ISA_TYPE_GG2 (2)
+#define ISA_TYPE_AG  (3)
 
 #if defined(CONFIG_Q40) && !defined(MULTI_ISA)
-#define ISA_TYPE Q40_ISA
+#define ISA_TYPE ISA_TYPE_Q40
 #define ISA_SEX  0
 #endif
 #if defined(CONFIG_AMIGA_PCMCIA) && !defined(MULTI_ISA)
-#define ISA_TYPE AG_ISA
+#define ISA_TYPE ISA_TYPE_AG
 #define ISA_SEX  1
 #endif
 #if defined(CONFIG_GG2) && !defined(MULTI_ISA)
-#define ISA_TYPE GG2_ISA
+#define ISA_TYPE ISA_TYPE_GG2
 #define ISA_SEX  0
 #endif
 
@@ -125,13 +123,13 @@ static inline u8 __iomem *isa_itb(unsigned long addr)
   switch(ISA_TYPE)
     {
 #ifdef CONFIG_Q40
-    case Q40_ISA: return (u8 __iomem *)Q40_ISA_IO_B(addr);
+    case ISA_TYPE_Q40: return (u8 __iomem *)Q40_ISA_IO_B(addr);
 #endif
 #ifdef CONFIG_GG2
-    case GG2_ISA: return (u8 __iomem *)GG2_ISA_IO_B(addr);
+    case ISA_TYPE_GG2: return (u8 __iomem *)GG2_ISA_IO_B(addr);
 #endif
 #ifdef CONFIG_AMIGA_PCMCIA
-    case AG_ISA: return (u8 __iomem *)AG_ISA_IO_B(addr);
+    case ISA_TYPE_AG: return (u8 __iomem *)AG_ISA_IO_B(addr);
 #endif
     default: return NULL; /* avoid warnings, just in case */
     }
@@ -141,15 +139,25 @@ static inline u16 __iomem *isa_itw(unsigned long addr)
   switch(ISA_TYPE)
     {
 #ifdef CONFIG_Q40
-    case Q40_ISA: return (u16 __iomem *)Q40_ISA_IO_W(addr);
+    case ISA_TYPE_Q40: return (u16 __iomem *)Q40_ISA_IO_W(addr);
 #endif
 #ifdef CONFIG_GG2
-    case GG2_ISA: return (u16 __iomem *)GG2_ISA_IO_W(addr);
+    case ISA_TYPE_GG2: return (u16 __iomem *)GG2_ISA_IO_W(addr);
 #endif
 #ifdef CONFIG_AMIGA_PCMCIA
-    case AG_ISA: return (u16 __iomem *)AG_ISA_IO_W(addr);
+    case ISA_TYPE_AG: return (u16 __iomem *)AG_ISA_IO_W(addr);
 #endif
     default: return NULL; /* avoid warnings, just in case */
+    }
+}
+static inline u32 __iomem *isa_itl(unsigned long addr)
+{
+  switch(ISA_TYPE)
+    {
+#ifdef CONFIG_AMIGA_PCMCIA
+    case ISA_TYPE_AG: return (u32 __iomem *)AG_ISA_IO_W(addr);
+#endif
+    default: return 0; /* avoid warnings, just in case */
     }
 }
 static inline u8 __iomem *isa_mtb(unsigned long addr)
@@ -157,13 +165,13 @@ static inline u8 __iomem *isa_mtb(unsigned long addr)
   switch(ISA_TYPE)
     {
 #ifdef CONFIG_Q40
-    case Q40_ISA: return (u8 __iomem *)Q40_ISA_MEM_B(addr);
+    case ISA_TYPE_Q40: return (u8 __iomem *)Q40_ISA_MEM_B(addr);
 #endif
 #ifdef CONFIG_GG2
-    case GG2_ISA: return (u8 __iomem *)GG2_ISA_MEM_B(addr);
+    case ISA_TYPE_GG2: return (u8 __iomem *)GG2_ISA_MEM_B(addr);
 #endif
 #ifdef CONFIG_AMIGA_PCMCIA
-    case AG_ISA: return (u8 __iomem *)addr;
+    case ISA_TYPE_AG: return (u8 __iomem *)addr;
 #endif
     default: return NULL; /* avoid warnings, just in case */
     }
@@ -173,13 +181,13 @@ static inline u16 __iomem *isa_mtw(unsigned long addr)
   switch(ISA_TYPE)
     {
 #ifdef CONFIG_Q40
-    case Q40_ISA: return (u16 __iomem *)Q40_ISA_MEM_W(addr);
+    case ISA_TYPE_Q40: return (u16 __iomem *)Q40_ISA_MEM_W(addr);
 #endif
 #ifdef CONFIG_GG2
-    case GG2_ISA: return (u16 __iomem *)GG2_ISA_MEM_W(addr);
+    case ISA_TYPE_GG2: return (u16 __iomem *)GG2_ISA_MEM_W(addr);
 #endif
 #ifdef CONFIG_AMIGA_PCMCIA
-    case AG_ISA: return (u16 __iomem *)addr;
+    case ISA_TYPE_AG: return (u16 __iomem *)addr;
 #endif
     default: return NULL; /* avoid warnings, just in case */
     }
@@ -188,8 +196,10 @@ static inline u16 __iomem *isa_mtw(unsigned long addr)
 
 #define isa_inb(port)      in_8(isa_itb(port))
 #define isa_inw(port)      (ISA_SEX ? in_be16(isa_itw(port)) : in_le16(isa_itw(port)))
+#define isa_inl(port)      (ISA_SEX ? in_be32(isa_itl(port)) : in_le32(isa_itl(port)))
 #define isa_outb(val,port) out_8(isa_itb(port),(val))
 #define isa_outw(val,port) (ISA_SEX ? out_be16(isa_itw(port),(val)) : out_le16(isa_itw(port),(val)))
+#define isa_outl(val,port) (ISA_SEX ? out_be32(isa_itl(port),(val)) : out_le32(isa_itl(port),(val)))
 
 #define isa_readb(p)       in_8(isa_mtb((unsigned long)(p)))
 #define isa_readw(p)       \
@@ -205,13 +215,13 @@ static inline void isa_delay(void)
   switch(ISA_TYPE)
     {
 #ifdef CONFIG_Q40
-    case Q40_ISA: isa_outb(0,0x80); break;
+    case ISA_TYPE_Q40: isa_outb(0,0x80); break;
 #endif
 #ifdef CONFIG_GG2
-    case GG2_ISA: break;
+    case ISA_TYPE_GG2: break;
 #endif
 #ifdef CONFIG_AMIGA_PCMCIA
-    case AG_ISA: break;
+    case ISA_TYPE_AG: break;
 #endif
     default: break; /* avoid warnings */
     }
@@ -234,10 +244,16 @@ static inline void isa_delay(void)
 #define isa_outsw(port, buf, nr)    \
        (ISA_SEX ? raw_outsw(isa_itw(port), (u16 *)(buf), (nr)) :  \
                   raw_outsw_swapw(isa_itw(port), (u16 *)(buf), (nr)))
-#endif  /* CONFIG_ISA */
+
+#define isa_insl(port, buf, nr)     \
+       (ISA_SEX ? raw_insl(isa_itl(port), (u32 *)(buf), (nr)) :    \
+                  raw_insw_swapw(isa_itw(port), (u16 *)(buf), (nr)<<1))
+
+#define isa_outsl(port, buf, nr)    \
+       (ISA_SEX ? raw_outsl(isa_itl(port), (u32 *)(buf), (nr)) :  \
+                  raw_outsw_swapw(isa_itw(port), (u16 *)(buf), (nr)<<1))
 
 
-#if defined(CONFIG_ISA) && !defined(CONFIG_PCI)
 #define inb     isa_inb
 #define inb_p   isa_inb_p
 #define outb    isa_outb
@@ -246,83 +262,54 @@ static inline void isa_delay(void)
 #define inw_p   isa_inw_p
 #define outw    isa_outw
 #define outw_p  isa_outw_p
-#define inl     isa_inw
-#define inl_p   isa_inw_p
-#define outl    isa_outw
-#define outl_p  isa_outw_p
+#define inl     isa_inl
+#define inl_p   isa_inl_p
+#define outl    isa_outl
+#define outl_p  isa_outl_p
 #define insb    isa_insb
 #define insw    isa_insw
+#define insl    isa_insl
 #define outsb   isa_outsb
 #define outsw   isa_outsw
+#define outsl   isa_outsl
 #define readb   isa_readb
 #define readw   isa_readw
 #define writeb  isa_writeb
 #define writew  isa_writew
-#endif /* CONFIG_ISA */
 
-#if defined(CONFIG_PCI)
+#else  /* CONFIG_ISA */
 
-#define inl(port)        in_le32(port)
-#define outl(val,port)   out_le32((port),(val))
-#define readl(addr)      in_le32(addr)
-#define writel(val,addr) out_le32((addr),(val))
-
-/* those can be defined for both ISA and PCI - it won't work though */
-#define readb(addr)       in_8(addr)
-#define readw(addr)       in_le16(addr)
-#define writeb(val,addr)  out_8((addr),(val))
-#define writew(val,addr)  out_le16((addr),(val))
-
-#define readb_relaxed(addr) readb(addr)
-#define readw_relaxed(addr) readw(addr)
-#define readl_relaxed(addr) readl(addr)
-
-#ifndef CONFIG_ISA
-#define inb(port)      in_8(port)
-#define outb(val,port) out_8((port),(val))
-#define inw(port)      in_le16(port)
-#define outw(val,port) out_le16((port),(val))
-
-#else
 /*
- * kernel with both ISA and PCI compiled in, those have
- * conflicting defs for in/out. Simply consider port < 1024
- * ISA and everything else PCI. read,write not defined
- * in this case
+ * We need to define dummy functions for GENERIC_IOMAP support.
  */
-#define inb(port) ((port)<1024 ? isa_inb(port) : in_8(port))
-#define inb_p(port) ((port)<1024 ? isa_inb_p(port) : in_8(port))
-#define inw(port) ((port)<1024 ? isa_inw(port) : in_le16(port))
-#define inw_p(port) ((port)<1024 ? isa_inw_p(port) : in_le16(port))
-#define inl(port) ((port)<1024 ? isa_inl(port) : in_le32(port))
-#define inl_p(port) ((port)<1024 ? isa_inl_p(port) : in_le32(port))
+#define inb(port)          0xff
+#define inb_p(port)        0xff
+#define outb(val,port)     ((void)0)
+#define outb_p(val,port)   ((void)0)
+#define inw(port)          0xffff
+#define outw(val,port)     ((void)0)
+#define inl(port)          0xffffffffUL
+#define outl(val,port)     ((void)0)
 
-#define outb(val,port) ((port)<1024 ? isa_outb((val),(port)) : out_8((port),(val)))
-#define outb_p(val,port) ((port)<1024 ? isa_outb_p((val),(port)) : out_8((port),(val)))
-#define outw(val,port) ((port)<1024 ? isa_outw((val),(port)) : out_le16((port),(val)))
-#define outw_p(val,port) ((port)<1024 ? isa_outw_p((val),(port)) : out_le16((port),(val)))
-#define outl(val,port) ((port)<1024 ? isa_outl((val),(port)) : out_le32((port),(val)))
-#define outl_p(val,port) ((port)<1024 ? isa_outl_p((val),(port)) : out_le32((port),(val)))
-#endif
-#endif /* CONFIG_PCI */
-
-#if !defined(CONFIG_ISA) && !defined(CONFIG_PCI) && defined(CONFIG_HP300)
-/*
- * We need to define dummy functions otherwise drivers/serial/8250.c doesn't link
- */
-#define inb(port)        0xff
-#define inb_p(port)      0xff
-#define outb(val,port)   do { } while (0)
-#define outb_p(val,port) do { } while (0)
+#define insb(port,buf,nr)  ((void)0)
+#define outsb(port,buf,nr) ((void)0)
+#define insw(port,buf,nr)  ((void)0)
+#define outsw(port,buf,nr) ((void)0)
+#define insl(port,buf,nr)  ((void)0)
+#define outsl(port,buf,nr) ((void)0)
 
 /*
  * These should be valid on any ioremap()ed region
  */
 #define readb(addr)      in_8(addr)
 #define writeb(val,addr) out_8((addr),(val))
+#define readw(addr)      in_le16(addr)
+#define writew(val,addr) out_le16((addr),(val))
+
+#endif /* CONFIG_ISA */
+
 #define readl(addr)      in_le32(addr)
 #define writel(val,addr) out_le32((addr),(val))
-#endif
 
 #define mmiowb()
 
@@ -345,12 +332,18 @@ static inline void __iomem *ioremap_fullcache(unsigned long physaddr,
 	return __ioremap(physaddr, size, IOMAP_FULL_CACHING);
 }
 
-
-/* m68k caches aren't DMA coherent */
-extern void dma_cache_wback_inv(unsigned long start, unsigned long size);
-extern void dma_cache_wback(unsigned long start, unsigned long size);
-extern void dma_cache_inv(unsigned long start, unsigned long size);
-
+static inline void memset_io(volatile void __iomem *addr, unsigned char val, int count)
+{
+	__builtin_memset((void __force *) addr, val, count);
+}
+static inline void memcpy_fromio(void *dst, const volatile void __iomem *src, int count)
+{
+	__builtin_memcpy(dst, (void __force *) src, count);
+}
+static inline void memcpy_toio(volatile void __iomem *dst, const void *src, int count)
+{
+	__builtin_memcpy((void __force *) dst, src, count);
+}
 
 #ifndef CONFIG_SUN3
 #define IO_SPACE_LIMIT 0xffff

@@ -272,13 +272,6 @@ static int clear_epp_timeout(struct parport *pb)
  * of these are in parport_pc.h.
  */
 
-static irqreturn_t parport_pc_interrupt(int irq, void *dev_id)
-{
-	parport_generic_irq(irq, (struct parport *) dev_id);
-	/* FIXME! Was it really ours? */
-	return IRQ_HANDLED;
-}
-
 static void parport_pc_init_state(struct pardevice *dev, struct parport_state *s)
 {
 	s->u.pc.ctr = 0xc;
@@ -1422,7 +1415,7 @@ static void __devinit winbond_check(int io, int key)
 {
 	int devid,devrev,oldid,x_devid,x_devrev,x_oldid;
 
-	if (!request_region(io, 3, __FUNCTION__))
+	if (!request_region(io, 3, __func__))
 		return;
 
 	/* First probe without key */
@@ -1456,7 +1449,7 @@ static void __devinit winbond_check2(int io,int key)
 {
         int devid,devrev,oldid,x_devid,x_devrev,x_oldid;
 
-	if (!request_region(io, 3, __FUNCTION__))
+	if (!request_region(io, 3, __func__))
 		return;
 
 	/* First probe without the key */
@@ -1489,7 +1482,7 @@ static void __devinit smsc_check(int io, int key)
 {
         int id,rev,oldid,oldrev,x_id,x_rev,x_oldid,x_oldrev;
 
-	if (!request_region(io, 3, __FUNCTION__))
+	if (!request_region(io, 3, __func__))
 		return;
 
 	/* First probe without the key */
@@ -1546,6 +1539,37 @@ static void __devinit detect_and_report_smsc (void)
 	smsc_check(0x370,0x55);
 	smsc_check(0x3f0,0x44);
 	smsc_check(0x370,0x44);
+}
+
+static void __devinit detect_and_report_it87(void)
+{
+	u16 dev;
+	u8 r;
+	if (verbose_probing)
+		printk(KERN_DEBUG "IT8705 Super-IO detection, now testing port 2E ...\n");
+	if (!request_region(0x2e, 1, __func__))
+		return;
+	outb(0x87, 0x2e);
+	outb(0x01, 0x2e);
+	outb(0x55, 0x2e);
+	outb(0x55, 0x2e);
+	outb(0x20, 0x2e);
+	dev = inb(0x2f) << 8;
+	outb(0x21, 0x2e);
+	dev |= inb(0x2f);
+	if (dev == 0x8712 || dev == 0x8705 || dev == 0x8715 ||
+	    dev == 0x8716 || dev == 0x8718 || dev == 0x8726) {
+		printk(KERN_INFO "IT%04X SuperIO detected.\n", dev);
+		outb(0x07, 0x2E);	/* Parallel Port */
+		outb(0x03, 0x2F);
+		outb(0xF0, 0x2E);	/* BOOT 0x80 off */
+		r = inb(0x2f);
+		outb(0xF0, 0x2E);
+		outb(r | 8, 0x2F);
+		outb(0x02, 0x2E);	/* Lock */
+		outb(0x02, 0x2F);
+	}
+	release_region(0x2e, 1);
 }
 #endif /* CONFIG_PARPORT_PC_SUPERIO */
 
@@ -1743,7 +1767,7 @@ static int parport_PS2_supported(struct parport *pb)
 }
 
 #ifdef CONFIG_PARPORT_PC_FIFO
-static int __devinit parport_ECP_supported(struct parport *pb)
+static int parport_ECP_supported(struct parport *pb)
 {
 	int i;
 	int config, configb;
@@ -1967,7 +1991,7 @@ static int parport_ECPEPP_supported(struct parport *pb)
 /* Don't bother probing for modes we know we won't use. */
 static int __devinit parport_PS2_supported(struct parport *pb) { return 0; }
 #ifdef CONFIG_PARPORT_PC_FIFO
-static int __devinit parport_ECP_supported(struct parport *pb) { return 0; }
+static int parport_ECP_supported(struct parport *pb) { return 0; }
 #endif
 static int __devinit parport_EPP_supported(struct parport *pb) { return 0; }
 static int __devinit parport_ECPEPP_supported(struct parport *pb){return 0;}
@@ -2301,7 +2325,7 @@ struct parport *parport_pc_probe_port (unsigned long int base,
 		EPP_res = NULL;
 	}
 	if (p->irq != PARPORT_IRQ_NONE) {
-		if (request_irq (p->irq, parport_pc_interrupt,
+		if (request_irq (p->irq, parport_irq_handler,
 				 0, p->name, p)) {
 			printk (KERN_WARNING "%s: irq %d in use, "
 				"resorting to polled operation\n",
@@ -2424,7 +2448,6 @@ static int __devinit sio_ite_8872_probe (struct pci_dev *pdev, int autoirq,
 	u32 ite8872set;
 	u32 ite8872_lpt, ite8872_lpthi;
 	u8 ite8872_irq, type;
-	char *fake_name = "parport probe";
 	int irq;
 	int i;
 
@@ -2432,11 +2455,11 @@ static int __devinit sio_ite_8872_probe (struct pci_dev *pdev, int autoirq,
 	
 	// make sure which one chip
 	for(i = 0; i < 5; i++) {
-		base_res = request_region(inta_addr[i], 0x8, fake_name);
+		base_res = request_region(inta_addr[i], 32, "it887x");
 		if (base_res) {
 			int test;
 			pci_write_config_dword (pdev, 0x60,
-						0xe7000000 | inta_addr[i]);
+						0xe5000000 | inta_addr[i]);
 			pci_write_config_dword (pdev, 0x78,
 						0x00000000 | inta_addr[i]);
 			test = inb (inta_addr[i]);
@@ -2768,6 +2791,7 @@ enum parport_pc_pci_cards {
 	oxsemi_952,
 	oxsemi_954,
 	oxsemi_840,
+	oxsemi_pcie_pport,
 	aks_0100,
 	mobility_pp,
 	netmos_9705,
@@ -2775,6 +2799,7 @@ enum parport_pc_pci_cards {
 	netmos_9755,
 	netmos_9805,
 	netmos_9815,
+	quatech_sppxp100,
 };
 
 
@@ -2843,7 +2868,8 @@ static struct parport_pc_pci {
 	 * and 840 locks up if you write 1 to bit 2! */
 	/* oxsemi_952 */		{ 1, { { 0, 1 }, } },
 	/* oxsemi_954 */		{ 1, { { 0, -1 }, } },
-	/* oxsemi_840 */		{ 1, { { 0, -1 }, } },
+	/* oxsemi_840 */		{ 1, { { 0, 1 }, } },
+	/* oxsemi_pcie_pport */		{ 1, { { 0, 1 }, } },
 	/* aks_0100 */                  { 1, { { 0, -1 }, } },
 	/* mobility_pp */		{ 1, { { 0, 1 }, } },
 	/* netmos_9705 */               { 1, { { 0, -1 }, } }, /* untested */
@@ -2851,6 +2877,7 @@ static struct parport_pc_pci {
         /* netmos_9755 */               { 2, { { 0, 1 }, { 2, 3 },} }, /* untested */
 	/* netmos_9805 */               { 1, { { 0, -1 }, } }, /* untested */
 	/* netmos_9815 */               { 2, { { 0, -1 }, { 2, -1 }, } }, /* untested */
+	/* quatech_sppxp100 */		{ 1, { { 0, 1 }, } },
 };
 
 static const struct pci_device_id parport_pc_pci_tbl[] = {
@@ -2903,7 +2930,6 @@ static const struct pci_device_id parport_pc_pci_tbl[] = {
 	{ 0x1409, 0x7268, 0x1409, 0x0103, 0, 0, timedia_4008a },
 	{ 0x1409, 0x7268, 0x1409, 0x0104, 0, 0, timedia_4018 },
 	{ 0x1409, 0x7268, 0x1409, 0x9018, 0, 0, timedia_9018a },
-	{ 0x14f2, 0x0121, PCI_ANY_ID, PCI_ANY_ID, 0, 0, mobility_pp },
 	{ PCI_VENDOR_ID_SYBA, PCI_DEVICE_ID_SYBA_2P_EPP,
 	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, syba_2p_epp },
 	{ PCI_VENDOR_ID_SYBA, PCI_DEVICE_ID_SYBA_1P_ECP,
@@ -2921,8 +2947,25 @@ static const struct pci_device_id parport_pc_pci_tbl[] = {
 	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, oxsemi_954 },
 	{ PCI_VENDOR_ID_OXSEMI, PCI_DEVICE_ID_OXSEMI_12PCI840,
 	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, oxsemi_840 },
+	{ PCI_VENDOR_ID_OXSEMI, PCI_DEVICE_ID_OXSEMI_PCIe840,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, oxsemi_pcie_pport },
+	{ PCI_VENDOR_ID_OXSEMI, PCI_DEVICE_ID_OXSEMI_PCIe840_G,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, oxsemi_pcie_pport },
+	{ PCI_VENDOR_ID_OXSEMI, PCI_DEVICE_ID_OXSEMI_PCIe952_0,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, oxsemi_pcie_pport },
+	{ PCI_VENDOR_ID_OXSEMI, PCI_DEVICE_ID_OXSEMI_PCIe952_0_G,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, oxsemi_pcie_pport },
+	{ PCI_VENDOR_ID_OXSEMI, PCI_DEVICE_ID_OXSEMI_PCIe952_1,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, oxsemi_pcie_pport },
+	{ PCI_VENDOR_ID_OXSEMI, PCI_DEVICE_ID_OXSEMI_PCIe952_1_G,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, oxsemi_pcie_pport },
+	{ PCI_VENDOR_ID_OXSEMI, PCI_DEVICE_ID_OXSEMI_PCIe952_1_U,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, oxsemi_pcie_pport },
+	{ PCI_VENDOR_ID_OXSEMI, PCI_DEVICE_ID_OXSEMI_PCIe952_1_GU,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, oxsemi_pcie_pport },
 	{ PCI_VENDOR_ID_AKS, PCI_DEVICE_ID_AKS_ALADDINCARD,
 	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, aks_0100 },
+	{ 0x14f2, 0x0121, PCI_ANY_ID, PCI_ANY_ID, 0, 0, mobility_pp },
 	/* NetMos communication controllers */
 	{ PCI_VENDOR_ID_NETMOS, PCI_DEVICE_ID_NETMOS_9705,
 	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, netmos_9705 },
@@ -2934,6 +2977,9 @@ static const struct pci_device_id parport_pc_pci_tbl[] = {
 	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, netmos_9805 },
 	{ PCI_VENDOR_ID_NETMOS, PCI_DEVICE_ID_NETMOS_9815,
 	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, netmos_9815 },
+	/* Quatech SPPXP-100 Parallel port PCI ExpressCard */
+	{ PCI_VENDOR_ID_QUATECH, PCI_DEVICE_ID_QUATECH_SPPXP_100,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, quatech_sppxp100 },
 	{ 0, } /* terminate list */
 };
 MODULE_DEVICE_TABLE(pci,parport_pc_pci_tbl);
@@ -3054,6 +3100,7 @@ static struct pci_driver parport_pc_pci_driver;
 static int __init parport_pc_init_superio(int autoirq, int autodma) {return 0;}
 #endif /* CONFIG_PCI */
 
+#ifdef CONFIG_PNP
 
 static const struct pnp_device_id parport_pc_pnp_tbl[] = {
 	/* Standard LPT Printer Port */
@@ -3120,6 +3167,9 @@ static struct pnp_driver parport_pc_pnp_driver = {
 	.remove		= parport_pc_pnp_remove,
 };
 
+#else
+static struct pnp_driver parport_pc_pnp_driver;
+#endif /* CONFIG_PNP */
 
 static int __devinit parport_pc_platform_probe(struct platform_device *pdev)
 {
@@ -3167,24 +3217,25 @@ static void __init parport_pc_find_ports (int autoirq, int autodma)
 	int count = 0, err;
 
 #ifdef CONFIG_PARPORT_PC_SUPERIO
-	detect_and_report_winbond ();
-	detect_and_report_smsc ();
+	detect_and_report_it87();
+	detect_and_report_winbond();
+	detect_and_report_smsc();
 #endif
 
 	/* Onboard SuperIO chipsets that show themselves on the PCI bus. */
-	count += parport_pc_init_superio (autoirq, autodma);
+	count += parport_pc_init_superio(autoirq, autodma);
 
 	/* PnP ports, skip detection if SuperIO already found them */
 	if (!count) {
-		err = pnp_register_driver (&parport_pc_pnp_driver);
+		err = pnp_register_driver(&parport_pc_pnp_driver);
 		if (!err)
 			pnp_registered_parport = 1;
 	}
 
 	/* ISA ports and whatever (see asm/parport.h). */
-	parport_pc_find_nonpci_ports (autoirq, autodma);
+	parport_pc_find_nonpci_ports(autoirq, autodma);
 
-	err = pci_register_driver (&parport_pc_pci_driver);
+	err = pci_register_driver(&parport_pc_pci_driver);
 	if (!err)
 		pci_registered_parport = 1;
 }
@@ -3446,7 +3497,6 @@ static void __exit parport_pc_exit(void)
 		pnp_unregister_driver (&parport_pc_pnp_driver);
 	platform_driver_unregister(&parport_pc_platform_driver);
 
-	spin_lock(&ports_lock);
 	while (!list_empty(&ports_list)) {
 		struct parport_pc_private *priv;
 		struct parport *port;
@@ -3456,11 +3506,8 @@ static void __exit parport_pc_exit(void)
 		if (port->dev && port->dev->bus == &platform_bus_type)
 			platform_device_unregister(
 				to_platform_device(port->dev));
-		spin_unlock(&ports_lock);
 		parport_pc_unregister_port(port);
-		spin_lock(&ports_lock);
 	}
-	spin_unlock(&ports_lock);
 }
 
 MODULE_AUTHOR("Phil Blundell, Tim Waugh, others");

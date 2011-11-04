@@ -3,8 +3,8 @@ menu "Bluetooth device drivers"
 	depends on BT
 
 config BT_HCIUSB
-	tristate "HCI USB driver"
-	depends on USB
+	tristate "HCI USB driver (old version)"
+	depends on USB && BT_HCIBTUSB=n
 	help
 	  Bluetooth HCI USB driver.
 	  This driver is required if you want to use Bluetooth devices with
@@ -21,6 +21,28 @@ config BT_HCIUSB_SCO
 	  to transmit voice data with your Bluetooth USB device.
 
 	  Say Y here to compile support for SCO over HCI USB.
+
+config BT_HCIBTUSB
+	tristate "HCI USB driver"
+	depends on USB
+	help
+	  Bluetooth HCI USB driver.
+	  This driver is required if you want to use Bluetooth devices with
+	  USB interface.
+
+	  Say Y here to compile support for Bluetooth USB devices into the
+	  kernel or say M to compile it as module (btusb).
+
+config BT_HCIBTSDIO
+	tristate "HCI SDIO driver"
+	depends on MMC
+	help
+	  Bluetooth HCI SDIO driver.
+	  This driver is required if you want to use Bluetooth device with
+	  SDIO interface.
+
+	  Say Y here to compile support for Bluetooth SDIO devices into the
+	  kernel or say M to compile it as module (btsdio).
 
 config BT_HCIUART
 	tristate "HCI UART driver"
@@ -47,6 +69,7 @@ config BT_HCIUART_H4
 config BT_HCIUART_BCSP
 	bool "BCSP protocol support"
 	depends on BT_HCIUART
+	select BITREVERSE
 	help
 	  BCSP (BlueCore Serial Protocol) is serial protocol for communication 
 	  between Bluetooth device and host. This protocol is required for non
@@ -54,6 +77,17 @@ config BT_HCIUART_BCSP
 	  CF cards.
 
 	  Say Y here to compile support for HCI BCSP protocol.
+
+config BT_HCIUART_LL
+	bool "HCILL protocol support"
+	depends on BT_HCIUART
+	help
+	  HCILL (HCI Low Level) is a serial protocol for communication
+	  between Bluetooth device and host. This protocol is required for
+	  serial Bluetooth devices that are based on Texas Instruments'
+	  BRF chips.
+
+	  Say Y here to compile support for HCILL protocol.
 
 config BT_HCIBCM203X
 	tristate "HCI BCM203x USB driver"

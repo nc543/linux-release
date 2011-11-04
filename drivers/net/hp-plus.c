@@ -122,8 +122,6 @@ static int __init do_hpp_probe(struct net_device *dev)
 	int base_addr = dev->base_addr;
 	int irq = dev->irq;
 
-	SET_MODULE_OWNER(dev);
-
 	if (base_addr > 0x1ff)		/* Check a single specified location. */
 		return hpp_probe1(dev, base_addr);
 	else if (base_addr != 0)	/* Don't probe at all. */
@@ -141,7 +139,7 @@ static int __init do_hpp_probe(struct net_device *dev)
 #ifndef MODULE
 struct net_device * __init hp_plus_probe(int unit)
 {
-	struct net_device *dev = alloc_ei_netdev();
+	struct net_device *dev = alloc_eip_netdev();
 	int err;
 
 	if (!dev)
@@ -168,6 +166,7 @@ static int __init hpp_probe1(struct net_device *dev, int ioaddr)
 	const char name[] = "HP-PC-LAN+";
 	int mem_start;
 	static unsigned version_printed;
+	DECLARE_MAC_BUF(mac);
 
 	if (!request_region(ioaddr, HP_IO_EXTENT, DRV_NAME))
 		return -EBUSY;
@@ -182,7 +181,7 @@ static int __init hpp_probe1(struct net_device *dev, int ioaddr)
 	if (ei_debug  &&  version_printed++ == 0)
 		printk(version);
 
-	printk("%s: %s at %#3x,", dev->name, name, ioaddr);
+	printk("%s: %s at %#3x, ", dev->name, name, ioaddr);
 
 	/* Retrieve and checksum the station address. */
 	outw(MAC_Page, ioaddr + HP_PAGING);
@@ -191,9 +190,10 @@ static int __init hpp_probe1(struct net_device *dev, int ioaddr)
 		unsigned char inval = inb(ioaddr + 8 + i);
 		dev->dev_addr[i] = inval;
 		checksum += inval;
-		printk(" %2.2x", inval);
 	}
 	checksum += inb(ioaddr + 14);
+
+	printk("%s", print_mac(mac, dev->dev_addr));
 
 	if (checksum != 0xff) {
 		printk(" bad checksum %2.2x.\n", checksum);
@@ -230,7 +230,7 @@ static int __init hpp_probe1(struct net_device *dev, int ioaddr)
 	dev->open = &hpp_open;
 	dev->stop = &hpp_close;
 #ifdef CONFIG_NET_POLL_CONTROLLER
-	dev->poll_controller = ei_poll;
+	dev->poll_controller = eip_poll;
 #endif
 
 	ei_status.name = name;
@@ -262,7 +262,7 @@ static int __init hpp_probe1(struct net_device *dev, int ioaddr)
 	}
 
 	outw(Perf_Page, ioaddr + HP_PAGING);
-	NS8390_init(dev, 0);
+	NS8390p_init(dev, 0);
 	/* Leave the 8390 and HP chip reset. */
 	outw(inw(ioaddr + HPP_OPTION) & ~EnableIRQ, ioaddr + HPP_OPTION);
 
@@ -284,7 +284,7 @@ hpp_open(struct net_device *dev)
 	int option_reg;
 	int retval;
 
-	if ((retval = request_irq(dev->irq, ei_interrupt, 0, dev->name, dev))) {
+	if ((retval = request_irq(dev->irq, eip_interrupt, 0, dev->name, dev))) {
 	    return retval;
 	}
 
@@ -302,7 +302,7 @@ hpp_open(struct net_device *dev)
 	/* Select the operational page. */
 	outw(Perf_Page, ioaddr + HP_PAGING);
 
-	ei_open(dev);
+	eip_open(dev);
 	return 0;
 }
 
@@ -313,7 +313,7 @@ hpp_close(struct net_device *dev)
 	int option_reg = inw(ioaddr + HPP_OPTION);
 
 	free_irq(dev->irq, dev);
-	ei_close(dev);
+	eip_close(dev);
 	outw((option_reg & ~EnableIRQ) | MemDisable | NICReset | ChipReset,
 		 ioaddr + HPP_OPTION);
 

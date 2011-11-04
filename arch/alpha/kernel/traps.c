@@ -8,6 +8,7 @@
  * This file initializes the trap entry points
  */
 
+#include <linux/jiffies.h>
 #include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/tty.h>
@@ -30,7 +31,7 @@
 
 static int opDEC_fix;
 
-static void __init
+static void __cpuinit
 opDEC_check(void)
 {
 	__asm__ __volatile__ (
@@ -182,8 +183,9 @@ die_if_kernel(char * str, struct pt_regs *regs, long err, unsigned long *r9_15)
 #ifdef CONFIG_SMP
 	printk("CPU %d ", hard_smp_processor_id());
 #endif
-	printk("%s(%d): %s %ld\n", current->comm, current->pid, str, err);
+	printk("%s(%d): %s %ld\n", current->comm, task_pid_nr(current), str, err);
 	dik_show_regs(regs, r9_15);
+	add_taint(TAINT_DIE);
 	dik_show_trace((unsigned long *)(regs+1));
 	dik_show_code((unsigned int *)regs->pc);
 
@@ -445,7 +447,7 @@ struct unaligned_stat {
 
 
 /* Macro for exception fixup code to access integer registers.  */
-#define una_reg(r)  (regs->regs[(r) >= 16 && (r) <= 18 ? (r)+19 : (r)])
+#define una_reg(r)  (_regs[(r) >= 16 && (r) <= 18 ? (r)+19 : (r)])
 
 
 asmlinkage void
@@ -454,6 +456,7 @@ do_entUna(void * va, unsigned long opcode, unsigned long reg,
 {
 	long error, tmp1, tmp2, tmp3, tmp4;
 	unsigned long pc = regs->pc - 4;
+	unsigned long *_regs = regs->regs;
 	const struct exception_table_entry *fixup;
 
 	unaligned[0].count++;
@@ -645,7 +648,7 @@ got_exception:
 	lock_kernel();
 
 	printk("%s(%d): unhandled unaligned exception\n",
-	       current->comm, current->pid);
+	       current->comm, task_pid_nr(current));
 
 	printk("pc = [<%016lx>]  ra = [<%016lx>]  ps = %04lx\n",
 	       pc, una_reg(26), regs->ps);
@@ -769,7 +772,7 @@ do_entUnaUser(void __user * va, unsigned long opcode,
 	      unsigned long reg, struct pt_regs *regs)
 {
 	static int cnt = 0;
-	static long last_time = 0;
+	static unsigned long last_time;
 
 	unsigned long tmp1, tmp2, tmp3, tmp4;
 	unsigned long fake_reg, *reg_addr = &fake_reg;
@@ -780,12 +783,12 @@ do_entUnaUser(void __user * va, unsigned long opcode,
 	   with the unaliged access.  */
 
 	if (!test_thread_flag (TIF_UAC_NOPRINT)) {
-		if (cnt >= 5 && jiffies - last_time > 5*HZ) {
+		if (cnt >= 5 && time_after(jiffies, last_time + 5 * HZ)) {
 			cnt = 0;
 		}
 		if (++cnt < 5) {
 			printk("%s(%d): unaligned trap at %016lx: %p %lx %ld\n",
-			       current->comm, current->pid,
+			       current->comm, task_pid_nr(current),
 			       regs->pc - 4, va, opcode, reg);
 		}
 		last_time = jiffies;
@@ -1069,7 +1072,7 @@ give_sigbus:
 	return;
 }
 
-void __init
+void __cpuinit
 trap_init(void)
 {
 	/* Tell PAL-code what global pointer we want in the kernel.  */

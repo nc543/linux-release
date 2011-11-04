@@ -8,7 +8,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Author:      Alan Cox, <alan@redhat.com>
+ * Author:      Alan Cox, <alan@lxorguk.ukuu.org.uk>
  *
  * Fixes:       Mar 01 2000 Thomas Sparr, <thomas.l.sparr@telia.com>
  *              phone_register_device now works with unit!=PHONE_UNIT_ANY
@@ -23,6 +23,7 @@
 #include <linux/errno.h>
 #include <linux/phonedev.h>
 #include <linux/init.h>
+#include <linux/smp_lock.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
 
@@ -120,9 +121,8 @@ int phone_register_device(struct phone_device *p, int unit)
 void phone_unregister_device(struct phone_device *pfd)
 {
 	mutex_lock(&phone_lock);
-	if (phone_device[pfd->minor] != pfd)
-		panic("phone: bad unregister");
-	phone_device[pfd->minor] = NULL;
+	if (likely(phone_device[pfd->minor] == pfd))
+		phone_device[pfd->minor] = NULL;
 	mutex_unlock(&phone_lock);
 }
 

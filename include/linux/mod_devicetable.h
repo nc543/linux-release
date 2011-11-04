@@ -131,6 +131,17 @@ struct usb_device_id {
 #define USB_DEVICE_ID_MATCH_INT_SUBCLASS	0x0100
 #define USB_DEVICE_ID_MATCH_INT_PROTOCOL	0x0200
 
+#define HID_ANY_ID				(~0)
+
+struct hid_device_id {
+	__u16 bus;
+	__u16 pad1;
+	__u32 vendor;
+	__u32 product;
+	kernel_ulong_t driver_data
+		__attribute__((aligned(sizeof(kernel_ulong_t))));
+};
+
 /* s390 CCW devices */
 struct ccw_device_id {
 	__u16	match_flags;	/* which fields to match against */
@@ -159,6 +170,22 @@ struct ap_device_id {
 
 #define AP_DEVICE_ID_MATCH_DEVICE_TYPE		0x01
 
+/* s390 css bus devices (subchannels) */
+struct css_device_id {
+	__u8 match_flags;
+	__u8 type; /* subchannel type */
+	__u16 pad2;
+	__u32 pad3;
+	kernel_ulong_t driver_data;
+};
+
+#define ACPI_ID_LEN	16 /* only 9 bytes needed here, 16 bytes are used */
+			   /* to workaround crosscompile issues */
+
+struct acpi_device_id {
+	__u8 id[ACPI_ID_LEN];
+	kernel_ulong_t driver_data;
+};
 
 #define PNP_ID_LEN	8
 #define PNP_MAX_DEVICES	8
@@ -255,15 +282,10 @@ struct pcmcia_device_id {
 #define PCMCIA_DEV_ID_MATCH_FAKE_CIS	0x0200
 #define PCMCIA_DEV_ID_MATCH_ANONYMOUS	0x0400
 
-/* I2C */
-struct i2c_device_id {
-	__u16 id;
-};
-
 /* Input */
 #define INPUT_DEVICE_ID_EV_MAX		0x1f
 #define INPUT_DEVICE_ID_KEY_MIN_INTERESTING	0x71
-#define INPUT_DEVICE_ID_KEY_MAX		0x1ff
+#define INPUT_DEVICE_ID_KEY_MAX		0x2ff
 #define INPUT_DEVICE_ID_REL_MAX		0x0f
 #define INPUT_DEVICE_ID_ABS_MAX		0x3f
 #define INPUT_DEVICE_ID_MSC_MAX		0x07
@@ -332,5 +354,97 @@ struct parisc_device_id {
 #define PA_HVERSION_REV_ANY_ID	0xff
 #define PA_HVERSION_ANY_ID	0xffff
 #define PA_SVERSION_ANY_ID	0xffffffff
+
+/* SDIO */
+
+#define SDIO_ANY_ID (~0)
+
+struct sdio_device_id {
+	__u8	class;			/* Standard interface or SDIO_ANY_ID */
+	__u16	vendor;			/* Vendor or SDIO_ANY_ID */
+	__u16	device;			/* Device ID or SDIO_ANY_ID */
+	kernel_ulong_t driver_data	/* Data private to the driver */
+		__attribute__((aligned(sizeof(kernel_ulong_t))));
+};
+
+/* SSB core, see drivers/ssb/ */
+struct ssb_device_id {
+	__u16	vendor;
+	__u16	coreid;
+	__u8	revision;
+};
+#define SSB_DEVICE(_vendor, _coreid, _revision)  \
+	{ .vendor = _vendor, .coreid = _coreid, .revision = _revision, }
+#define SSB_DEVTABLE_END  \
+	{ 0, },
+
+#define SSB_ANY_VENDOR		0xFFFF
+#define SSB_ANY_ID		0xFFFF
+#define SSB_ANY_REV		0xFF
+
+struct virtio_device_id {
+	__u32 device;
+	__u32 vendor;
+};
+#define VIRTIO_DEV_ANY_ID	0xffffffff
+
+/* i2c */
+
+#define I2C_NAME_SIZE	20
+#define I2C_MODULE_PREFIX "i2c:"
+
+struct i2c_device_id {
+	char name[I2C_NAME_SIZE];
+	kernel_ulong_t driver_data	/* Data private to the driver */
+			__attribute__((aligned(sizeof(kernel_ulong_t))));
+};
+
+/* dmi */
+enum dmi_field {
+	DMI_NONE,
+	DMI_BIOS_VENDOR,
+	DMI_BIOS_VERSION,
+	DMI_BIOS_DATE,
+	DMI_SYS_VENDOR,
+	DMI_PRODUCT_NAME,
+	DMI_PRODUCT_VERSION,
+	DMI_PRODUCT_SERIAL,
+	DMI_PRODUCT_UUID,
+	DMI_BOARD_VENDOR,
+	DMI_BOARD_NAME,
+	DMI_BOARD_VERSION,
+	DMI_BOARD_SERIAL,
+	DMI_BOARD_ASSET_TAG,
+	DMI_CHASSIS_VENDOR,
+	DMI_CHASSIS_TYPE,
+	DMI_CHASSIS_VERSION,
+	DMI_CHASSIS_SERIAL,
+	DMI_CHASSIS_ASSET_TAG,
+	DMI_STRING_MAX,
+};
+
+struct dmi_strmatch {
+	unsigned char slot;
+	char substr[79];
+};
+
+#ifndef __KERNEL__
+struct dmi_system_id {
+	kernel_ulong_t callback;
+	kernel_ulong_t ident;
+	struct dmi_strmatch matches[4];
+	kernel_ulong_t driver_data
+			__attribute__((aligned(sizeof(kernel_ulong_t))));
+};
+#else
+struct dmi_system_id {
+	int (*callback)(const struct dmi_system_id *);
+	const char *ident;
+	struct dmi_strmatch matches[4];
+	void *driver_data;
+};
+#endif
+
+#define DMI_MATCH(a, b)	{ a, b }
 
 #endif /* LINUX_MOD_DEVICETABLE_H */

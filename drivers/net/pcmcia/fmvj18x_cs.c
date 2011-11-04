@@ -109,7 +109,7 @@ static const struct ethtool_ops netdev_ethtool_ops;
     card type
  */
 typedef enum { MBH10302, MBH10304, TDK, CONTEC, LA501, UNGERMANN, 
-	       XXX10304
+	       XXX10304, NEC, KME
 } cardtype_t;
 
 /*
@@ -249,7 +249,7 @@ static int fmvj18x_probe(struct pcmcia_device *link)
     link->io.IOAddrLines = 5;
 
     /* Interrupt setup */
-    link->irq.Attributes = IRQ_TYPE_EXCLUSIVE | IRQ_HANDLE_PRESENT;
+    link->irq.Attributes = IRQ_TYPE_DYNAMIC_SHARING|IRQ_HANDLE_PRESENT;
     link->irq.IRQInfo1 = IRQ_LEVEL_ID;
     link->irq.Handler = &fjn_interrupt;
     link->irq.Instance = dev;
@@ -259,7 +259,6 @@ static int fmvj18x_probe(struct pcmcia_device *link)
     link->conf.IntType = INT_MEMORY_AND_IO;
 
     /* The FMVJ18x specific entries in the device structure. */
-    SET_MODULE_OWNER(dev);
     dev->hard_start_xmit = &fjn_start_xmit;
     dev->set_config = &fjn_config;
     dev->get_stats = &fjn_get_stats;
@@ -299,7 +298,8 @@ do { last_fn = (fn); if ((last_ret = (ret)) != 0) goto cs_failed; } while (0)
 static int mfc_try_io_port(struct pcmcia_device *link)
 {
     int i, ret;
-    static const kio_addr_t serial_base[5] = { 0x3f8, 0x2f8, 0x3e8, 0x2e8, 0x0 };
+    static const unsigned int serial_base[5] =
+	{ 0x3f8, 0x2f8, 0x3e8, 0x2e8, 0x0 };
 
     for (i = 0; i < 5; i++) {
 	link->io.BasePort2 = serial_base[i];
@@ -309,7 +309,8 @@ static int mfc_try_io_port(struct pcmcia_device *link)
 	    printk(KERN_NOTICE "fmvj18x_cs: out of resource for serial\n");
 	}
 	ret = pcmcia_request_io(link, &link->io);
-	if (ret == CS_SUCCESS) return ret;
+	if (ret == 0)
+		return ret;
     }
     return ret;
 }
@@ -317,7 +318,7 @@ static int mfc_try_io_port(struct pcmcia_device *link)
 static int ungermann_try_io_port(struct pcmcia_device *link)
 {
     int ret;
-    kio_addr_t ioaddr;
+    unsigned int ioaddr;
     /*
 	Ungermann-Bass Access/CARD accepts 0x300,0x320,0x340,0x360
 	0x380,0x3c0 only for ioport.
@@ -325,7 +326,7 @@ static int ungermann_try_io_port(struct pcmcia_device *link)
     for (ioaddr = 0x300; ioaddr < 0x3e0; ioaddr += 0x20) {
 	link->io.BasePort1 = ioaddr;
 	ret = pcmcia_request_io(link, &link->io);
-	if (ret == CS_SUCCESS) {
+	if (ret == 0) {
 	    /* calculate ConfigIndex value */
 	    link->conf.ConfigIndex = 
 		((link->io.BasePort1 & 0x0f0) >> 3) | 0x22;
@@ -343,10 +344,11 @@ static int fmvj18x_config(struct pcmcia_device *link)
     cisparse_t parse;
     u_short buf[32];
     int i, last_fn = 0, last_ret = 0, ret;
-    kio_addr_t ioaddr;
+    unsigned int ioaddr;
     cardtype_t cardtype;
     char *card_name = "unknown";
     u_char *node_id;
+    DECLARE_MAC_BUF(mac);
 
     DEBUG(0, "fmvj18x_config(0x%p)\n", link);
 
@@ -355,12 +357,12 @@ static int fmvj18x_config(struct pcmcia_device *link)
     tuple.TupleOffset = 0;
     tuple.DesiredTuple = CISTPL_FUNCE;
     tuple.TupleOffset = 0;
-    if (pcmcia_get_first_tuple(link, &tuple) == CS_SUCCESS) {
+    if (pcmcia_get_first_tuple(link, &tuple) == 0) {
 	/* Yes, I have CISTPL_FUNCE. Let's check CISTPL_MANFID */
 	tuple.DesiredTuple = CISTPL_CFTABLE_ENTRY;
 	CS_CHECK(GetFirstTuple, pcmcia_get_first_tuple(link, &tuple));
 	CS_CHECK(GetTupleData, pcmcia_get_tuple_data(link, &tuple));
-	CS_CHECK(ParseTuple, pcmcia_parse_tuple(link, &tuple, &parse));
+	CS_CHECK(ParseTuple, pcmcia_parse_tuple(&tuple, &parse));
 	link->conf.ConfigIndex = parse.cftable_entry.index;
 	switch (link->manf_id) {
 	case MANFID_TDK:
@@ -374,11 +376,25 @@ static int fmvj18x_config(struct pcmcia_device *link)
 		link->io.NumPorts2 = 8;
 	    }
 	    break;
+	case MANFID_NEC:
+	    cardtype = NEC; /* MultiFunction Card */
+	    link->conf.ConfigBase = 0x800;
+	    link->conf.ConfigIndex = 0x47;
+	    link->io.NumPorts2 = 8;
+	    break;
+	case MANFID_KME:
+	    cardtype = KME; /* MultiFunction Card */
+	    link->conf.ConfigBase = 0x800;
+	    link->conf.ConfigIndex = 0x47;
+	    link->io.NumPorts2 = 8;
+	    break;
 	case MANFID_CONTEC:
 	    cardtype = CONTEC;
 	    break;
 	case MANFID_FUJITSU:
-	    if (link->card_id == PRODID_FUJITSU_MBH10302)
+	    if (link->conf.ConfigBase == 0x0fe0)
+		cardtype = MBH10302;
+	    else if (link->card_id == PRODID_FUJITSU_MBH10302) 
                 /* RATOC REX-5588/9822/4886's PRODID are 0004(=MBH10302),
                    but these are MBH10304 based card. */ 
 		cardtype = MBH10304;
@@ -415,10 +431,10 @@ static int fmvj18x_config(struct pcmcia_device *link)
     	link->irq.Attributes =
 		IRQ_TYPE_DYNAMIC_SHARING|IRQ_FIRST_SHARED|IRQ_HANDLE_PRESENT;
 	ret = mfc_try_io_port(link);
-	if (ret != CS_SUCCESS) goto cs_failed;
+	if (ret != 0) goto cs_failed;
     } else if (cardtype == UNGERMANN) {
 	ret = ungermann_try_io_port(link);
-	if (ret != CS_SUCCESS) goto cs_failed;
+	if (ret != 0) goto cs_failed;
     } else { 
 	CS_CHECK(RequestIO, pcmcia_request_io(link, &link->io));
     }
@@ -450,6 +466,8 @@ static int fmvj18x_config(struct pcmcia_device *link)
     case TDK:
     case LA501:
     case CONTEC:
+    case NEC:
+    case KME:
 	tuple.DesiredTuple = CISTPL_FUNCE;
 	tuple.TupleOffset = 0;
 	CS_CHECK(GetFirstTuple, pcmcia_get_first_tuple(link, &tuple));
@@ -469,6 +487,10 @@ static int fmvj18x_config(struct pcmcia_device *link)
 		card_name = "TDK LAK-CD021";
 	    } else if( cardtype == LA501 ) {
 		card_name = "LA501";
+	    } else if( cardtype == NEC ) {
+		card_name = "PK-UG-J001";
+	    } else if( cardtype == KME ) {
+		card_name = "Panasonic";
 	    } else {
 		card_name = "C-NET(PC)C";
 	    }
@@ -516,11 +538,10 @@ static int fmvj18x_config(struct pcmcia_device *link)
     strcpy(lp->node.dev_name, dev->name);
 
     /* print current configuration */
-    printk(KERN_INFO "%s: %s, sram %s, port %#3lx, irq %d, hw_addr ", 
+    printk(KERN_INFO "%s: %s, sram %s, port %#3lx, irq %d, "
+	   "hw_addr %s\n",
 	   dev->name, card_name, sram_config == 0 ? "4K TX*2" : "8K TX*2", 
-	   dev->base_addr, dev->irq);
-    for (i = 0; i < 6; i++)
-	printk("%02X%s", dev->dev_addr[i], ((i<5) ? ":" : "\n"));
+	   dev->base_addr, dev->irq, print_mac(mac, dev->dev_addr));
 
     return 0;
     
@@ -545,7 +566,7 @@ static int fmvj18x_get_hwinfo(struct pcmcia_device *link, u_char *node_id)
     req.Base = 0; req.Size = 0;
     req.AccessSpeed = 0;
     i = pcmcia_request_window(&link, &req, &link->win);
-    if (i != CS_SUCCESS) {
+    if (i != 0) {
 	cs_error(link, RequestWindow, i);
 	return -1;
     }
@@ -579,7 +600,7 @@ static int fmvj18x_get_hwinfo(struct pcmcia_device *link, u_char *node_id)
 
     iounmap(base);
     j = pcmcia_release_window(link->win);
-    if (j != CS_SUCCESS)
+    if (j != 0)
 	cs_error(link, ReleaseWindow, j);
     return (i != 0x200) ? 0 : -1;
 
@@ -593,14 +614,14 @@ static int fmvj18x_setup_mfc(struct pcmcia_device *link)
     u_char __iomem *base;
     int i, j;
     struct net_device *dev = link->priv;
-    kio_addr_t ioaddr;
+    unsigned int ioaddr;
 
     /* Allocate a small memory window */
     req.Attributes = WIN_DATA_WIDTH_8|WIN_MEMORY_TYPE_AM|WIN_ENABLE;
     req.Base = 0; req.Size = 0;
     req.AccessSpeed = 0;
     i = pcmcia_request_window(&link, &req, &link->win);
-    if (i != CS_SUCCESS) {
+    if (i != 0) {
 	cs_error(link, RequestWindow, i);
 	return -1;
     }
@@ -622,7 +643,7 @@ static int fmvj18x_setup_mfc(struct pcmcia_device *link)
 
     iounmap(base);
     j = pcmcia_release_window(link->win);
-    if (j != CS_SUCCESS)
+    if (j != 0)
 	cs_error(link, ReleaseWindow, j);
     return 0;
 
@@ -678,8 +699,11 @@ static struct pcmcia_device_id fmvj18x_ids[] = {
 	PCMCIA_DEVICE_PROD_ID1("PCMCIA MBH10302", 0x8f4005da),
 	PCMCIA_DEVICE_PROD_ID1("UBKK,V2.0", 0x90888080),
 	PCMCIA_PFC_DEVICE_PROD_ID12(0, "TDK", "GlobalNetworker 3410/3412", 0x1eae9475, 0xd9a93bed),
+	PCMCIA_PFC_DEVICE_PROD_ID12(0, "NEC", "PK-UG-J001" ,0x18df0ba0 ,0x831b1064),
 	PCMCIA_PFC_DEVICE_MANF_CARD(0, 0x0105, 0x0d0a),
 	PCMCIA_PFC_DEVICE_MANF_CARD(0, 0x0105, 0x0e0a),
+	PCMCIA_PFC_DEVICE_MANF_CARD(0, 0x0032, 0x0a05),
+	PCMCIA_PFC_DEVICE_MANF_CARD(0, 0x0032, 0x1101),
 	PCMCIA_DEVICE_NULL,
 };
 MODULE_DEVICE_TABLE(pcmcia, fmvj18x_ids);
@@ -711,18 +735,13 @@ module_exit(exit_fmvj18x_cs);
 
 /*====================================================================*/
 
-static irqreturn_t fjn_interrupt(int irq, void *dev_id)
+static irqreturn_t fjn_interrupt(int dummy, void *dev_id)
 {
     struct net_device *dev = dev_id;
     local_info_t *lp = netdev_priv(dev);
-    kio_addr_t ioaddr;
+    unsigned int ioaddr;
     unsigned short tx_stat, rx_stat;
 
-    if (lp == NULL) {
-        printk(KERN_NOTICE "fjn_interrupt(): irq %d for "
-	       "unknown device.\n", irq);
-        return IRQ_NONE;
-    }
     ioaddr = dev->base_addr;
 
     /* avoid multiple interrupts */
@@ -774,7 +793,7 @@ static irqreturn_t fjn_interrupt(int irq, void *dev_id)
 static void fjn_tx_timeout(struct net_device *dev)
 {
     struct local_info_t *lp = netdev_priv(dev);
-    kio_addr_t ioaddr = dev->base_addr;
+    unsigned int ioaddr = dev->base_addr;
 
     printk(KERN_NOTICE "%s: transmit timed out with status %04x, %s?\n",
 	   dev->name, htons(inw(ioaddr + TX_STATUS)),
@@ -804,7 +823,7 @@ static void fjn_tx_timeout(struct net_device *dev)
 static int fjn_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
     struct local_info_t *lp = netdev_priv(dev);
-    kio_addr_t ioaddr = dev->base_addr;
+    unsigned int ioaddr = dev->base_addr;
     short length = skb->len;
     
     if (length < ETH_ZLEN)
@@ -877,7 +896,7 @@ static int fjn_start_xmit(struct sk_buff *skb, struct net_device *dev)
 static void fjn_reset(struct net_device *dev)
 {
     struct local_info_t *lp = netdev_priv(dev);
-    kio_addr_t ioaddr = dev->base_addr;
+    unsigned int ioaddr = dev->base_addr;
     int i;
 
     DEBUG(4, "fjn_reset(%s) called.\n",dev->name);
@@ -956,7 +975,7 @@ static void fjn_reset(struct net_device *dev)
 static void fjn_rx(struct net_device *dev)
 {
     struct local_info_t *lp = netdev_priv(dev);
-    kio_addr_t ioaddr = dev->base_addr;
+    unsigned int ioaddr = dev->base_addr;
     int boguscount = 10;	/* 5 -> 10: by agy 19940922 */
 
     DEBUG(4, "%s: in rx_packet(), rx_status %02x.\n",
@@ -1110,7 +1129,7 @@ static int fjn_close(struct net_device *dev)
 {
     struct local_info_t *lp = netdev_priv(dev);
     struct pcmcia_device *link = lp->p_dev;
-    kio_addr_t ioaddr = dev->base_addr;
+    unsigned int ioaddr = dev->base_addr;
 
     DEBUG(4, "fjn_close('%s').\n", dev->name);
 
@@ -1153,7 +1172,7 @@ static struct net_device_stats *fjn_get_stats(struct net_device *dev)
 
 static void set_rx_mode(struct net_device *dev)
 {
-    kio_addr_t ioaddr = dev->base_addr;
+    unsigned int ioaddr = dev->base_addr;
     u_char mc_filter[8];		 /* Multicast hash filter */
     u_long flags;
     int i;
@@ -1182,8 +1201,7 @@ static void set_rx_mode(struct net_device *dev)
 	outb(1, ioaddr + RX_MODE);	/* Ignore almost all multicasts. */
     } else {
 	struct dev_mc_list *mclist;
-	int i;
-	
+
 	memset(mc_filter, 0, sizeof(mc_filter));
 	for (i = 0, mclist = dev->mc_list; mclist && i < dev->mc_count;
 	     i++, mclist = mclist->next) {

@@ -12,7 +12,6 @@
  */
 #include <linux/init.h>
 #include <linux/module.h>
-#include <linux/moduleparam.h>
 #include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/videodev.h>
@@ -407,8 +406,10 @@ static int ov7670_read(struct i2c_client *c, unsigned char reg,
 	int ret;
 
 	ret = i2c_smbus_read_byte_data(c, reg);
-	if (ret >= 0)
+	if (ret >= 0) {
 		*value = (unsigned char) ret;
+		ret = 0;
+	}
 	return ret;
 }
 
@@ -416,7 +417,10 @@ static int ov7670_read(struct i2c_client *c, unsigned char reg,
 static int ov7670_write(struct i2c_client *c, unsigned char reg,
 		unsigned char value)
 {
-	return i2c_smbus_write_byte_data(c, reg, value);
+	int ret = i2c_smbus_write_byte_data(c, reg, value);
+	if (reg == REG_COM7 && (value & COM7_RESET))
+		msleep(2);  /* Wait for reset to run */
+	return ret;
 }
 
 
@@ -617,7 +621,7 @@ static struct ov7670_win_size {
 	},
 };
 
-#define N_WIN_SIZES (sizeof(ov7670_win_sizes)/sizeof(ov7670_win_sizes[0]))
+#define N_WIN_SIZES (ARRAY_SIZE(ov7670_win_sizes))
 
 
 /*
@@ -678,17 +682,17 @@ static int ov7670_try_fmt(struct i2c_client *c, struct v4l2_format *fmt,
 	for (index = 0; index < N_OV7670_FMTS; index++)
 		if (ov7670_formats[index].pixelformat == pix->pixelformat)
 			break;
-	if (index >= N_OV7670_FMTS)
-		return -EINVAL;
+	if (index >= N_OV7670_FMTS) {
+		/* default to first format */
+		index = 0;
+		pix->pixelformat = ov7670_formats[0].pixelformat;
+	}
 	if (ret_fmt != NULL)
 		*ret_fmt = ov7670_formats + index;
 	/*
 	 * Fields: the OV devices claim to be progressive.
 	 */
-	if (pix->field == V4L2_FIELD_ANY)
-		pix->field = V4L2_FIELD_NONE;
-	else if (pix->field != V4L2_FIELD_NONE)
-		return -EINVAL;
+	pix->field = V4L2_FIELD_NONE;
 	/*
 	 * Round requested image size down to the nearest
 	 * we support, but not below the smallest.
@@ -829,7 +833,7 @@ static int ov7670_store_cmatrix(struct i2c_client *client,
 		int matrix[CMATRIX_LEN])
 {
 	int i, ret;
-	unsigned char signbits;
+	unsigned char signbits = 0;
 
 	/*
 	 * Weird crap seems to exist in the upper part of
@@ -1005,7 +1009,7 @@ static unsigned char ov7670_abs_to_sm(unsigned char v)
 
 static int ov7670_t_brightness(struct i2c_client *client, int value)
 {
-	unsigned char com8, v;
+	unsigned char com8 = 0, v;
 	int ret;
 
 	ov7670_read(client, REG_COM8, &com8);
@@ -1018,7 +1022,7 @@ static int ov7670_t_brightness(struct i2c_client *client, int value)
 
 static int ov7670_q_brightness(struct i2c_client *client, __s32 *value)
 {
-	unsigned char v;
+	unsigned char v = 0;
 	int ret = ov7670_read(client, REG_BRIGHT, &v);
 
 	*value = ov7670_sm_to_abs(v);
@@ -1032,7 +1036,7 @@ static int ov7670_t_contrast(struct i2c_client *client, int value)
 
 static int ov7670_q_contrast(struct i2c_client *client, __s32 *value)
 {
-	unsigned char v;
+	unsigned char v = 0;
 	int ret = ov7670_read(client, REG_CONTRAS, &v);
 
 	*value = v;
@@ -1042,7 +1046,7 @@ static int ov7670_q_contrast(struct i2c_client *client, __s32 *value)
 static int ov7670_q_hflip(struct i2c_client *client, __s32 *value)
 {
 	int ret;
-	unsigned char v;
+	unsigned char v = 0;
 
 	ret = ov7670_read(client, REG_MVFP, &v);
 	*value = (v & MVFP_MIRROR) == MVFP_MIRROR;
@@ -1052,7 +1056,7 @@ static int ov7670_q_hflip(struct i2c_client *client, __s32 *value)
 
 static int ov7670_t_hflip(struct i2c_client *client, int value)
 {
-	unsigned char v;
+	unsigned char v = 0;
 	int ret;
 
 	ret = ov7670_read(client, REG_MVFP, &v);
@@ -1070,7 +1074,7 @@ static int ov7670_t_hflip(struct i2c_client *client, int value)
 static int ov7670_q_vflip(struct i2c_client *client, __s32 *value)
 {
 	int ret;
-	unsigned char v;
+	unsigned char v = 0;
 
 	ret = ov7670_read(client, REG_MVFP, &v);
 	*value = (v & MVFP_FLIP) == MVFP_FLIP;
@@ -1080,7 +1084,7 @@ static int ov7670_q_vflip(struct i2c_client *client, __s32 *value)
 
 static int ov7670_t_vflip(struct i2c_client *client, int value)
 {
-	unsigned char v;
+	unsigned char v = 0;
 	int ret;
 
 	ret = ov7670_read(client, REG_MVFP, &v);
@@ -1183,7 +1187,7 @@ static struct ov7670_control {
 		.query = ov7670_q_hflip,
 	},
 };
-#define N_CONTROLS (sizeof(ov7670_controls)/sizeof(ov7670_controls[0]))
+#define N_CONTROLS (ARRAY_SIZE(ov7670_controls))
 
 static struct ov7670_control *ov7670_find_control(__u32 id)
 {

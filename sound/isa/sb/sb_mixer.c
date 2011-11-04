@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *  Routines for Sound Blaster mixer control
  *
  *
@@ -19,7 +19,6 @@
  *
  */
 
-#include <sound/driver.h>
 #include <asm/io.h>
 #include <linux/delay.h>
 #include <linux/time.h>
@@ -793,7 +792,8 @@ int snd_sbmixer_new(struct snd_sb *chip)
 	struct snd_card *card;
 	int err;
 
-	snd_assert(chip != NULL && chip->card != NULL, return -EINVAL);
+	if (snd_BUG_ON(!chip || !chip->card))
+		return -EINVAL;
 
 	card = chip->card;
 
@@ -821,6 +821,7 @@ int snd_sbmixer_new(struct snd_sb *chip)
 		break;
 	case SB_HW_16:
 	case SB_HW_ALS100:
+	case SB_HW_CS5530:
 		if ((err = snd_sbmixer_init(chip,
 					    snd_sb16_controls,
 					    ARRAY_SIZE(snd_sb16_controls),
@@ -925,7 +926,8 @@ static unsigned char als4000_saved_regs[] = {
 static void save_mixer(struct snd_sb *chip, unsigned char *regs, int num_regs)
 {
 	unsigned char *val = chip->saved_regs;
-	snd_assert(num_regs > ARRAY_SIZE(chip->saved_regs), return);
+	if (snd_BUG_ON(num_regs > ARRAY_SIZE(chip->saved_regs)))
+		return;
 	for (; num_regs; num_regs--)
 		*val++ = snd_sbmixer_read(chip, *regs++);
 }
@@ -933,7 +935,8 @@ static void save_mixer(struct snd_sb *chip, unsigned char *regs, int num_regs)
 static void restore_mixer(struct snd_sb *chip, unsigned char *regs, int num_regs)
 {
 	unsigned char *val = chip->saved_regs;
-	snd_assert(num_regs > ARRAY_SIZE(chip->saved_regs), return);
+	if (snd_BUG_ON(num_regs > ARRAY_SIZE(chip->saved_regs)))
+		return;
 	for (; num_regs; num_regs--)
 		snd_sbmixer_write(chip, *regs++, *val++);
 }
@@ -950,6 +953,7 @@ void snd_sbmixer_suspend(struct snd_sb *chip)
 		break;
 	case SB_HW_16:
 	case SB_HW_ALS100:
+	case SB_HW_CS5530:
 		save_mixer(chip, sb16_saved_regs, ARRAY_SIZE(sb16_saved_regs));
 		break;
 	case SB_HW_ALS4000:
@@ -975,6 +979,7 @@ void snd_sbmixer_resume(struct snd_sb *chip)
 		break;
 	case SB_HW_16:
 	case SB_HW_ALS100:
+	case SB_HW_CS5530:
 		restore_mixer(chip, sb16_saved_regs, ARRAY_SIZE(sb16_saved_regs));
 		break;
 	case SB_HW_ALS4000:

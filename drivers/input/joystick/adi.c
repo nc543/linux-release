@@ -431,7 +431,7 @@ static int adi_init_input(struct adi *adi, struct adi_port *port, int half)
 	input_dev->open = adi_open;
 	input_dev->close = adi_close;
 
-	input_dev->evbit[0] = BIT(EV_KEY) | BIT(EV_ABS);
+	input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_ABS);
 
 	for (i = 0; i < adi->axes10 + adi->axes8 + (adi->hats + (adi->pad != -1)) * 2; i++)
 		set_bit(adi->abs[i], input_dev->absbit);
@@ -572,8 +572,7 @@ static struct gameport_driver adi_drv = {
 
 static int __init adi_init(void)
 {
-	gameport_register_driver(&adi_drv);
-	return 0;
+	return gameport_register_driver(&adi_drv);
 }
 
 static void __exit adi_exit(void)

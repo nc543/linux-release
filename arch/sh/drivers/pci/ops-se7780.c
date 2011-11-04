@@ -13,7 +13,7 @@
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/pci.h>
-#include <asm/se7780.h>
+#include <mach-se/mach/se7780.h>
 #include <asm/io.h>
 #include "pci-sh4.h"
 
@@ -43,8 +43,8 @@ int __init pcibios_map_platform_irq(struct pci_dev *pdev, u8 slot, u8 pin)
 
 static struct resource se7780_io_resource = {
 	.name	= "SH7780_IO",
-	.start	= 0x2000,
-	.end	= 0x2000 + SH7780_PCI_IO_SIZE - 1,
+	.start	= SH7780_PCI_IO_BASE,
+	.end	= SH7780_PCI_IO_BASE + SH7780_PCI_IO_SIZE - 1,
 	.flags	= IORESOURCE_IO
 };
 

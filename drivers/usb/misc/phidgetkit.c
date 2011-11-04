@@ -113,7 +113,7 @@ static int set_outputs(struct interfacekit *kit)
 
 	buffer = kzalloc(4, GFP_KERNEL);
 	if (!buffer) {
-		dev_err(&kit->udev->dev, "%s - out of memory\n", __FUNCTION__);
+		dev_err(&kit->udev->dev, "%s - out of memory\n", __func__);
 		return -ENOMEM;
 	}
 	buffer[0] = (u8)kit->outputs;
@@ -146,7 +146,7 @@ static int change_string(struct interfacekit *kit, const char *display, unsigned
 	buffer = kmalloc(8, GFP_KERNEL);
 	form_buffer = kmalloc(30, GFP_KERNEL);
 	if ((!buffer) || (!form_buffer)) {
-		dev_err(&kit->udev->dev, "%s - out of memory\n", __FUNCTION__);
+		dev_err(&kit->udev->dev, "%s - out of memory\n", __func__);
 		goto exit;
 	}
 
@@ -216,7 +216,7 @@ static ssize_t set_backlight(struct device *dev, struct device_attribute *attr, 
 	
 	buffer = kzalloc(8, GFP_KERNEL);
 	if (!buffer) {
-		dev_err(&kit->udev->dev, "%s - out of memory\n", __FUNCTION__);
+		dev_err(&kit->udev->dev, "%s - out of memory\n", __func__);
 		goto exit;
 	}
 
@@ -305,9 +305,10 @@ static void interfacekit_irq(struct urb *urb)
 	struct interfacekit *kit = urb->context;
 	unsigned char *buffer = kit->data;
 	int i, level, sensor;
-	int status;
+	int retval;
+	int status = urb->status;
 
-	switch (urb->status) {
+	switch (status) {
 	case 0:			/* success */
 		break;
 	case -ECONNRESET:	/* unlink */
@@ -377,11 +378,11 @@ static void interfacekit_irq(struct urb *urb)
 		schedule_delayed_work(&kit->do_notify, 0);
 
 resubmit:
-	status = usb_submit_urb(urb, GFP_ATOMIC);
-	if (status)
-		err("can't resubmit intr, %s-%s/interfacekit0, status %d",
+	retval = usb_submit_urb(urb, GFP_ATOMIC);
+	if (retval)
+		err("can't resubmit intr, %s-%s/interfacekit0, retval %d",
 			kit->udev->bus->bus_name,
-			kit->udev->devpath, status);
+			kit->udev->devpath, retval);
 }
 
 static void do_notify(struct work_struct *work)
@@ -594,14 +595,13 @@ static int interfacekit_probe(struct usb_interface *intf, const struct usb_devic
         } while(value);
         kit->dev_no = bit;
 
-        kit->dev = device_create(phidget_class, &kit->udev->dev, 0,
-               		"interfacekit%d", kit->dev_no);
+	kit->dev = device_create(phidget_class, &kit->udev->dev, MKDEV(0, 0),
+				 kit, "interfacekit%d", kit->dev_no);
         if (IS_ERR(kit->dev)) {
                 rc = PTR_ERR(kit->dev);
                 kit->dev = NULL;
                 goto out;
         }
-	dev_set_drvdata(kit->dev, kit);
 
 	if (usb_submit_urb(kit->irq, GFP_KERNEL)) {
 		rc = -EIO;

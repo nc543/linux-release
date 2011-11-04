@@ -21,7 +21,6 @@
  */
 
 
-#include <sound/driver.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/pci.h>
@@ -652,7 +651,7 @@ static int snd_mixart_hw_free(struct snd_pcm_substream *subs)
 static struct snd_pcm_hardware snd_mixart_analog_caps =
 {
 	.info             = ( SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_INTERLEAVED |
-			      SNDRV_PCM_INFO_MMAP_VALID | SNDRV_PCM_INFO_SYNC_START |
+			      SNDRV_PCM_INFO_MMAP_VALID |
 			      SNDRV_PCM_INFO_PAUSE),
 	.formats	  = ( SNDRV_PCM_FMTBIT_U8 |
 			      SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S16_BE |
@@ -673,7 +672,7 @@ static struct snd_pcm_hardware snd_mixart_analog_caps =
 static struct snd_pcm_hardware snd_mixart_digital_caps =
 {
 	.info             = ( SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_INTERLEAVED |
-			      SNDRV_PCM_INFO_MMAP_VALID | SNDRV_PCM_INFO_SYNC_START |
+			      SNDRV_PCM_INFO_MMAP_VALID |
 			      SNDRV_PCM_INFO_PAUSE),
 	.formats	  = ( SNDRV_PCM_FMTBIT_U8 |
 			      SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S16_BE |
@@ -709,7 +708,7 @@ static int snd_mixart_playback_open(struct snd_pcm_substream *subs)
 		pcm_number = MIXART_PCM_ANALOG;
 		runtime->hw = snd_mixart_analog_caps;
 	} else {
-		snd_assert ( pcm == chip->pcm_dig ); 
+		snd_BUG_ON(pcm != chip->pcm_dig);
 		pcm_number = MIXART_PCM_DIGITAL;
 		runtime->hw = snd_mixart_digital_caps;
 	}
@@ -784,7 +783,7 @@ static int snd_mixart_capture_open(struct snd_pcm_substream *subs)
 		pcm_number = MIXART_PCM_ANALOG;
 		runtime->hw = snd_mixart_analog_caps;
 	} else {
-		snd_assert ( pcm == chip->pcm_dig ); 
+		snd_BUG_ON(pcm != chip->pcm_dig);
 		pcm_number = MIXART_PCM_DIGITAL;
 		runtime->hw = snd_mixart_digital_caps;
 	}
@@ -1315,8 +1314,13 @@ static int __devinit snd_mixart_probe(struct pci_dev *pci,
 	}
 	for (i = 0; i < 2; i++) {
 		mgr->mem[i].phys = pci_resource_start(pci, i);
-		mgr->mem[i].virt = ioremap_nocache(mgr->mem[i].phys,
-						   pci_resource_len(pci, i));
+		mgr->mem[i].virt = pci_ioremap_bar(pci, i);
+		if (!mgr->mem[i].virt) {
+		        printk(KERN_ERR "unable to remap resource 0x%lx\n",
+			       mgr->mem[i].phys);
+			snd_mixart_free(mgr);
+			return -EBUSY;
+		}
 	}
 
 	if (request_irq(pci->irq, snd_mixart_interrupt, IRQF_SHARED,

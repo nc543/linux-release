@@ -11,7 +11,6 @@
 #include <linux/file.h>
 #include <linux/smp_lock.h>
 #include <linux/highuid.h>
-#include <linux/dirent.h>
 #include <linux/resource.h>
 #include <linux/highmem.h>
 #include <linux/time.h>
@@ -35,12 +34,12 @@
 #include <linux/security.h>
 #include <linux/compat.h>
 #include <linux/vfs.h>
+#include <linux/ipc.h>
 
 #include <net/sock.h>
 #include <net/scm.h>
 
 #include <asm/compat-signal.h>
-#include <asm/ipc.h>
 #include <asm/sim.h>
 #include <asm/uaccess.h>
 #include <asm/mmu_context.h>
@@ -58,46 +57,11 @@
 #define AA(__x) ((unsigned long)((int)__x))
 
 #ifdef __MIPSEB__
-#define merge_64(r1,r2)	((((r1) & 0xffffffffUL) << 32) + ((r2) & 0xffffffffUL))
+#define merge_64(r1, r2) ((((r1) & 0xffffffffUL) << 32) + ((r2) & 0xffffffffUL))
 #endif
 #ifdef __MIPSEL__
-#define merge_64(r1,r2)	((((r2) & 0xffffffffUL) << 32) + ((r1) & 0xffffffffUL))
+#define merge_64(r1, r2) ((((r2) & 0xffffffffUL) << 32) + ((r1) & 0xffffffffUL))
 #endif
-
-/*
- * Revalidate the inode. This is required for proper NFS attribute caching.
- */
-
-int cp_compat_stat(struct kstat *stat, struct compat_stat __user *statbuf)
-{
-	struct compat_stat tmp;
-
-	if (!new_valid_dev(stat->dev) || !new_valid_dev(stat->rdev))
-		return -EOVERFLOW;
-
-	memset(&tmp, 0, sizeof(tmp));
-	tmp.st_dev = new_encode_dev(stat->dev);
-	tmp.st_ino = stat->ino;
-	if (sizeof(tmp.st_ino) < sizeof(stat->ino) && tmp.st_ino != stat->ino)
-		return -EOVERFLOW;
-	tmp.st_mode = stat->mode;
-	tmp.st_nlink = stat->nlink;
-	SET_UID(tmp.st_uid, stat->uid);
-	SET_GID(tmp.st_gid, stat->gid);
-	tmp.st_rdev = new_encode_dev(stat->rdev);
-	tmp.st_size = stat->size;
-	tmp.st_atime = stat->atime.tv_sec;
-	tmp.st_mtime = stat->mtime.tv_sec;
-	tmp.st_ctime = stat->ctime.tv_sec;
-#ifdef STAT_HAVE_NSEC
-	tmp.st_atime_nsec = stat->atime.tv_nsec;
-	tmp.st_mtime_nsec = stat->mtime.tv_nsec;
-	tmp.st_ctime_nsec = stat->ctime.tv_nsec;
-#endif
-	tmp.st_blocks = stat->blocks;
-	tmp.st_blksize = stat->blksize;
-	return copy_to_user(statbuf,&tmp,sizeof(tmp)) ? -EFAULT : 0;
-}
 
 asmlinkage unsigned long
 sys32_mmap2(unsigned long addr, unsigned long len, unsigned long prot,
@@ -129,23 +93,6 @@ out:
 	return error;
 }
 
-
-asmlinkage int sys_truncate64(const char __user *path, unsigned int high,
-			      unsigned int low)
-{
-	if ((int)high < 0)
-		return -EINVAL;
-	return sys_truncate(path, ((long) high << 32) | low);
-}
-
-asmlinkage int sys_ftruncate64(unsigned int fd, unsigned int high,
-			       unsigned int low)
-{
-	if ((int)high < 0)
-		return -EINVAL;
-	return sys_ftruncate(fd, ((long) high << 32) | low);
-}
-
 /*
  * sys_execve() executes a new program.
  */
@@ -174,102 +121,16 @@ struct rlimit32 {
 	int	rlim_max;
 };
 
-#ifdef __MIPSEB__
-asmlinkage long sys32_truncate64(const char __user * path, unsigned long __dummy,
-	int length_hi, int length_lo)
-#endif
-#ifdef __MIPSEL__
-asmlinkage long sys32_truncate64(const char __user * path, unsigned long __dummy,
-	int length_lo, int length_hi)
-#endif
+asmlinkage long sys32_truncate64(const char __user * path,
+	unsigned long __dummy, int a2, int a3)
 {
-	loff_t length;
-
-	length = ((unsigned long) length_hi << 32) | (unsigned int) length_lo;
-
-	return sys_truncate(path, length);
+	return sys_truncate(path, merge_64(a2, a3));
 }
 
-#ifdef __MIPSEB__
 asmlinkage long sys32_ftruncate64(unsigned int fd, unsigned long __dummy,
-	int length_hi, int length_lo)
-#endif
-#ifdef __MIPSEL__
-asmlinkage long sys32_ftruncate64(unsigned int fd, unsigned long __dummy,
-	int length_lo, int length_hi)
-#endif
+	int a2, int a3)
 {
-	loff_t length;
-
-	length = ((unsigned long) length_hi << 32) | (unsigned int) length_lo;
-
-	return sys_ftruncate(fd, length);
-}
-
-static inline long
-get_tv32(struct timeval *o, struct compat_timeval __user *i)
-{
-	return (!access_ok(VERIFY_READ, i, sizeof(*i)) ||
-		(__get_user(o->tv_sec, &i->tv_sec) |
-		 __get_user(o->tv_usec, &i->tv_usec)));
-}
-
-static inline long
-put_tv32(struct compat_timeval __user *o, struct timeval *i)
-{
-	return (!access_ok(VERIFY_WRITE, o, sizeof(*o)) ||
-		(__put_user(i->tv_sec, &o->tv_sec) |
-		 __put_user(i->tv_usec, &o->tv_usec)));
-}
-
-extern struct timezone sys_tz;
-
-asmlinkage int
-sys32_gettimeofday(struct compat_timeval __user *tv, struct timezone __user *tz)
-{
-	if (tv) {
-		struct timeval ktv;
-		do_gettimeofday(&ktv);
-		if (put_tv32(tv, &ktv))
-			return -EFAULT;
-	}
-	if (tz) {
-		if (copy_to_user(tz, &sys_tz, sizeof(sys_tz)))
-			return -EFAULT;
-	}
-	return 0;
-}
-
-static inline long get_ts32(struct timespec *o, struct compat_timeval __user *i)
-{
-	long usec;
-
-	if (!access_ok(VERIFY_READ, i, sizeof(*i)))
-		return -EFAULT;
-	if (__get_user(o->tv_sec, &i->tv_sec))
-		return -EFAULT;
-	if (__get_user(usec, &i->tv_usec))
-		return -EFAULT;
-	o->tv_nsec = usec * 1000;
-		return 0;
-}
-
-asmlinkage int
-sys32_settimeofday(struct compat_timeval __user *tv, struct timezone __user *tz)
-{
-	struct timespec kts;
-	struct timezone ktz;
-
- 	if (tv) {
-		if (get_ts32(&kts, tv))
-			return -EFAULT;
-	}
-	if (tz) {
-		if (copy_from_user(&ktz, tz, sizeof(ktz)))
-			return -EFAULT;
-	}
-
-	return do_sys_settimeofday(tv ? &kts : NULL, tz ? &ktz : NULL);
+	return sys_ftruncate(fd, merge_64(a2, a3));
 }
 
 asmlinkage int sys32_llseek(unsigned int fd, unsigned int offset_high,
@@ -300,13 +161,13 @@ asmlinkage int sys32_sched_rr_get_interval(compat_pid_t pid,
 {
 	struct timespec t;
 	int ret;
-	mm_segment_t old_fs = get_fs ();
+	mm_segment_t old_fs = get_fs();
 
-	set_fs (KERNEL_DS);
+	set_fs(KERNEL_DS);
 	ret = sys_sched_rr_get_interval(pid, (struct timespec __user *)&t);
-	set_fs (old_fs);
+	set_fs(old_fs);
 	if (put_user (t.tv_sec, &interval->tv_sec) ||
-	    __put_user (t.tv_nsec, &interval->tv_nsec))
+	    __put_user(t.tv_nsec, &interval->tv_nsec))
 		return -EFAULT;
 	return ret;
 }
@@ -314,7 +175,7 @@ asmlinkage int sys32_sched_rr_get_interval(compat_pid_t pid,
 #ifdef CONFIG_SYSVIPC
 
 asmlinkage long
-sys32_ipc (u32 call, int first, int second, int third, u32 ptr, u32 fifth)
+sys32_ipc(u32 call, int first, int second, int third, u32 ptr, u32 fifth)
 {
 	int version, err;
 
@@ -373,7 +234,7 @@ sys32_ipc (u32 call, int first, int second, int third, u32 ptr, u32 fifth)
 #else
 
 asmlinkage long
-sys32_ipc (u32 call, int first, int second, int third, u32 ptr, u32 fifth)
+sys32_ipc(u32 call, int first, int second, int third, u32 ptr, u32 fifth)
 {
 	return -ENOSYS;
 }
@@ -505,16 +366,16 @@ asmlinkage int sys32_ustat(dev_t dev, struct ustat32 __user * ubuf32)
 
 	set_fs(KERNEL_DS);
 	err = sys_ustat(dev, (struct ustat __user *)&tmp);
-	set_fs (old_fs);
+	set_fs(old_fs);
 
 	if (err)
 		goto out;
 
-	memset(&tmp32,0,sizeof(struct ustat32));
+	memset(&tmp32, 0, sizeof(struct ustat32));
 	tmp32.f_tfree = tmp.f_tfree;
 	tmp32.f_tinode = tmp.f_tinode;
 
-	err = copy_to_user(ubuf32,&tmp32,sizeof(struct ustat32)) ? -EFAULT : 0;
+	err = copy_to_user(ubuf32, &tmp32, sizeof(struct ustat32)) ? -EFAULT : 0;
 
 out:
 	return err;
@@ -566,8 +427,15 @@ asmlinkage long sys32_fadvise64_64(int fd, int __pad,
 			flags);
 }
 
+asmlinkage long sys32_fallocate(int fd, int mode, unsigned offset_a2,
+	unsigned offset_a3, unsigned len_a4, unsigned len_a5)
+{
+	return sys_fallocate(fd, mode, merge_64(offset_a2, offset_a3),
+	                     merge_64(len_a4, len_a5));
+}
+
 save_static_function(sys32_clone);
-__attribute_used__ noinline static int
+static int noinline __used
 _sys32_clone(nabi_no_regargs struct pt_regs regs)
 {
 	unsigned long clone_flags;

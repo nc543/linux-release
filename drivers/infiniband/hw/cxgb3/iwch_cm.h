@@ -54,13 +54,14 @@
 #define MPA_FLAGS_MASK		0xE0
 
 #define put_ep(ep) { \
-	PDBG("put_ep (via %s:%u) ep %p refcnt %d\n", __FUNCTION__, __LINE__,  \
+	PDBG("put_ep (via %s:%u) ep %p refcnt %d\n", __func__, __LINE__,  \
 	     ep, atomic_read(&((ep)->kref.refcount))); \
+	WARN_ON(atomic_read(&((ep)->kref.refcount)) < 1); \
 	kref_put(&((ep)->kref), __free_ep); \
 }
 
 #define get_ep(ep) { \
-	PDBG("get_ep (via %s:%u) ep %p, refcnt %d\n", __FUNCTION__, __LINE__, \
+	PDBG("get_ep (via %s:%u) ep %p, refcnt %d\n", __func__, __LINE__, \
 	     ep, atomic_read(&((ep)->kref.refcount))); \
 	kref_get(&((ep)->kref));  \
 }
@@ -175,6 +176,7 @@ struct iwch_ep {
 	unsigned int atid;
 	u32 hwtid;
 	u32 snd_seq;
+	u32 rcv_seq;
 	struct l2t_entry *l2t;
 	struct dst_entry *dst;
 	struct sk_buff *mpa_skb;
@@ -224,5 +226,6 @@ int iwch_ep_redirect(void *ctx, struct dst_entry *old, struct dst_entry *new, st
 
 int __init iwch_cm_init(void);
 void __exit iwch_cm_term(void);
+extern int peer2peer;
 
 #endif				/* _IWCH_CM_H_ */

@@ -1,6 +1,5 @@
 /*
  *
- *  $Id$
  *
  *  Copyright (C) 2005 Mike Isely <isely@pobox.com>
  *
@@ -35,7 +34,7 @@
 
 */
 
-static unsigned int i2c_scan = 0;
+static unsigned int i2c_scan;
 module_param(i2c_scan, int, S_IRUGO|S_IWUSR);
 MODULE_PARM_DESC(i2c_scan,"scan i2c bus at insmod time");
 
@@ -389,10 +388,6 @@ static int pvr2_i2c_xfer(struct i2c_adapter *i2c_adap,
 		ret = -EINVAL;
 		goto done;
 	}
-	if ((msgs[0].flags & I2C_M_NOSTART)) {
-		trace_i2c("i2c refusing I2C_M_NOSTART");
-		goto done;
-	}
 	if (msgs[0].addr < PVR2_I2C_FUNC_CNT) {
 		funcp = hdw->i2c_func[msgs[0].addr];
 	}
@@ -494,14 +489,12 @@ static int pvr2_i2c_xfer(struct i2c_adapter *i2c_adap,
 			cnt = msgs[idx].len;
 			printk(KERN_INFO
 			       "pvrusb2 i2c xfer %u/%u:"
-			       " addr=0x%x len=%d %s%s",
+			       " addr=0x%x len=%d %s",
 			       idx+1,num,
 			       msgs[idx].addr,
 			       cnt,
 			       (msgs[idx].flags & I2C_M_RD ?
-				"read" : "write"),
-			       (msgs[idx].flags & I2C_M_NOSTART ?
-				" nostart" : ""));
+				"read" : "write"));
 			if ((ret > 0) || !(msgs[idx].flags & I2C_M_RD)) {
 				if (cnt > 8) cnt = 8;
 				printk(" [");
@@ -526,15 +519,9 @@ static int pvr2_i2c_xfer(struct i2c_adapter *i2c_adap,
 	return ret;
 }
 
-static int pvr2_i2c_control(struct i2c_adapter *adapter,
-			    unsigned int cmd, unsigned long arg)
-{
-	return 0;
-}
-
 static u32 pvr2_i2c_functionality(struct i2c_adapter *adap)
 {
-	return I2C_FUNC_SMBUS_EMUL | I2C_FUNC_I2C | I2C_FUNC_SMBUS_BYTE_DATA;
+	return I2C_FUNC_SMBUS_EMUL | I2C_FUNC_I2C;
 }
 
 static int pvr2_i2c_core_singleton(struct i2c_client *cp,
@@ -576,15 +563,13 @@ int pvr2_i2c_client_cmd(struct pvr2_i2c_client *cp,unsigned int cmd,void *arg)
 
 int pvr2_i2c_core_cmd(struct pvr2_hdw *hdw,unsigned int cmd,void *arg)
 {
-	struct list_head *item,*nc;
-	struct pvr2_i2c_client *cp;
+	struct pvr2_i2c_client *cp, *ncp;
 	int stat = -EINVAL;
 
 	if (!hdw) return stat;
 
 	mutex_lock(&hdw->i2c_list_lock);
-	list_for_each_safe(item,nc,&hdw->i2c_clients) {
-		cp = list_entry(item,struct pvr2_i2c_client,list);
+	list_for_each_entry_safe(cp, ncp, &hdw->i2c_clients, list) {
 		if (!cp->recv_enable) continue;
 		mutex_unlock(&hdw->i2c_list_lock);
 		stat = pvr2_i2c_client_cmd(cp,cmd,arg);
@@ -608,13 +593,11 @@ static int handler_check(struct pvr2_i2c_client *cp)
 
 void pvr2_i2c_core_status_poll(struct pvr2_hdw *hdw)
 {
-	struct list_head *item;
 	struct pvr2_i2c_client *cp;
 	mutex_lock(&hdw->i2c_list_lock); do {
 		struct v4l2_tuner *vtp = &hdw->tuner_signal_info;
 		memset(vtp,0,sizeof(*vtp));
-		list_for_each(item,&hdw->i2c_clients) {
-			cp = list_entry(item,struct pvr2_i2c_client,list);
+		list_for_each_entry(cp, &hdw->i2c_clients, list) {
 			if (!cp->detected_flag) continue;
 			if (!cp->status_poll) continue;
 			cp->status_poll(cp);
@@ -636,8 +619,7 @@ void pvr2_i2c_core_sync(struct pvr2_hdw *hdw)
 {
 	unsigned long msk;
 	unsigned int idx;
-	struct list_head *item,*nc;
-	struct pvr2_i2c_client *cp;
+	struct pvr2_i2c_client *cp, *ncp;
 
 	if (!hdw->i2c_linked) return;
 	if (!(hdw->i2c_pend_types & PVR2_I2C_PEND_ALL)) {
@@ -655,9 +637,7 @@ void pvr2_i2c_core_sync(struct pvr2_hdw *hdw)
 			buf = kmalloc(BUFSIZE,GFP_KERNEL);
 			pvr2_trace(PVR2_TRACE_I2C_CORE,"i2c: PEND_DETECT");
 			hdw->i2c_pend_types &= ~PVR2_I2C_PEND_DETECT;
-			list_for_each(item,&hdw->i2c_clients) {
-				cp = list_entry(item,struct pvr2_i2c_client,
-						list);
+			list_for_each_entry(cp, &hdw->i2c_clients, list) {
 				if (!cp->detected_flag) {
 					cp->ctl_mask = 0;
 					pvr2_i2c_probe(hdw,cp);
@@ -693,9 +673,7 @@ void pvr2_i2c_core_sync(struct pvr2_hdw *hdw)
 				   "i2c: PEND_STALE (0x%lx)",
 				   hdw->i2c_stale_mask);
 			hdw->i2c_pend_types &= ~PVR2_I2C_PEND_STALE;
-			list_for_each(item,&hdw->i2c_clients) {
-				cp = list_entry(item,struct pvr2_i2c_client,
-						list);
+			list_for_each_entry(cp, &hdw->i2c_clients, list) {
 				m2 = hdw->i2c_stale_mask;
 				m2 &= cp->ctl_mask;
 				m2 &= ~cp->pend_mask;
@@ -716,9 +694,8 @@ void pvr2_i2c_core_sync(struct pvr2_hdw *hdw)
 			   and update each one. */
 			pvr2_trace(PVR2_TRACE_I2C_CORE,"i2c: PEND_CLIENT");
 			hdw->i2c_pend_types &= ~PVR2_I2C_PEND_CLIENT;
-			list_for_each_safe(item,nc,&hdw->i2c_clients) {
-				cp = list_entry(item,struct pvr2_i2c_client,
-						list);
+			list_for_each_entry_safe(cp, ncp, &hdw->i2c_clients,
+						 list) {
 				if (!cp->handler) continue;
 				if (!cp->handler->func_table->update) continue;
 				pvr2_trace(PVR2_TRACE_I2C_CORE,
@@ -750,10 +727,8 @@ void pvr2_i2c_core_sync(struct pvr2_hdw *hdw)
 			for (idx = 0, msk = 1; pm; idx++, msk <<= 1) {
 				if (!(pm & msk)) continue;
 				pm &= ~msk;
-				list_for_each(item,&hdw->i2c_clients) {
-					cp = list_entry(item,
-							struct pvr2_i2c_client,
-							list);
+				list_for_each_entry(cp, &hdw->i2c_clients,
+						    list) {
 					if (cp->pend_mask & msk) {
 						cp->pend_mask &= ~msk;
 						cp->recv_enable = !0;
@@ -777,7 +752,6 @@ int pvr2_i2c_core_check_stale(struct pvr2_hdw *hdw)
 	unsigned long msk,sm,pm;
 	unsigned int idx;
 	const struct pvr2_i2c_op *opf;
-	struct list_head *item;
 	struct pvr2_i2c_client *cp;
 	unsigned int pt = 0;
 
@@ -796,11 +770,9 @@ int pvr2_i2c_core_check_stale(struct pvr2_hdw *hdw)
 	}
 	if (sm) pt |= PVR2_I2C_PEND_STALE;
 
-	list_for_each(item,&hdw->i2c_clients) {
-		cp = list_entry(item,struct pvr2_i2c_client,list);
-		if (!handler_check(cp)) continue;
-		pt |= PVR2_I2C_PEND_CLIENT;
-	}
+	list_for_each_entry(cp, &hdw->i2c_clients, list)
+		if (handler_check(cp))
+			pt |= PVR2_I2C_PEND_CLIENT;
 
 	if (pt) {
 		mutex_lock(&hdw->i2c_list_lock); do {
@@ -855,7 +827,7 @@ static unsigned int pvr2_i2c_client_describe(struct pvr2_i2c_client *cp,
 	if ((detail & PVR2_I2C_DETAIL_CTLMASK) && cp->ctl_mask) {
 		unsigned int idx;
 		unsigned long msk,sm;
-		int spcfl;
+
 		bcnt = scnprintf(buf,maxlen," [");
 		ccnt += bcnt; buf += bcnt; maxlen -= bcnt;
 		sm = 0;
@@ -888,12 +860,10 @@ unsigned int pvr2_i2c_report(struct pvr2_hdw *hdw,
 			     char *buf,unsigned int maxlen)
 {
 	unsigned int ccnt,bcnt;
-	struct list_head *item;
 	struct pvr2_i2c_client *cp;
 	ccnt = 0;
 	mutex_lock(&hdw->i2c_list_lock); do {
-		list_for_each(item,&hdw->i2c_clients) {
-			cp = list_entry(item,struct pvr2_i2c_client,list);
+		list_for_each_entry(cp, &hdw->i2c_clients, list) {
 			bcnt = pvr2_i2c_client_describe(
 				cp,
 				(PVR2_I2C_DETAIL_HANDLER|
@@ -921,23 +891,23 @@ static int pvr2_i2c_attach_inform(struct i2c_client *client)
 	INIT_LIST_HEAD(&cp->list);
 	cp->client = client;
 	mutex_lock(&hdw->i2c_list_lock); do {
+		hdw->cropcap_stale = !0;
 		list_add_tail(&cp->list,&hdw->i2c_clients);
 		hdw->i2c_pend_types |= PVR2_I2C_PEND_DETECT;
 	} while (0); mutex_unlock(&hdw->i2c_list_lock);
-	if (fl) pvr2_hdw_poll_trigger_unlocked(hdw);
+	if (fl) queue_work(hdw->workqueue,&hdw->worki2csync);
 	return 0;
 }
 
 static int pvr2_i2c_detach_inform(struct i2c_client *client)
 {
 	struct pvr2_hdw *hdw = (struct pvr2_hdw *)(client->adapter->algo_data);
-	struct pvr2_i2c_client *cp;
-	struct list_head *item,*nc;
+	struct pvr2_i2c_client *cp, *ncp;
 	unsigned long amask = 0;
 	int foundfl = 0;
 	mutex_lock(&hdw->i2c_list_lock); do {
-		list_for_each_safe(item,nc,&hdw->i2c_clients) {
-			cp = list_entry(item,struct pvr2_i2c_client,list);
+		hdw->cropcap_stale = !0;
+		list_for_each_entry_safe(cp, ncp, &hdw->i2c_clients, list) {
 			if (cp->client == client) {
 				trace_i2c("pvr2_i2c_detach"
 					  " [client=%s @ 0x%x ctxt=%p]",
@@ -967,7 +937,6 @@ static int pvr2_i2c_detach_inform(struct i2c_client *client)
 
 static struct i2c_algorithm pvr2_i2c_algo_template = {
 	.master_xfer   = pvr2_i2c_xfer,
-	.algo_control  = pvr2_i2c_control,
 	.functionality = pvr2_i2c_functionality,
 };
 
@@ -979,22 +948,32 @@ static struct i2c_adapter pvr2_i2c_adap_template = {
 	.client_unregister = pvr2_i2c_detach_inform,
 };
 
-static void do_i2c_scan(struct pvr2_hdw *hdw)
+
+/* Return true if device exists at given address */
+static int do_i2c_probe(struct pvr2_hdw *hdw, int addr)
 {
 	struct i2c_msg msg[1];
-	int i,rc;
+	int rc;
 	msg[0].addr = 0;
 	msg[0].flags = I2C_M_RD;
 	msg[0].len = 0;
 	msg[0].buf = NULL;
-	printk("%s: i2c scan beginning\n",hdw->name);
+	msg[0].addr = addr;
+	rc = i2c_transfer(&hdw->i2c_adap, msg, ARRAY_SIZE(msg));
+	return rc == 1;
+}
+
+static void do_i2c_scan(struct pvr2_hdw *hdw)
+{
+	int i;
+	printk(KERN_INFO "%s: i2c scan beginning\n", hdw->name);
 	for (i = 0; i < 128; i++) {
-		msg[0].addr = i;
-		rc = i2c_transfer(&hdw->i2c_adap,msg, ARRAY_SIZE(msg));
-		if (rc != 1) continue;
-		printk("%s: i2c scan: found device @ 0x%x\n",hdw->name,i);
+		if (do_i2c_probe(hdw, i)) {
+			printk(KERN_INFO "%s: i2c scan: found device @ 0x%x\n",
+			       hdw->name, i);
+		}
 	}
-	printk("%s: i2c scan done.\n",hdw->name);
+	printk(KERN_INFO "%s: i2c scan done.\n", hdw->name);
 }
 
 void pvr2_i2c_core_init(struct pvr2_hdw *hdw)
@@ -1012,13 +991,15 @@ void pvr2_i2c_core_init(struct pvr2_hdw *hdw)
 		printk(KERN_INFO "%s: IR disabled\n",hdw->name);
 		hdw->i2c_func[0x18] = i2c_black_hole;
 	} else if (ir_mode[hdw->unit_number] == 1) {
-		if (hdw->hdw_type == PVR2_HDW_TYPE_24XXX) {
+		if (hdw->hdw_desc->ir_scheme == PVR2_IR_SCHEME_24XXX) {
 			hdw->i2c_func[0x18] = i2c_24xxx_ir;
 		}
 	}
-	if (hdw->hdw_type == PVR2_HDW_TYPE_24XXX) {
-		hdw->i2c_func[0x1b] = i2c_hack_wm8775;
+	if (hdw->hdw_desc->flag_has_cx25840) {
 		hdw->i2c_func[0x44] = i2c_hack_cx25840;
+	}
+	if (hdw->hdw_desc->flag_has_wm8775) {
+		hdw->i2c_func[0x1b] = i2c_hack_wm8775;
 	}
 
 	// Configure the adapter and set up everything else related to it.
@@ -1035,6 +1016,16 @@ void pvr2_i2c_core_init(struct pvr2_hdw *hdw)
 	mutex_init(&hdw->i2c_list_lock);
 	hdw->i2c_linked = !0;
 	i2c_add_adapter(&hdw->i2c_adap);
+	if (hdw->i2c_func[0x18] == i2c_24xxx_ir) {
+		/* Probe for a different type of IR receiver on this
+		   device.  If present, disable the emulated IR receiver. */
+		if (do_i2c_probe(hdw, 0x71)) {
+			pvr2_trace(PVR2_TRACE_INFO,
+				   "Device has newer IR hardware;"
+				   " disabling unneeded virtual IR device");
+			hdw->i2c_func[0x18] = NULL;
+		}
+	}
 	if (i2c_scan) do_i2c_scan(hdw);
 }
 

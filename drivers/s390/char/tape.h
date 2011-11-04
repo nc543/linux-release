@@ -188,7 +188,7 @@ struct tape_blk_data
 {
 	struct tape_device *	device;
 	/* Block device request queue. */
-	request_queue_t *	request_queue;
+	struct request_queue *	request_queue;
 	spinlock_t		request_queue_lock;
 
 	/* Task to move entries from block request to CCS request queue. */
@@ -230,6 +230,9 @@ struct tape_device {
 
 	/* Request queue. */
 	struct list_head		req_queue;
+
+	/* Request wait queue. */
+	wait_queue_head_t		wait_queue;
 
 	/* Each tape device has (currently) two minor numbers. */
 	int				first_minor;

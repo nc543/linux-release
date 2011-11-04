@@ -3,7 +3,8 @@
  *
  * SuperH on-chip serial module support.  (SCI with no FIFO / with FIFO)
  *
- *  Copyright (C) 2002 - 2006  Paul Mundt
+ *  Copyright (C) 2002 - 2008  Paul Mundt
+ *  Modified to support SH7720 SCIF. Markus Brunner, Mark Jonas (Jul 2007).
  *
  * based off of the old drivers/char/sh-sci.c by:
  *
@@ -12,6 +13,7 @@
  *   Modified to support multiple serial ports. Stuart Menefy (May 2000).
  *   Modified to support SecureEdge. David McCullough (2002)
  *   Modified to support SH7300 SCIF. Takashi Kusuda (Jun 2003).
+ *   Removed SH7300 support (Jul 2007).
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
@@ -39,20 +41,19 @@
 #include <linux/delay.h>
 #include <linux/console.h>
 #include <linux/platform_device.h>
-
-#ifdef CONFIG_CPU_FREQ
+#include <linux/serial_sci.h>
 #include <linux/notifier.h>
 #include <linux/cpufreq.h>
-#endif
-
-#if defined(CONFIG_SUPERH) && !defined(CONFIG_SUPERH64)
+#include <linux/clk.h>
 #include <linux/ctype.h>
+#include <linux/err.h>
+
+#ifdef CONFIG_SUPERH
 #include <asm/clock.h>
 #include <asm/sh_bios.h>
 #include <asm/kgdb.h>
 #endif
 
-#include <asm/sci.h>
 #include "sh-sci.h"
 
 struct sci_port {
@@ -78,7 +79,7 @@ struct sci_port {
 	struct timer_list	break_timer;
 	int			break_flag;
 
-#if defined(CONFIG_SUPERH) && !defined(CONFIG_SUPERH64)
+#ifdef CONFIG_HAVE_CLK
 	/* Port clock */
 	struct clk		*clk;
 #endif
@@ -143,9 +144,9 @@ static void put_char(struct uart_port *port, char c)
 		status = sci_in(port, SCxSR);
 	} while (!(status & SCxSR_TDxE(port)));
 
-	sci_out(port, SCxTDR, c);
 	sci_in(port, SCxSR);            /* Dummy read */
 	sci_out(port, SCxSR, SCxSR_TDxE_CLEAR(port));
+	sci_out(port, SCxTDR, c);
 
 	spin_unlock_irqrestore(&port->lock, flags);
 }
@@ -184,15 +185,15 @@ static void put_string(struct sci_port *sci_port, const char *buffer, int count)
 			int h, l;
 
 			c = *p++;
-			h = highhex(c);
-			l = lowhex(c);
+			h = hex_asc_hi(c);
+			l = hex_asc_lo(c);
 			put_char(port, h);
 			put_char(port, l);
 			checksum += h + l;
 		}
 		put_char(port, '#');
-		put_char(port, highhex(checksum));
-		put_char(port, lowhex(checksum));
+		put_char(port, hex_asc_hi(checksum));
+		put_char(port, hex_asc_lo(checksum));
 	    } while  (get_char(port) != '+');
 	} else
 #endif /* CONFIG_SH_STANDARD_BIOS || CONFIG_SH_KGDB */
@@ -249,8 +250,7 @@ static inline void h8300_sci_disable(struct uart_port *port)
 }
 #endif
 
-#if defined(SCI_ONLY) || defined(SCI_AND_SCIF) && \
-    defined(__H8300H__) || defined(__H8300S__)
+#if defined(__H8300H__) || defined(__H8300S__)
 static void sci_init_pins_sci(struct uart_port* port, unsigned int cflag)
 {
 	int ch = (port->mapbase - SMR0) >> 3;
@@ -284,18 +284,7 @@ static void sci_init_pins_irda(struct uart_port *port, unsigned int cflag)
 #define sci_init_pins_irda NULL
 #endif
 
-#ifdef SCI_ONLY
-#define sci_init_pins_scif NULL
-#endif
-
-#if defined(SCIF_ONLY) || defined(SCI_AND_SCIF)
-#if defined(CONFIG_CPU_SUBTYPE_SH7300) 
-/* SH7300 doesn't use RTS/CTS */
-static void sci_init_pins_scif(struct uart_port *port, unsigned int cflag)
-{
-	sci_out(port, SCFCR, 0);
-}
-#elif defined(CONFIG_CPU_SUBTYPE_SH7710) || defined(CONFIG_CPU_SUBTYPE_SH7712)
+#if defined(CONFIG_CPU_SUBTYPE_SH7710) || defined(CONFIG_CPU_SUBTYPE_SH7712)
 static void sci_init_pins_scif(struct uart_port* port, unsigned int cflag)
 {
 	unsigned int fcr_val = 0;
@@ -303,6 +292,37 @@ static void sci_init_pins_scif(struct uart_port* port, unsigned int cflag)
 	set_sh771x_scif_pfc(port);
 	if (cflag & CRTSCTS) {
 		fcr_val |= SCFCR_MCE;
+	}
+	sci_out(port, SCFCR, fcr_val);
+}
+#elif defined(CONFIG_CPU_SUBTYPE_SH7720) || defined(CONFIG_CPU_SUBTYPE_SH7721)
+static void sci_init_pins_scif(struct uart_port *port, unsigned int cflag)
+{
+	unsigned int fcr_val = 0;
+	unsigned short data;
+
+	if (cflag & CRTSCTS) {
+		/* enable RTS/CTS */
+		if (port->mapbase == 0xa4430000) { /* SCIF0 */
+			/* Clear PTCR bit 9-2; enable all scif pins but sck */
+			data = ctrl_inw(PORT_PTCR);
+			ctrl_outw((data & 0xfc03), PORT_PTCR);
+		} else if (port->mapbase == 0xa4438000) { /* SCIF1 */
+			/* Clear PVCR bit 9-2 */
+			data = ctrl_inw(PORT_PVCR);
+			ctrl_outw((data & 0xfc03), PORT_PVCR);
+		}
+		fcr_val |= SCFCR_MCE;
+	} else {
+		if (port->mapbase == 0xa4430000) { /* SCIF0 */
+			/* Clear PTCR bit 5-2; enable only tx and rx  */
+			data = ctrl_inw(PORT_PTCR);
+			ctrl_outw((data & 0xffc3), PORT_PTCR);
+		} else if (port->mapbase == 0xa4438000) { /* SCIF1 */
+			/* Clear PVCR bit 5-2 */
+			data = ctrl_inw(PORT_PVCR);
+			ctrl_outw((data & 0xffc3), PORT_PVCR);
+		}
 	}
 	sci_out(port, SCFCR, fcr_val);
 }
@@ -338,23 +358,27 @@ static void sci_init_pins_scif(struct uart_port *port, unsigned int cflag)
 static void sci_init_pins_scif(struct uart_port *port, unsigned int cflag)
 {
 	unsigned int fcr_val = 0;
+	unsigned short data;
 
-	if (cflag & CRTSCTS) {
-		fcr_val |= SCFCR_MCE;
+	if (port->mapbase == 0xffe00000) {
+		data = ctrl_inw(PSCR);
+		data &= ~0x03cf;
+		if (cflag & CRTSCTS)
+			fcr_val |= SCFCR_MCE;
+		else
+			data |= 0x0340;
 
-		ctrl_outw(0x0000, PORT_PSCR);
-	} else {
-		unsigned short data;
-
-		data = ctrl_inw(PORT_PSCR);
-		data &= 0x033f;
-		data |= 0x0400;
-		ctrl_outw(data, PORT_PSCR);
-
-		ctrl_outw(ctrl_inw(SCSPTR0) & 0x17, SCSPTR0);
+		ctrl_outw(data, PSCR);
 	}
+	/* SCIF1 and SCIF2 should be setup by board code */
 
 	sci_out(port, SCFCR, fcr_val);
+}
+#elif defined(CONFIG_CPU_SUBTYPE_SH7723)
+static void sci_init_pins_scif(struct uart_port *port, unsigned int cflag)
+{
+	/* Nothing to do here.. */
+	sci_out(port, SCFCR, 0);
 }
 #else
 /* For SH7750 */
@@ -365,9 +389,12 @@ static void sci_init_pins_scif(struct uart_port *port, unsigned int cflag)
 	if (cflag & CRTSCTS) {
 		fcr_val |= SCFCR_MCE;
 	} else {
-#ifdef CONFIG_CPU_SUBTYPE_SH7343
+#if defined(CONFIG_CPU_SUBTYPE_SH7343) || defined(CONFIG_CPU_SUBTYPE_SH7366)
 		/* Nothing */
-#elif defined(CONFIG_CPU_SUBTYPE_SH7780) || defined(CONFIG_CPU_SUBTYPE_SH7785)
+#elif defined(CONFIG_CPU_SUBTYPE_SH7763) || \
+      defined(CONFIG_CPU_SUBTYPE_SH7780) || \
+      defined(CONFIG_CPU_SUBTYPE_SH7785) || \
+      defined(CONFIG_CPU_SUBTYPE_SHX3)
 		ctrl_outw(0x0080, SCSPTR0); /* Set RTS = 1 */
 #else
 		ctrl_outw(0x0080, SCSPTR2); /* Set RTS = 1 */
@@ -382,12 +409,28 @@ static void sci_init_pins_scif(struct uart_port *port, unsigned int cflag)
     defined(CONFIG_CPU_SUBTYPE_SH7785)
 static inline int scif_txroom(struct uart_port *port)
 {
-	return SCIF_TXROOM_MAX - (sci_in(port, SCTFDR) & 0x7f);
+	return SCIF_TXROOM_MAX - (sci_in(port, SCTFDR) & 0xff);
 }
 
 static inline int scif_rxroom(struct uart_port *port)
 {
-	return sci_in(port, SCRFDR) & 0x7f;
+	return sci_in(port, SCRFDR) & 0xff;
+}
+#elif defined(CONFIG_CPU_SUBTYPE_SH7763)
+static inline int scif_txroom(struct uart_port *port)
+{
+	if((port->mapbase == 0xffe00000) || (port->mapbase == 0xffe08000)) /* SCIF0/1*/
+		return SCIF_TXROOM_MAX - (sci_in(port, SCTFDR) & 0xff);
+	else /* SCIF2 */
+		return SCIF2_TXROOM_MAX - (sci_in(port, SCFDR) >> 8);
+}
+
+static inline int scif_rxroom(struct uart_port *port)
+{
+	if((port->mapbase == 0xffe00000) || (port->mapbase == 0xffe08000)) /* SCIF0/1*/
+		return sci_in(port, SCRFDR) & 0xff;
+	else /* SCIF2 */
+		return sci_in(port, SCFDR) & SCIF2_RFDC_MASK;
 }
 #else
 static inline int scif_txroom(struct uart_port *port)
@@ -400,7 +443,6 @@ static inline int scif_rxroom(struct uart_port *port)
 	return sci_in(port, SCFDR) & SCIF_RFDC_MASK;
 }
 #endif
-#endif /* SCIF_ONLY || SCI_AND_SCIF */
 
 static inline int sci_txroom(struct uart_port *port)
 {
@@ -436,12 +478,10 @@ static void sci_transmit_chars(struct uart_port *port)
 		return;
 	}
 
-#ifndef SCI_ONLY
-	if (port->type == PORT_SCIF)
-		count = scif_txroom(port);
-	else
-#endif
+	if (port->type == PORT_SCI)
 		count = sci_txroom(port);
+	else
+		count = scif_txroom(port);
 
 	do {
 		unsigned char c;
@@ -470,12 +510,10 @@ static void sci_transmit_chars(struct uart_port *port)
 	} else {
 		ctrl = sci_in(port, SCSCR);
 
-#if !defined(SCI_ONLY)
-		if (port->type == PORT_SCIF) {
+		if (port->type != PORT_SCI) {
 			sci_in(port, SCxSR); /* Dummy read */
 			sci_out(port, SCxSR, SCxSR_TDxE_CLEAR(port));
 		}
-#endif
 
 		ctrl |= SCI_CTRL_FLAGS_TIE;
 		sci_out(port, SCSCR, ctrl);
@@ -488,7 +526,7 @@ static void sci_transmit_chars(struct uart_port *port)
 static inline void sci_receive_chars(struct uart_port *port)
 {
 	struct sci_port *sci_port = (struct sci_port *)port;
-	struct tty_struct *tty = port->info->tty;
+	struct tty_struct *tty = port->info->port.tty;
 	int i, count, copied = 0;
 	unsigned short status;
 	unsigned char flag;
@@ -498,12 +536,10 @@ static inline void sci_receive_chars(struct uart_port *port)
 		return;
 
 	while (1) {
-#if !defined(SCI_ONLY)
-		if (port->type == PORT_SCIF)
-			count = scif_rxroom(port);
-		else
-#endif
+		if (port->type == PORT_SCI)
 			count = sci_rxroom(port);
+		else
+			count = scif_rxroom(port);
 
 		/* Don't copy more bytes than there is room for in the buffer */
 		count = tty_buffer_request_room(tty, count);
@@ -609,7 +645,7 @@ static inline int sci_handle_errors(struct uart_port *port)
 {
 	int copied = 0;
 	unsigned short status = sci_in(port, SCxSR);
-	struct tty_struct *tty = port->info->tty;
+	struct tty_struct *tty = port->info->port.tty;
 
 	if (status & SCxSR_ORER(port)) {
 		/* overrun error */
@@ -659,7 +695,7 @@ static inline int sci_handle_breaks(struct uart_port *port)
 {
 	int copied = 0;
 	unsigned short status = sci_in(port, SCxSR);
-	struct tty_struct *tty = port->info->tty;
+	struct tty_struct *tty = port->info->port.tty;
 	struct sci_port *s = &sci_ports[port->line];
 
 	if (uart_handle_break(port))
@@ -678,7 +714,7 @@ static inline int sci_handle_breaks(struct uart_port *port)
 
 #if defined(SCIF_ORER)
 	/* XXX: Handle SCIF overrun error */
-	if (port->type == PORT_SCIF && (sci_in(port, SCLSR) & SCIF_ORER) != 0) {
+	if (port->type != PORT_SCI && (sci_in(port, SCLSR) & SCIF_ORER) != 0) {
 		sci_out(port, SCLSR, 0);
 		if (tty_insert_flip_char(tty, 0, TTY_OVERRUN)) {
 			copied++;
@@ -729,7 +765,7 @@ static irqreturn_t sci_er_interrupt(int irq, void *ptr)
 	} else {
 #if defined(SCIF_ORER)
 		if((sci_in(port, SCLSR) & SCIF_ORER) != 0) {
-			struct tty_struct *tty = port->info->tty;
+			struct tty_struct *tty = port->info->port.tty;
 
 			sci_out(port, SCLSR, 0);
 			tty_insert_flip_char(tty, 0, TTY_OVERRUN);
@@ -761,29 +797,30 @@ static irqreturn_t sci_br_interrupt(int irq, void *ptr)
 
 static irqreturn_t sci_mpxed_interrupt(int irq, void *ptr)
 {
-        unsigned short ssr_status, scr_status;
-        struct uart_port *port = ptr;
+	unsigned short ssr_status, scr_status;
+	struct uart_port *port = ptr;
+	irqreturn_t ret = IRQ_NONE;
 
         ssr_status = sci_in(port,SCxSR);
         scr_status = sci_in(port,SCSCR);
 
 	/* Tx Interrupt */
-        if ((ssr_status & 0x0020) && (scr_status & 0x0080))
-                sci_tx_interrupt(irq, ptr);
+	if ((ssr_status & 0x0020) && (scr_status & SCI_CTRL_FLAGS_TIE))
+		ret = sci_tx_interrupt(irq, ptr);
 	/* Rx Interrupt */
-        if ((ssr_status & 0x0002) && (scr_status & 0x0040))
-                sci_rx_interrupt(irq, ptr);
+	if ((ssr_status & 0x0002) && (scr_status & SCI_CTRL_FLAGS_RIE))
+		ret = sci_rx_interrupt(irq, ptr);
 	/* Error Interrupt */
-        if ((ssr_status & 0x0080) && (scr_status & 0x0400))
-                sci_er_interrupt(irq, ptr);
+	if ((ssr_status & 0x0080) && (scr_status & SCI_CTRL_FLAGS_REIE))
+		ret = sci_er_interrupt(irq, ptr);
 	/* Break Interrupt */
-        if ((ssr_status & 0x0010) && (scr_status & 0x0200))
-                sci_br_interrupt(irq, ptr);
+	if ((ssr_status & 0x0010) && (scr_status & SCI_CTRL_FLAGS_REIE))
+		ret = sci_br_interrupt(irq, ptr);
 
-	return IRQ_HANDLED;
+	return ret;
 }
 
-#ifdef CONFIG_CPU_FREQ
+#if defined(CONFIG_CPU_FREQ) && defined(CONFIG_HAVE_CLK)
 /*
  * Here we define a transistion notifier so that we can update all of our
  * ports' baud rate when the peripheral clock changes.
@@ -812,20 +849,20 @@ static int sci_notifier(struct notifier_block *self,
 			 * Clean this up later..
 			 */
 			clk = clk_get(NULL, "module_clk");
-			port->uartclk = clk_get_rate(clk) * 16;
+			port->uartclk = clk_get_rate(clk);
 			clk_put(clk);
 		}
 
 		printk(KERN_INFO "%s: got a postchange notification "
 		       "for cpu %d (old %d, new %d)\n",
-		       __FUNCTION__, freqs->cpu, freqs->old, freqs->new);
+		       __func__, freqs->cpu, freqs->old, freqs->new);
 	}
 
 	return NOTIFY_OK;
 }
 
 static struct notifier_block sci_nb = { &sci_notifier, NULL, 0 };
-#endif /* CONFIG_CPU_FREQ */
+#endif /* CONFIG_CPU_FREQ && CONFIG_HAVE_CLK */
 
 static int sci_request_irq(struct sci_port *port)
 {
@@ -960,7 +997,7 @@ static int sci_startup(struct uart_port *port)
 	if (s->enable)
 		s->enable(port);
 
-#if defined(CONFIG_SUPERH) && !defined(CONFIG_SUPERH64)
+#ifdef CONFIG_HAVE_CLK
 	s->clk = clk_get(NULL, "module_clk");
 #endif
 
@@ -982,7 +1019,7 @@ static void sci_shutdown(struct uart_port *port)
 	if (s->disable)
 		s->disable(port);
 
-#if defined(CONFIG_SUPERH) && !defined(CONFIG_SUPERH64)
+#ifdef CONFIG_HAVE_CLK
 	clk_put(s->clk);
 	s->clk = NULL;
 #endif
@@ -993,24 +1030,11 @@ static void sci_set_termios(struct uart_port *port, struct ktermios *termios,
 {
 	struct sci_port *s = &sci_ports[port->line];
 	unsigned int status, baud, smr_val;
-	int t;
+	int t = -1;
 
 	baud = uart_get_baud_rate(port, termios, old, 0, port->uartclk/16);
-
-	switch (baud) {
-		case 0:
-			t = -1;
-			break;
-		default:
-		{
-#if defined(CONFIG_SUPERH) && !defined(CONFIG_SUPERH64)
-			t = SCBRR_VALUE(baud, clk_get_rate(s->clk));
-#else
-			t = SCBRR_VALUE(baud);
-#endif
-			break;
-		}
-	}
+	if (likely(baud))
+		t = SCBRR_VALUE(baud, port->uartclk);
 
 	do {
 		status = sci_in(port, SCxSR);
@@ -1018,10 +1042,8 @@ static void sci_set_termios(struct uart_port *port, struct ktermios *termios,
 
 	sci_out(port, SCSCR, 0x00);	/* TE=0, RE=0, CKE1=0 */
 
-#if !defined(SCI_ONLY)
-	if (port->type == PORT_SCIF)
+	if (port->type != PORT_SCI)
 		sci_out(port, SCFCR, SCFCR_RFRST | SCFCR_TFRST);
-#endif
 
 	smr_val = sci_in(port, SCSMR) & 3;
 	if ((termios->c_cflag & CSIZE) == CS7)
@@ -1063,9 +1085,10 @@ static const char *sci_type(struct uart_port *port)
 		case PORT_SCI:	return "sci";
 		case PORT_SCIF:	return "scif";
 		case PORT_IRDA: return "irda";
+		case PORT_SCIFA:	return "scifa";
 	}
 
-	return 0;
+	return NULL;
 }
 
 static void sci_release_port(struct uart_port *port)
@@ -1090,6 +1113,7 @@ static void sci_config_port(struct uart_port *port, int flags)
 		s->init_pins = sci_init_pins_sci;
 		break;
 	case PORT_SCIF:
+	case PORT_SCIFA:
 		s->init_pins = sci_init_pins_scif;
 		break;
 	case PORT_IRDA:
@@ -1097,19 +1121,23 @@ static void sci_config_port(struct uart_port *port, int flags)
 		break;
 	}
 
-#if defined(CONFIG_CPU_SUBTYPE_SH5_101) || defined(CONFIG_CPU_SUBTYPE_SH5_103)
-	if (port->mapbase == 0)
+	if (port->flags & UPF_IOREMAP && !port->membase) {
+#if defined(CONFIG_SUPERH64)
 		port->mapbase = onchip_remap(SCIF_ADDR_SH5, 1024, "SCIF");
-
-	port->membase = (void __iomem *)port->mapbase;
+		port->membase = (void __iomem *)port->mapbase;
+#else
+		port->membase = ioremap_nocache(port->mapbase, 0x40);
 #endif
+
+		printk(KERN_ERR "sci: can't remap port#%d\n", port->line);
+	}
 }
 
 static int sci_verify_port(struct uart_port *port, struct serial_struct *ser)
 {
 	struct sci_port *s = &sci_ports[port->line];
 
-	if (ser->irq != s->irqs[SCIx_TXI_IRQ] || ser->irq > NR_IRQS)
+	if (ser->irq != s->irqs[SCIx_TXI_IRQ] || ser->irq > nr_irqs)
 		return -EINVAL;
 	if (ser->baud_base < 2400)
 		/* No paper tape reader for Mitch.. */
@@ -1159,17 +1187,17 @@ static void __init sci_init_ports(void)
 		sci_ports[i].disable	= h8300_sci_disable;
 #endif
 		sci_ports[i].port.uartclk = CONFIG_CPU_CLOCK;
-#elif defined(CONFIG_SUPERH64)
-		sci_ports[i].port.uartclk = current_cpu_data.module_clock * 16;
-#else
+#elif defined(CONFIG_HAVE_CLK)
 		/*
 		 * XXX: We should use a proper SCI/SCIF clock
 		 */
 		{
 			struct clk *clk = clk_get(NULL, "module_clk");
-			sci_ports[i].port.uartclk = clk_get_rate(clk) * 16;
+			sci_ports[i].port.uartclk = clk_get_rate(clk);
 			clk_put(clk);
 		}
+#else
+#error "Need a valid uartclk"
 #endif
 
 		sci_ports[i].break_timer.data = (unsigned long)&sci_ports[i];
@@ -1237,7 +1265,7 @@ static int __init serial_console_setup(struct console *co, char *options)
 
 	port->type = serial_console_port->type;
 
-#if defined(CONFIG_SUPERH) && !defined(CONFIG_SUPERH64)
+#ifdef CONFIG_HAVE_CLK
 	if (!serial_console_port->clk)
 		serial_console_port->clk = clk_get(NULL, "module_clk");
 #endif
@@ -1279,7 +1307,7 @@ static int __init sci_console_init(void)
 console_initcall(sci_console_init);
 #endif /* CONFIG_SERIAL_SH_SCI_CONSOLE */
 
-#ifdef CONFIG_SH_KGDB
+#ifdef CONFIG_SH_KGDB_CONSOLE
 /*
  * FIXME: Most of this can go away.. at the moment, we rely on
  * arch/sh/kernel/setup.c to do the command line parsing for kgdb, though
@@ -1337,9 +1365,7 @@ int __init kgdb_console_setup(struct console *co, char *options)
 
 	return uart_set_options(port, co, baud, parity, bits, flow);
 }
-#endif /* CONFIG_SH_KGDB */
 
-#ifdef CONFIG_SH_KGDB_CONSOLE
 static struct console kgdb_console = {
 	.name		= "ttySC",
 	.device		= uart_console_device,
@@ -1390,7 +1416,7 @@ static struct uart_driver sci_uart_driver = {
 static int __devinit sci_probe(struct platform_device *dev)
 {
 	struct plat_sci_port *p = dev->dev.platform_data;
-	int i;
+	int i, ret = -EINVAL;
 
 	for (i = 0; p && p->flags != 0; p++, i++) {
 		struct sci_port *sciport = &sci_ports[i];
@@ -1407,12 +1433,22 @@ static int __devinit sci_probe(struct platform_device *dev)
 
 		sciport->port.mapbase	= p->mapbase;
 
-		/*
-		 * For the simple (and majority of) cases where we don't need
-		 * to do any remapping, just cast the cookie directly.
-		 */
-		if (p->mapbase && !p->membase && !(p->flags & UPF_IOREMAP))
-			p->membase = (void __iomem *)p->mapbase;
+		if (p->mapbase && !p->membase) {
+			if (p->flags & UPF_IOREMAP) {
+				p->membase = ioremap_nocache(p->mapbase, 0x40);
+				if (IS_ERR(p->membase)) {
+					ret = PTR_ERR(p->membase);
+					goto err_unreg;
+				}
+			} else {
+				/*
+				 * For the simple (and majority of) cases
+				 * where we don't need to do any remapping,
+				 * just cast the cookie directly.
+				 */
+				p->membase = (void __iomem *)p->mapbase;
+			}
+		}
 
 		sciport->port.membase	= p->membase;
 
@@ -1433,9 +1469,9 @@ static int __devinit sci_probe(struct platform_device *dev)
 	kgdb_putchar	= kgdb_sci_putchar;
 #endif
 
-#ifdef CONFIG_CPU_FREQ
+#if defined(CONFIG_CPU_FREQ) && defined(CONFIG_HAVE_CLK)
 	cpufreq_register_notifier(&sci_nb, CPUFREQ_TRANSITION_NOTIFIER);
-	dev_info(&dev->dev, "sci: CPU frequency notifier registered\n");
+	dev_info(&dev->dev, "CPU frequency notifier registered\n");
 #endif
 
 #ifdef CONFIG_SH_STANDARD_BIOS
@@ -1443,6 +1479,12 @@ static int __devinit sci_probe(struct platform_device *dev)
 #endif
 
 	return 0;
+
+err_unreg:
+	for (i = i - 1; i >= 0; i--)
+		uart_remove_one_port(&sci_uart_driver, &sci_ports[i].port);
+
+	return ret;
 }
 
 static int __devexit sci_remove(struct platform_device *dev)
@@ -1522,3 +1564,4 @@ module_init(sci_init);
 module_exit(sci_exit);
 
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("platform:sh-sci");

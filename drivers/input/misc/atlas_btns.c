@@ -29,10 +29,10 @@
 #include <asm/uaccess.h>
 #include <acpi/acpi_drivers.h>
 
-#define ACPI_ATLAS_NAME			"Atlas ACPI"
-#define ACPI_ATLAS_CLASS		"Atlas"
-#define ACPI_ATLAS_BUTTON_HID		"ASIM0000"
+#define ACPI_ATLAS_NAME		"Atlas ACPI"
+#define ACPI_ATLAS_CLASS	"Atlas"
 
+static unsigned short atlas_keymap[16];
 static struct input_dev *input_dev;
 
 /* button handling code */
@@ -51,12 +51,15 @@ static acpi_status acpi_atlas_button_handler(u32 function,
 		      void *handler_context, void *region_context)
 {
 	acpi_status status;
-	int keycode;
 
 	if (function == ACPI_WRITE) {
-		keycode = KEY_F1 + (address & 0x0F);
-		input_report_key(input_dev, keycode, !(address & 0x10));
+		int code = address & 0x0f;
+		int key_down = !(address & 0x10);
+
+		input_event(input_dev, EV_MSC, MSC_SCAN, code);
+		input_report_key(input_dev, atlas_keymap[code], key_down);
 		input_sync(input_dev);
+
 		status = 0;
 	} else {
 		printk(KERN_WARNING "atlas: shrugged on unexpected function"
@@ -71,6 +74,7 @@ static acpi_status acpi_atlas_button_handler(u32 function,
 static int atlas_acpi_button_add(struct acpi_device *device)
 {
 	acpi_status status;
+	int i;
 	int err;
 
 	input_dev = input_allocate_device();
@@ -82,17 +86,19 @@ static int atlas_acpi_button_add(struct acpi_device *device)
 	input_dev->name = "Atlas ACPI button driver";
 	input_dev->phys = "ASIM0000/atlas/input0";
 	input_dev->id.bustype = BUS_HOST;
-	input_dev->evbit[LONG(EV_KEY)] = BIT(EV_KEY);
+	input_dev->keycode = atlas_keymap;
+	input_dev->keycodesize = sizeof(unsigned short);
+	input_dev->keycodemax = ARRAY_SIZE(atlas_keymap);
 
-	set_bit(KEY_F1, input_dev->keybit);
-	set_bit(KEY_F2, input_dev->keybit);
-	set_bit(KEY_F3, input_dev->keybit);
-	set_bit(KEY_F4, input_dev->keybit);
-	set_bit(KEY_F5, input_dev->keybit);
-	set_bit(KEY_F6, input_dev->keybit);
-	set_bit(KEY_F7, input_dev->keybit);
-	set_bit(KEY_F8, input_dev->keybit);
-	set_bit(KEY_F9, input_dev->keybit);
+	input_set_capability(input_dev, EV_MSC, MSC_SCAN);
+	__set_bit(EV_KEY, input_dev->evbit);
+	for (i = 0; i < ARRAY_SIZE(atlas_keymap); i++) {
+		if (i < 9) {
+			atlas_keymap[i] = KEY_F1 + i;
+			__set_bit(KEY_F1 + i, input_dev->keybit);
+		} else
+			atlas_keymap[i] = KEY_RESERVED;
+	}
 
 	err = input_register_device(input_dev);
 	if (err) {
@@ -130,10 +136,16 @@ static int atlas_acpi_button_remove(struct acpi_device *device, int type)
 	return status;
 }
 
+static const struct acpi_device_id atlas_device_ids[] = {
+	{"ASIM0000", 0},
+	{"", 0},
+};
+MODULE_DEVICE_TABLE(acpi, atlas_device_ids);
+
 static struct acpi_driver atlas_acpi_driver = {
 	.name	= ACPI_ATLAS_NAME,
 	.class	= ACPI_ATLAS_CLASS,
-	.ids	= ACPI_ATLAS_BUTTON_HID,
+	.ids	= atlas_device_ids,
 	.ops	= {
 		.add	= atlas_acpi_button_add,
 		.remove	= atlas_acpi_button_remove,

@@ -15,6 +15,7 @@
 
 #include <linux/types.h>
 
+#define NFS4_BITMAP_SIZE	2
 #define NFS4_VERIFIER_SIZE	8
 #define NFS4_STATEID_SIZE	16
 #define NFS4_FHSIZE		128
@@ -64,9 +65,6 @@
 #define NFS4_ACE_SUCCESSFUL_ACCESS_ACE_FLAG   0x00000010
 #define NFS4_ACE_FAILED_ACCESS_ACE_FLAG       0x00000020
 #define NFS4_ACE_IDENTIFIER_GROUP             0x00000040
-#define NFS4_ACE_OWNER                        0x00000080
-#define NFS4_ACE_GROUP                        0x00000100
-#define NFS4_ACE_EVERYONE                     0x00000200
 
 #define NFS4_ACE_READ_DATA                    0x00000001
 #define NFS4_ACE_LIST_DIRECTORY               0x00000001

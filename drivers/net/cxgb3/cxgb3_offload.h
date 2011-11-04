@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006-2007 Chelsio, Inc. All rights reserved.
+ * Copyright (c) 2006-2008 Chelsio, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -50,6 +50,8 @@ int cxgb3_offload_activate(struct adapter *adapter);
 void cxgb3_offload_deactivate(struct adapter *adapter);
 
 void cxgb3_set_dummy_ops(struct t3cdev *dev);
+
+struct t3cdev *dev2t3cdev(struct net_device *dev);
 
 /*
  * Client registration.  Users of T3 driver must register themselves.

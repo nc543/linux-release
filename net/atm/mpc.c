@@ -62,11 +62,13 @@ static void MPOA_cache_impos_rcvd(struct k_message *msg, struct mpoa_client *mpc
 static void set_mpc_ctrl_addr_rcvd(struct k_message *mesg, struct mpoa_client *mpc);
 static void set_mps_mac_addr_rcvd(struct k_message *mesg, struct mpoa_client *mpc);
 
-static uint8_t *copy_macs(struct mpoa_client *mpc, uint8_t *router_mac,
-			  uint8_t *tlvs, uint8_t mps_macs, uint8_t device_type);
+static const uint8_t *copy_macs(struct mpoa_client *mpc,
+				const uint8_t *router_mac,
+				const uint8_t *tlvs, uint8_t mps_macs,
+				uint8_t device_type);
 static void purge_egress_shortcut(struct atm_vcc *vcc, eg_cache_entry *entry);
 
-static void send_set_mps_ctrl_addr(char *addr, struct mpoa_client *mpc);
+static void send_set_mps_ctrl_addr(const char *addr, struct mpoa_client *mpc);
 static void mpoad_close(struct atm_vcc *vcc);
 static int msg_from_mpoad(struct atm_vcc *vcc, struct sk_buff *skb);
 
@@ -244,7 +246,7 @@ static struct net_device *find_lec_by_itfnum(int itf)
 	char name[IFNAMSIZ];
 
 	sprintf(name, "lec%d", itf);
-	dev = dev_get_by_name(name);
+	dev = dev_get_by_name(&init_net, name);
 
 	return dev;
 }
@@ -351,12 +353,12 @@ static const char *mpoa_device_type_string(char type)
  * lec sees a TLV it uses the pointer to call this function.
  *
  */
-static void lane2_assoc_ind(struct net_device *dev, uint8_t *mac_addr,
-			    uint8_t *tlvs, uint32_t sizeoftlvs)
+static void lane2_assoc_ind(struct net_device *dev, const u8 *mac_addr,
+			    const u8 *tlvs, u32 sizeoftlvs)
 {
 	uint32_t type;
 	uint8_t length, mpoa_device_type, number_of_mps_macs;
-	uint8_t *end_of_tlvs;
+	const uint8_t *end_of_tlvs;
 	struct mpoa_client *mpc;
 
 	mpoa_device_type = number_of_mps_macs = 0; /* silence gcc */
@@ -430,8 +432,10 @@ static void lane2_assoc_ind(struct net_device *dev, uint8_t *mac_addr,
  * plus the possible MAC address(es) to mpc->mps_macs.
  * For a freshly allocated MPOA client mpc->mps_macs == 0.
  */
-static uint8_t *copy_macs(struct mpoa_client *mpc, uint8_t *router_mac,
-			  uint8_t *tlvs, uint8_t mps_macs, uint8_t device_type)
+static const uint8_t *copy_macs(struct mpoa_client *mpc,
+				const uint8_t *router_mac,
+				const uint8_t *tlvs, uint8_t mps_macs,
+				uint8_t device_type)
 {
 	int num_macs;
 	num_macs = (mps_macs > 1) ? mps_macs : 1;
@@ -541,6 +545,13 @@ static int mpc_send_packet(struct sk_buff *skb, struct net_device *dev)
 	eth = (struct ethhdr *)skb->data;
 	if (eth->h_proto != htons(ETH_P_IP))
 		goto non_ip; /* Multi-Protocol Over ATM :-) */
+
+	/* Weed out funny packets (e.g., AF_PACKET or raw). */
+	if (skb->len < ETH_HLEN + sizeof(struct iphdr))
+		goto non_ip;
+	skb_set_network_header(skb, ETH_HLEN);
+	if (skb->len < ETH_HLEN + ip_hdr(skb)->ihl * 4 || ip_hdr(skb)->ihl < 5)
+		goto non_ip;
 
 	while (i < mpc->number_of_mps_macs) {
 		if (!compare_ether_addr(eth->h_dest, (mpc->mps_macs + i*ETH_ALEN)))
@@ -804,7 +815,7 @@ static int atm_mpoa_mpoad_attach (struct atm_vcc *vcc, int arg)
 	return arg;
 }
 
-static void send_set_mps_ctrl_addr(char *addr, struct mpoa_client *mpc)
+static void send_set_mps_ctrl_addr(const char *addr, struct mpoa_client *mpc)
 {
 	struct k_message mesg;
 
@@ -956,6 +967,10 @@ static int mpoa_event_listener(struct notifier_block *mpoa_notifier, unsigned lo
 	struct lec_priv *priv;
 
 	dev = (struct net_device *)dev_ptr;
+
+	if (!net_eq(dev_net(dev), &init_net))
+		return NOTIFY_DONE;
+
 	if (dev->name == NULL || strncmp(dev->name, "lec", 3))
 		return NOTIFY_DONE; /* we are only interested in lec:s */
 

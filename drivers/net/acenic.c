@@ -52,7 +52,6 @@
 
 #include <linux/module.h>
 #include <linux/moduleparam.h>
-#include <linux/version.h>
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
@@ -158,10 +157,6 @@ static struct pci_device_id acenic_pci_tbl[] = {
 	{ }
 };
 MODULE_DEVICE_TABLE(pci, acenic_pci_tbl);
-
-#ifndef SET_NETDEV_DEV
-#define SET_NETDEV_DEV(net, pdev)	do{} while(0)
-#endif
 
 #define ace_sync_irq(irq)	synchronize_irq(irq)
 
@@ -410,7 +405,7 @@ MODULE_DEVICE_TABLE(pci, acenic_pci_tbl);
 #define DEF_STAT		(2 * TICKS_PER_SEC)
 
 
-static int link[ACE_MAX_MOD_PARMS];
+static int link_state[ACE_MAX_MOD_PARMS];
 static int trace[ACE_MAX_MOD_PARMS];
 static int tx_coal_tick[ACE_MAX_MOD_PARMS];
 static int rx_coal_tick[ACE_MAX_MOD_PARMS];
@@ -423,7 +418,7 @@ MODULE_AUTHOR("Jes Sorensen <jes@trained-monkey.org>");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("AceNIC/3C985/GA620 Gigabit Ethernet driver");
 
-module_param_array(link, int, NULL, 0);
+module_param_array_named(link, link_state, int, NULL, 0);
 module_param_array(trace, int, NULL, 0);
 module_param_array(tx_coal_tick, int, NULL, 0);
 module_param_array(max_tx_desc, int, NULL, 0);
@@ -469,7 +464,6 @@ static int __devinit acenic_probe_one(struct pci_dev *pdev,
 		return -ENOMEM;
 	}
 
-	SET_MODULE_OWNER(dev);
 	SET_NETDEV_DEV(dev, &pdev->dev);
 
 	ap = dev->priv;
@@ -898,6 +892,7 @@ static int __devinit ace_init(struct net_device *dev)
 	int board_idx, ecode = 0;
 	short i;
 	unsigned char cache_size;
+	DECLARE_MAC_BUF(mac);
 
 	ap = netdev_priv(dev);
 	regs = ap->regs;
@@ -991,35 +986,31 @@ static int __devinit ace_init(struct net_device *dev)
 
 	mac1 = 0;
 	for(i = 0; i < 4; i++) {
-		int tmp;
+		int t;
 
 		mac1 = mac1 << 8;
-		tmp = read_eeprom_byte(dev, 0x8c+i);
-		if (tmp < 0) {
+		t = read_eeprom_byte(dev, 0x8c+i);
+		if (t < 0) {
 			ecode = -EIO;
 			goto init_error;
 		} else
-			mac1 |= (tmp & 0xff);
+			mac1 |= (t & 0xff);
 	}
 	mac2 = 0;
 	for(i = 4; i < 8; i++) {
-		int tmp;
+		int t;
 
 		mac2 = mac2 << 8;
-		tmp = read_eeprom_byte(dev, 0x8c+i);
-		if (tmp < 0) {
+		t = read_eeprom_byte(dev, 0x8c+i);
+		if (t < 0) {
 			ecode = -EIO;
 			goto init_error;
 		} else
-			mac2 |= (tmp & 0xff);
+			mac2 |= (t & 0xff);
 	}
 
 	writel(mac1, &regs->MacAddrHi);
 	writel(mac2, &regs->MacAddrLo);
-
-	printk("MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
-	       (mac1 >> 8) & 0xff, mac1 & 0xff, (mac2 >> 24) &0xff,
-	       (mac2 >> 16) & 0xff, (mac2 >> 8) & 0xff, mac2 & 0xff);
 
 	dev->dev_addr[0] = (mac1 >> 8) & 0xff;
 	dev->dev_addr[1] = mac1 & 0xff;
@@ -1027,6 +1018,8 @@ static int __devinit ace_init(struct net_device *dev)
 	dev->dev_addr[3] = (mac2 >> 16) & 0xff;
 	dev->dev_addr[4] = (mac2 >> 8) & 0xff;
 	dev->dev_addr[5] = mac2 & 0xff;
+
+	printk("MAC: %s\n", print_mac(mac, dev->dev_addr));
 
 	/*
 	 * Looks like this is necessary to deal with on all architectures,
@@ -1311,10 +1304,10 @@ static int __devinit ace_init(struct net_device *dev)
 	writel(TX_RING_BASE, &regs->WinBase);
 
 	if (ACE_IS_TIGON_I(ap)) {
-		ap->tx_ring = (struct tx_desc *) regs->Window;
+		ap->tx_ring = (__force struct tx_desc *) regs->Window;
 		for (i = 0; i < (TIGON_I_TX_RING_ENTRIES
 				 * sizeof(struct tx_desc)) / sizeof(u32); i++)
-			writel(0, (void __iomem *)ap->tx_ring  + i * 4);
+			writel(0, (__force void __iomem *)ap->tx_ring  + i * 4);
 
 		set_aceaddr(&info->tx_ctrl.rngptr, TX_RING_BASE);
 	} else {
@@ -1400,8 +1393,8 @@ static int __devinit ace_init(struct net_device *dev)
 	/*
 	 * Override link default parameters
 	 */
-	if ((board_idx >= 0) && link[board_idx]) {
-		int option = link[board_idx];
+	if ((board_idx >= 0) && link_state[board_idx]) {
+		int option = link_state[board_idx];
 
 		tmp = LNK_ENABLE;
 
@@ -1462,11 +1455,6 @@ static int __devinit ace_init(struct net_device *dev)
 	wmb();
 	ace_set_txprd(regs, ap, 0);
 	writel(0, &regs->RxRetCsm);
-
-	/*
-	 * Zero the stats before starting the interface
-	 */
-	memset(&ap->stats, 0, sizeof(ap->stats));
 
        /*
 	* Enable DMA engine now.
@@ -2047,8 +2035,8 @@ static void ace_rx_int(struct net_device *dev, u32 rxretprd, u32 rxretcsm)
 			netif_rx(skb);
 
 		dev->last_rx = jiffies;
-		ap->stats.rx_packets++;
-		ap->stats.rx_bytes += retdesc->size;
+		dev->stats.rx_packets++;
+		dev->stats.rx_bytes += retdesc->size;
 
 		idx = (idx + 1) % RX_RETURN_RING_ENTRIES;
 	}
@@ -2096,8 +2084,8 @@ static inline void ace_tx_int(struct net_device *dev,
 		}
 
 		if (skb) {
-			ap->stats.tx_packets++;
-			ap->stats.tx_bytes += skb->len;
+			dev->stats.tx_packets++;
+			dev->stats.tx_bytes += skb->len;
 			dev_kfree_skb_irq(skb);
 			info->skb = NULL;
 		}
@@ -2389,8 +2377,9 @@ static int ace_close(struct net_device *dev)
 
 		if (mapping) {
 			if (ACE_IS_TIGON_I(ap)) {
-				struct tx_desc __iomem *tx
-					= (struct tx_desc __iomem *) &ap->tx_ring[i];
+				/* NB: TIGON_1 is special, tx_ring is in io space */
+				struct tx_desc __iomem *tx;
+				tx = (__force struct tx_desc __iomem *) &ap->tx_ring[i];
 				writel(0, &tx->addr.addrhi);
 				writel(0, &tx->addr.addrlo);
 				writel(0, &tx->flagsize);
@@ -2450,7 +2439,7 @@ ace_load_tx_bd(struct ace_private *ap, struct tx_desc *desc, u64 addr,
 #endif
 
 	if (ACE_IS_TIGON_I(ap)) {
-		struct tx_desc __iomem *io = (struct tx_desc __iomem *) desc;
+		struct tx_desc __iomem *io = (__force struct tx_desc __iomem *) desc;
 		writel(addr >> 32, &io->addr.addrhi);
 		writel(addr & 0xffffffff, &io->addr.addrlo);
 		writel(flagsize, &io->flagsize);
@@ -2868,11 +2857,11 @@ static struct net_device_stats *ace_get_stats(struct net_device *dev)
 	struct ace_mac_stats __iomem *mac_stats =
 		(struct ace_mac_stats __iomem *)ap->regs->Stats;
 
-	ap->stats.rx_missed_errors = readl(&mac_stats->drop_space);
-	ap->stats.multicast = readl(&mac_stats->kept_mc);
-	ap->stats.collisions = readl(&mac_stats->coll);
+	dev->stats.rx_missed_errors = readl(&mac_stats->drop_space);
+	dev->stats.multicast = readl(&mac_stats->kept_mc);
+	dev->stats.collisions = readl(&mac_stats->coll);
 
-	return &ap->stats;
+	return &dev->stats;
 }
 
 
@@ -2942,7 +2931,7 @@ static void __devinit ace_clear(struct ace_regs __iomem *regs, u32 dest, int siz
  * This operation requires the NIC to be halted and is performed with
  * interrupts disabled and with the spinlock hold.
  */
-int __devinit ace_load_firmware(struct net_device *dev)
+static int __devinit ace_load_firmware(struct net_device *dev)
 {
 	struct ace_private *ap = netdev_priv(dev);
 	struct ace_regs __iomem *regs = ap->regs;
@@ -3131,12 +3120,6 @@ static int __devinit read_eeprom_byte(struct net_device *dev,
 	u32 local;
 	int result = 0;
 	short i;
-
-	if (!dev) {
-		printk(KERN_ERR "No device!\n");
-		result = -ENODEV;
-		goto out;
-	}
 
 	/*
 	 * Don't take interrupts on this CPU will bit banging

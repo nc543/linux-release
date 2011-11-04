@@ -28,12 +28,9 @@
  */
 
 #include <linux/linkage.h>
-#include <asm/cplb.h>
 #include <asm/blackfin.h>
 
 .text
-
-#ifdef CONFIG_BLKFIN_CACHE_LOCK
 
 /* When you come here, it is assumed that
  * R0 - Which way to be locked
@@ -43,12 +40,12 @@ ENTRY(_cache_grab_lock)
 
 	[--SP]=( R7:0,P5:0 );
 
-	P1.H = (IMEM_CONTROL >> 16);
-	P1.L = (IMEM_CONTROL & 0xFFFF);
-	P5.H = (ICPLB_ADDR0 >> 16);
-	P5.L = (ICPLB_ADDR0 & 0xFFFF);
-	P4.H = (ICPLB_DATA0 >> 16);
-	P4.L = (ICPLB_DATA0 & 0xFFFF);
+	P1.H = HI(IMEM_CONTROL);
+	P1.L = LO(IMEM_CONTROL);
+	P5.H = HI(ICPLB_ADDR0);
+	P5.L = LO(ICPLB_ADDR0);
+	P4.H = HI(ICPLB_DATA0);
+	P4.L = LO(ICPLB_DATA0);
 	R7 = R0;
 
 	/* If the code of interest already resides in the cache
@@ -167,14 +164,14 @@ ENTRY(_cache_lock)
 
 	[--SP]=( R7:0,P5:0 );
 
-	P1.H = (IMEM_CONTROL >> 16);
-	P1.L = (IMEM_CONTROL & 0xFFFF);
+	P1.H = HI(IMEM_CONTROL);
+	P1.L = LO(IMEM_CONTROL);
 
 	/* Disable the Interrupts*/
 	CLI R3;
 
 	R7 = [P1];
-	R2 = 0xFFFFFF87 (X);
+	R2 = ~(0x78) (X);	/* mask out ILOC */
 	R7 = R7 & R2;
 	R0 = R0 << 3;
 	R7 = R0 | R7;
@@ -189,18 +186,38 @@ ENTRY(_cache_lock)
 	RTS;
 ENDPROC(_cache_lock)
 
-#endif	/* BLKFIN_CACHE_LOCK */
-
-/* Return the ILOC bits of IMEM_CONTROL
+/* Invalidate the Entire Instruction cache by
+ * disabling IMC bit
  */
+ENTRY(_invalidate_entire_icache)
+	[--SP] = ( R7:5);
 
-ENTRY(_read_iloc)
-	P1.H = (IMEM_CONTROL >> 16);
-	P1.L = (IMEM_CONTROL & 0xFFFF);
-	R1 = 0xF;
-	R0 = [P1];
-	R0 = R0 >> 3;
-	R0 = R0 & R1;
+	P0.L = LO(IMEM_CONTROL);
+	P0.H = HI(IMEM_CONTROL);
+	R7 = [P0];
 
+	/* Clear the IMC bit , All valid bits in the instruction
+	 * cache are set to the invalid state
+	 */
+	BITCLR(R7,IMC_P);
+	CLI R6;
+	SSYNC;		/* SSYNC required before invalidating cache. */
+	.align 8;
+	[P0] = R7;
+	SSYNC;
+	STI R6;
+
+	/* Configures the instruction cache agian */
+	R6 = (IMC | ENICPLB);
+	R7 = R7 | R6;
+
+	CLI R6;
+	SSYNC;		/* SSYNC required before writing to IMEM_CONTROL. */
+	.align 8;
+	[P0] = R7;
+	SSYNC;
+	STI R6;
+
+	( R7:5) = [SP++];
 	RTS;
-ENDPROC(_read_iloc)
+ENDPROC(_invalidate_entire_icache)

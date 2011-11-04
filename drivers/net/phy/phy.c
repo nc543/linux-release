@@ -7,7 +7,7 @@
  * Author: Andy Fleming
  *
  * Copyright (c) 2004 Freescale Semiconductor, Inc.
- * Copyright (c) 2006  Maciej W. Rozycki
+ * Copyright (c) 2006, 2007  Maciej W. Rozycki
  *
  * This program is free software; you can redistribute  it and/or modify it
  * under  the terms of  the GNU General  Public License as published by the
@@ -26,7 +26,6 @@
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
-#include <linux/spinlock.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/mii.h>
@@ -35,6 +34,7 @@
 #include <linux/timer.h>
 #include <linux/workqueue.h>
 
+#include <asm/atomic.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/uaccess.h>
@@ -56,51 +56,6 @@ void phy_print_status(struct phy_device *phydev)
 }
 EXPORT_SYMBOL(phy_print_status);
 
-
-/**
- * phy_read - Convenience function for reading a given PHY register
- * @phydev: the phy_device struct
- * @regnum: register number to read
- *
- * NOTE: MUST NOT be called from interrupt context,
- * because the bus read/write functions may wait for an interrupt
- * to conclude the operation.
- */
-int phy_read(struct phy_device *phydev, u16 regnum)
-{
-	int retval;
-	struct mii_bus *bus = phydev->bus;
-
-	spin_lock_bh(&bus->mdio_lock);
-	retval = bus->read(bus, phydev->addr, regnum);
-	spin_unlock_bh(&bus->mdio_lock);
-
-	return retval;
-}
-EXPORT_SYMBOL(phy_read);
-
-/**
- * phy_write - Convenience function for writing a given PHY register
- * @phydev: the phy_device struct
- * @regnum: register number to write
- * @val: value to write to @regnum
- *
- * NOTE: MUST NOT be called from interrupt context,
- * because the bus read/write functions may wait for an interrupt
- * to conclude the operation.
- */
-int phy_write(struct phy_device *phydev, u16 regnum, u16 val)
-{
-	int err;
-	struct mii_bus *bus = phydev->bus;
-
-	spin_lock_bh(&bus->mdio_lock);
-	err = bus->write(bus, phydev->addr, regnum, val);
-	spin_unlock_bh(&bus->mdio_lock);
-
-	return err;
-}
-EXPORT_SYMBOL(phy_write);
 
 /**
  * phy_clear_interrupt - Ack the phy device's interrupt
@@ -204,7 +159,7 @@ static const struct phy_setting settings[] = {
 	},
 };
 
-#define MAX_NUM_SETTINGS (sizeof(settings)/sizeof(struct phy_setting))
+#define MAX_NUM_SETTINGS ARRAY_SIZE(settings)
 
 /**
  * phy_find_setting - find a PHY settings array entry that matches speed & duplex
@@ -261,7 +216,7 @@ void phy_sanitize_settings(struct phy_device *phydev)
 
 	/* Sanitize settings based on PHY capabilities */
 	if ((features & SUPPORTED_Autoneg) == 0)
-		phydev->autoneg = 0;
+		phydev->autoneg = AUTONEG_DISABLE;
 
 	idx = phy_find_valid(phy_find_setting(phydev->speed, phydev->duplex),
 			features);
@@ -362,7 +317,8 @@ int phy_mii_ioctl(struct phy_device *phydev,
 	switch (cmd) {
 	case SIOCGMIIPHY:
 		mii_data->phy_id = phydev->addr;
-		break;
+		/* fall through */
+
 	case SIOCGMIIREG:
 		mii_data->val_out = phy_read(phydev, mii_data->reg_num);
 		break;
@@ -374,7 +330,7 @@ int phy_mii_ioctl(struct phy_device *phydev,
 		if (mii_data->phy_id == phydev->addr) {
 			switch(mii_data->reg_num) {
 			case MII_BMCR:
-				if (val & (BMCR_RESET|BMCR_ANENABLE))
+				if ((val & (BMCR_RESET|BMCR_ANENABLE)) == 0)
 					phydev->autoneg = AUTONEG_DISABLE;
 				else
 					phydev->autoneg = AUTONEG_ENABLE;
@@ -402,13 +358,19 @@ int phy_mii_ioctl(struct phy_device *phydev,
 		
 		if (mii_data->reg_num == MII_BMCR 
 				&& val & BMCR_RESET
-				&& phydev->drv->config_init)
+				&& phydev->drv->config_init) {
+			phy_scan_fixups(phydev);
 			phydev->drv->config_init(phydev);
+		}
 		break;
+
+	default:
+		return -EOPNOTSUPP;
 	}
 
 	return 0;
 }
+EXPORT_SYMBOL(phy_mii_ioctl);
 
 /**
  * phy_start_aneg - start auto-negotiation for this PHY device
@@ -423,7 +385,7 @@ int phy_start_aneg(struct phy_device *phydev)
 {
 	int err;
 
-	spin_lock(&phydev->lock);
+	mutex_lock(&phydev->lock);
 
 	if (AUTONEG_DISABLE == phydev->autoneg)
 		phy_sanitize_settings(phydev);
@@ -444,13 +406,14 @@ int phy_start_aneg(struct phy_device *phydev)
 	}
 
 out_unlock:
-	spin_unlock(&phydev->lock);
+	mutex_unlock(&phydev->lock);
 	return err;
 }
 EXPORT_SYMBOL(phy_start_aneg);
 
 
 static void phy_change(struct work_struct *work);
+static void phy_state_machine(struct work_struct *work);
 static void phy_timer(unsigned long data);
 
 /**
@@ -471,6 +434,7 @@ void phy_start_machine(struct phy_device *phydev,
 {
 	phydev->adjust_state = handler;
 
+	INIT_WORK(&phydev->state_queue, phy_state_machine);
 	init_timer(&phydev->phy_timer);
 	phydev->phy_timer.function = &phy_timer;
 	phydev->phy_timer.data = (unsigned long) phydev;
@@ -488,11 +452,12 @@ void phy_start_machine(struct phy_device *phydev,
 void phy_stop_machine(struct phy_device *phydev)
 {
 	del_timer_sync(&phydev->phy_timer);
+	cancel_work_sync(&phydev->state_queue);
 
-	spin_lock(&phydev->lock);
+	mutex_lock(&phydev->lock);
 	if (phydev->state > PHY_UP)
 		phydev->state = PHY_UP;
-	spin_unlock(&phydev->lock);
+	mutex_unlock(&phydev->lock);
 
 	phydev->adjust_state = NULL;
 }
@@ -534,11 +499,11 @@ static void phy_force_reduction(struct phy_device *phydev)
  * Must not be called from interrupt context, or while the
  * phydev->lock is held.
  */
-void phy_error(struct phy_device *phydev)
+static void phy_error(struct phy_device *phydev)
 {
-	spin_lock(&phydev->lock);
+	mutex_lock(&phydev->lock);
 	phydev->state = PHY_HALTED;
-	spin_unlock(&phydev->lock);
+	mutex_unlock(&phydev->lock);
 }
 
 /**
@@ -561,6 +526,7 @@ static irqreturn_t phy_interrupt(int irq, void *phy_dat)
 	 * queue will write the PHY to disable and clear the
 	 * interrupt, and then reenable the irq line. */
 	disable_irq_nosync(irq);
+	atomic_inc(&phydev->irq_disable);
 
 	schedule_work(&phydev->phy_queue);
 
@@ -631,6 +597,7 @@ int phy_start_interrupts(struct phy_device *phydev)
 
 	INIT_WORK(&phydev->phy_queue, phy_change);
 
+	atomic_set(&phydev->irq_disable, 0);
 	if (request_irq(phydev->irq, phy_interrupt,
 				IRQF_SHARED,
 				"phy_interrupt",
@@ -661,13 +628,22 @@ int phy_stop_interrupts(struct phy_device *phydev)
 	if (err)
 		phy_error(phydev);
 
+	free_irq(phydev->irq, phydev);
+
 	/*
-	 * Finish any pending work; we might have been scheduled to be called
-	 * from keventd ourselves, but cancel_work_sync() handles that.
+	 * Cannot call flush_scheduled_work() here as desired because
+	 * of rtnl_lock(), but we do not really care about what would
+	 * be done, except from enable_irq(), so cancel any work
+	 * possibly pending and take care of the matter below.
 	 */
 	cancel_work_sync(&phydev->phy_queue);
-
-	free_irq(phydev->irq, phydev);
+	/*
+	 * If work indeed has been cancelled, disable_irq() will have
+	 * been left unbalanced from phy_interrupt() and enable_irq()
+	 * has to be called so that other devices on the line work.
+	 */
+	while (atomic_dec_return(&phydev->irq_disable) >= 0)
+		enable_irq(phydev->irq);
 
 	return err;
 }
@@ -689,11 +665,12 @@ static void phy_change(struct work_struct *work)
 	if (err)
 		goto phy_err;
 
-	spin_lock(&phydev->lock);
+	mutex_lock(&phydev->lock);
 	if ((PHY_RUNNING == phydev->state) || (PHY_NOLINK == phydev->state))
 		phydev->state = PHY_CHANGELINK;
-	spin_unlock(&phydev->lock);
+	mutex_unlock(&phydev->lock);
 
+	atomic_dec(&phydev->irq_disable);
 	enable_irq(phydev->irq);
 
 	/* Reenable interrupts */
@@ -703,10 +680,17 @@ static void phy_change(struct work_struct *work)
 	if (err)
 		goto irq_enable_err;
 
+	/* Stop timer and run the state queue now.  The work function for
+	 * state_queue will start the timer up again.
+	 */
+	del_timer(&phydev->phy_timer);
+	schedule_work(&phydev->state_queue);
+
 	return;
 
 irq_enable_err:
 	disable_irq(phydev->irq);
+	atomic_inc(&phydev->irq_disable);
 phy_err:
 	phy_error(phydev);
 }
@@ -717,12 +701,10 @@ phy_err:
  */
 void phy_stop(struct phy_device *phydev)
 {
-	spin_lock(&phydev->lock);
+	mutex_lock(&phydev->lock);
 
 	if (PHY_HALTED == phydev->state)
 		goto out_unlock;
-
-	phydev->state = PHY_HALTED;
 
 	if (phydev->irq != PHY_POLL) {
 		/* Disable PHY Interrupts */
@@ -732,8 +714,10 @@ void phy_stop(struct phy_device *phydev)
 		phy_clear_interrupt(phydev);
 	}
 
+	phydev->state = PHY_HALTED;
+
 out_unlock:
-	spin_unlock(&phydev->lock);
+	mutex_unlock(&phydev->lock);
 
 	/*
 	 * Cannot call flush_scheduled_work() here as desired because
@@ -755,7 +739,7 @@ out_unlock:
  */
 void phy_start(struct phy_device *phydev)
 {
-	spin_lock(&phydev->lock);
+	mutex_lock(&phydev->lock);
 
 	switch (phydev->state) {
 		case PHY_STARTING:
@@ -769,19 +753,26 @@ void phy_start(struct phy_device *phydev)
 		default:
 			break;
 	}
-	spin_unlock(&phydev->lock);
+	mutex_unlock(&phydev->lock);
 }
 EXPORT_SYMBOL(phy_stop);
 EXPORT_SYMBOL(phy_start);
 
-/* PHY timer which handles the state machine */
-static void phy_timer(unsigned long data)
+/**
+ * phy_state_machine - Handle the state machine
+ * @work: work_struct that describes the work to be done
+ *
+ * Description: Scheduled by the state_queue workqueue each time
+ *   phy_timer is triggered.
+ */
+static void phy_state_machine(struct work_struct *work)
 {
-	struct phy_device *phydev = (struct phy_device *)data;
+	struct phy_device *phydev =
+			container_of(work, struct phy_device, state_queue);
 	int needs_aneg = 0;
 	int err = 0;
 
-	spin_lock(&phydev->lock);
+	mutex_lock(&phydev->lock);
 
 	if (phydev->adjust_state)
 		phydev->adjust_state(phydev->attached_dev);
@@ -947,7 +938,7 @@ static void phy_timer(unsigned long data)
 			break;
 	}
 
-	spin_unlock(&phydev->lock);
+	mutex_unlock(&phydev->lock);
 
 	if (needs_aneg)
 		err = phy_start_aneg(phydev);
@@ -958,3 +949,14 @@ static void phy_timer(unsigned long data)
 	mod_timer(&phydev->phy_timer, jiffies + PHY_STATE_TIME * HZ);
 }
 
+/* PHY timer which schedules the state machine work */
+static void phy_timer(unsigned long data)
+{
+	struct phy_device *phydev = (struct phy_device *)data;
+
+	/*
+	 * PHY I/O operations can potentially sleep so we ensure that
+	 * it's done from a process context
+	 */
+	schedule_work(&phydev->state_queue);
+}
