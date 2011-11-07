@@ -7,9 +7,9 @@
  * system is licensed under the GPL.
  * See the file COPYING in this distribution for more information.
  *
- * vxge-main.h: Driver for Neterion Inc's X3100 Series 10GbE PCIe I/O
+ * vxge-main.h: Driver for Exar Corp's X3100 Series 10GbE PCIe I/O
  *              Virtualized Server Adapter.
- * Copyright(c) 2002-2009 Neterion Inc.
+ * Copyright(c) 2002-2010 Exar Corp.
  ******************************************************************************/
 #ifndef VXGE_MAIN_H
 #define VXGE_MAIN_H
@@ -21,7 +21,7 @@
 
 #define VXGE_DRIVER_NAME		"vxge"
 #define VXGE_DRIVER_VENDOR		"Neterion, Inc"
-#define VXGE_DRIVER_VERSION_MAJOR 0
+#define VXGE_DRIVER_FW_VERSION_MAJOR	1
 
 #define DRV_VERSION	VXGE_VERSION_MAJOR"."VXGE_VERSION_MINOR"."\
 	VXGE_VERSION_FIX"."VXGE_VERSION_BUILD"-"\
@@ -31,6 +31,7 @@
 #define PCI_DEVICE_ID_TITAN_UNI		0x5833
 #define	VXGE_USE_DEFAULT		0xffffffff
 #define VXGE_HW_VPATH_MSIX_ACTIVE	4
+#define VXGE_ALARM_MSIX_ID		2
 #define VXGE_HW_RXSYNC_FREQ_CNT		4
 #define VXGE_LL_WATCH_DOG_TIMEOUT	(15 * HZ)
 #define VXGE_LL_RX_COPY_THRESHOLD	256
@@ -89,6 +90,11 @@
 
 #define VXGE_LL_MAX_FRAME_SIZE(dev) ((dev)->mtu + VXGE_HW_MAC_HEADER_MAX_SIZE)
 
+#define is_sriov(function_mode) \
+	((function_mode == VXGE_HW_FUNCTION_MODE_SRIOV) || \
+	(function_mode == VXGE_HW_FUNCTION_MODE_SRIOV_8) || \
+	(function_mode == VXGE_HW_FUNCTION_MODE_SRIOV_4))
+
 enum vxge_reset_event {
 	/* reset events */
 	VXGE_LL_VPATH_RESET	= 0,
@@ -112,7 +118,6 @@ enum vxge_mac_addr_state {
 struct vxge_drv_config {
 	int config_dev_cnt;
 	int total_dev_cnt;
-	unsigned long inta_dev_open;
 	int g_no_cpus;
 	unsigned int vpath_per_dev;
 };
@@ -212,21 +217,13 @@ struct vxge_fifo_stats {
 };
 
 struct vxge_fifo {
-	struct net_device	*ndev;
-	struct pci_dev		*pdev;
+	struct net_device *ndev;
+	struct pci_dev *pdev;
 	struct __vxge_hw_fifo *handle;
+	struct netdev_queue *txq;
 
-	/* The vpath id maintained in the driver -
-	 * 0 to 'maximum_vpaths_in_function - 1'
-	 */
-	int driver_id;
 	int tx_steering_type;
 	int indicate_max_pkts;
-	spinlock_t tx_lock;
-	/* flag used to maintain queue state when MULTIQ is not enabled */
-#define VPATH_QUEUE_START       0
-#define VPATH_QUEUE_STOP        1
-	int queue_state;
 
 	/* Tx stats */
 	struct vxge_fifo_stats stats;
@@ -260,6 +257,7 @@ struct vxge_ring {
 	int gro_enable;
 
 	struct napi_struct napi;
+	struct napi_struct *napi_p;
 
 #define VXGE_MAX_MAC_ADDR_COUNT		30
 
@@ -273,7 +271,6 @@ struct vxge_ring {
 } ____cacheline_aligned;
 
 struct vxge_vpath {
-
 	struct vxge_fifo fifo;
 	struct vxge_ring ring;
 
@@ -363,7 +360,6 @@ struct vxgedev {
 
 	struct __vxge_hw_vpath_handle *vp_handles[VXGE_HW_MAX_VIRTUAL_PATHS];
 	void __iomem *bar0;
-	void __iomem *bar1;
 	struct vxge_sw_stats	stats;
 	int		mtu;
 	/* Below variables are used for vpath selection to transmit a packet */
@@ -378,6 +374,7 @@ struct vxgedev {
 
 struct vxge_rx_priv {
 	struct sk_buff		*skb;
+	unsigned char		*skb_data;
 	dma_addr_t		data_dma;
 	dma_addr_t		data_size;
 };
@@ -428,7 +425,8 @@ vxge_rx_1b_compl(struct __vxge_hw_ring *ringh, void *dtr,
 
 enum vxge_hw_status
 vxge_xmit_compl(struct __vxge_hw_fifo *fifo_hw, void *dtr,
-	enum vxge_hw_fifo_tcode t_code, void *userdata, void **skb_ptr);
+	enum vxge_hw_fifo_tcode t_code, void *userdata,
+	struct sk_buff ***skb_ptr, int nr_skbs, int *more);
 
 int vxge_close(struct net_device *dev);
 
@@ -439,14 +437,6 @@ void vxge_close_vpaths(struct vxgedev *vdev, int index);
 int vxge_open_vpaths(struct vxgedev *vdev);
 
 enum vxge_hw_status vxge_reset_all_vpaths(struct vxgedev *vdev);
-
-void vxge_stop_all_tx_queue(struct vxgedev *vdev);
-
-void vxge_stop_tx_queue(struct vxge_fifo *fifo);
-
-void vxge_start_all_tx_queue(struct vxgedev *vdev);
-
-void vxge_wake_tx_queue(struct vxge_fifo *fifo, struct sk_buff *skb);
 
 enum vxge_hw_status vxge_add_mac_addr(struct vxgedev *vdev,
 	struct macInfo *mac);

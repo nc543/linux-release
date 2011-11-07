@@ -10,50 +10,52 @@
 
 OUTPUT_FORMAT("elf32-microblaze", "elf32-microblaze", "elf32-microblaze")
 OUTPUT_ARCH(microblaze)
-ENTRY(_start)
+ENTRY(microblaze_start)
 
+#include <asm/page.h>
 #include <asm-generic/vmlinux.lds.h>
+#include <asm/thread_info.h>
 
 jiffies = jiffies_64 + 4;
 
 SECTIONS {
-	. = CONFIG_KERNEL_BASE_ADDR;
-
-	.text : {
+	. = CONFIG_KERNEL_START;
+	microblaze_start = CONFIG_KERNEL_BASE_ADDR;
+	.text : AT(ADDR(.text) - LOAD_OFFSET) {
 		_text = . ;
 		_stext = . ;
-		*(.text .text.*)
+		HEAD_TEXT
+		TEXT_TEXT
 		*(.fixup)
-
-		*(.exitcall.exit)
+		EXIT_TEXT
+		EXIT_CALL
 		SCHED_TEXT
 		LOCK_TEXT
 		KPROBES_TEXT
+		IRQENTRY_TEXT
 		. = ALIGN (4) ;
 		_etext = . ;
 	}
 
 	. = ALIGN (4) ;
-	_fdt_start = . ; /* place for fdt blob */
-	. = . + 0x4000;
-	_fdt_end = . ;
+	__fdt_blob : AT(ADDR(__fdt_blob) - LOAD_OFFSET) {
+		_fdt_start = . ;		/* place for fdt blob */
+		*(__fdt_blob) ;			/* Any link-placed DTB */
+	        . = _fdt_start + 0x4000;	/* Pad up to 16kbyte */
+		_fdt_end = . ;
+	}
 
 	. = ALIGN(16);
 	RODATA
-	. = ALIGN(16);
-	__ex_table : {
-		__start___ex_table = .;
-		*(__ex_table)
-		__stop___ex_table = .;
-	}
+	EXCEPTION_TABLE(16)
 
 	/*
 	 * sdata2 section can go anywhere, but must be word aligned
 	 * and SDA2_BASE must point to the middle of it
 	 */
-	.sdata2 : {
+	.sdata2 : AT(ADDR(.sdata2) - LOAD_OFFSET) {
 		_ssrw = .;
-		. = ALIGN(4096); /* page aligned when MMU used - origin 0x8 */
+		. = ALIGN(PAGE_SIZE); /* page aligned when MMU used */
 		*(.sdata2)
 	. = ALIGN(8);
 	_essrw = .;
@@ -62,30 +64,22 @@ SECTIONS {
 	}
 
 	_sdata = . ;
-	.data ALIGN (4096) : { /* page aligned when MMU used - origin 0x4 */
-		*(.data)
-	}
-	. = ALIGN(32);
-	.data.cacheline_aligned : { *(.data.cacheline_aligned) }
+	RW_DATA_SECTION(32, PAGE_SIZE, THREAD_SIZE)
 	_edata = . ;
 
 	/* Reserve some low RAM for r0 based memory references */
 	. = ALIGN(0x4) ;
 	r0_ram = . ;
-	. = . +  4096;	/* a page should be enough */
-
-	/* The initial task */
-	. = ALIGN(8192);
-	.data.init_task : { *(.data.init_task) }
+	. = . +  PAGE_SIZE;	/* a page should be enough */
 
 	/* Under the microblaze ABI, .sdata and .sbss must be contiguous */
 	. = ALIGN(8);
-	.sdata : {
+	.sdata : AT(ADDR(.sdata) - LOAD_OFFSET) {
 		_ssro = .;
 		*(.sdata)
 	}
 
-	.sbss :	{
+	.sbss :	AT(ADDR(.sbss) - LOAD_OFFSET) {
 		_ssbss = .;
 		*(.sbss)
 		_esbss = .;
@@ -94,47 +88,39 @@ SECTIONS {
 		_KERNEL_SDA_BASE_ = _ssro + (_ssro_size / 2) ;
 	}
 
+	. = ALIGN(PAGE_SIZE);
 	__init_begin = .;
 
-	. = ALIGN(4096);
-	.init.text : {
-		_sinittext = . ;
-		*(.init.text)
-		*(.exit.text)
-		*(.exit.data)
-		_einittext = .;
+	INIT_TEXT_SECTION(PAGE_SIZE)
+
+	.init.data : AT(ADDR(.init.data) - LOAD_OFFSET) {
+		INIT_DATA
 	}
 
-	.init.data : { *(.init.data) }
-
 	. = ALIGN(4);
-	.init.ivt : {
+	.init.ivt : AT(ADDR(.init.ivt) - LOAD_OFFSET) {
 		__ivt_start = .;
 		*(.init.ivt)
 		__ivt_end = .;
 	}
 
-	.init.setup : {
-		__setup_start = .;
-		*(.init.setup)
-		__setup_end = .;
+	.init.setup : AT(ADDR(.init.setup) - LOAD_OFFSET) {
+		INIT_SETUP(0)
 	}
 
-	.initcall.init : {
-		__initcall_start = .;
-		INITCALLS
-		__initcall_end = .;
+	.initcall.init : AT(ADDR(.initcall.init) - LOAD_OFFSET ) {
+		INIT_CALLS
 	}
 
-	.con_initcall.init : {
-		__con_initcall_start = .;
-		*(.con_initcall.init)
-		__con_initcall_end = .;
+	.con_initcall.init : AT(ADDR(.con_initcall.init) - LOAD_OFFSET) {
+		CON_INITCALL
 	}
+
+	SECURITY_INIT
 
 	__init_end_before_initramfs = .;
 
-	.init.ramfs ALIGN(4096) : {
+	.init.ramfs ALIGN(PAGE_SIZE) : AT(ADDR(.init.ramfs) - LOAD_OFFSET) {
 		__initramfs_start = .;
 		*(.init.ramfs)
 		__initramfs_end = .;
@@ -146,11 +132,12 @@ SECTIONS {
  * so that __init_end == __bss_start. This will make image.elf
  * consistent with the image.bin
  */
-		/* . = ALIGN(4096); */
+		/* . = ALIGN(PAGE_SIZE); */
 	}
 	__init_end = .;
 
-	.bss ALIGN (4096) : { /* page aligned when MMU used */
+	.bss ALIGN (PAGE_SIZE) : AT(ADDR(.bss) - LOAD_OFFSET) {
+		/* page aligned when MMU used */
 		__bss_start = . ;
 			*(.bss*)
 			*(COMMON)
@@ -158,6 +145,8 @@ SECTIONS {
 		__bss_stop = . ;
 		_ebss = . ;
 	}
-	. = ALIGN(4096);
+	. = ALIGN(PAGE_SIZE);
 	_end = .;
+
+	DISCARDS
 }

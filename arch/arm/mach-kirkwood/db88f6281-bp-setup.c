@@ -11,14 +11,12 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/platform_device.h>
-#include <linux/mtd/nand.h>
 #include <linux/mtd/partitions.h>
 #include <linux/ata_platform.h>
 #include <linux/mv643xx_eth.h>
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
 #include <mach/kirkwood.h>
-#include <plat/orion_nand.h>
 #include <plat/mvsdio.h>
 #include "common.h"
 #include "mpp.h"
@@ -39,32 +37,6 @@ static struct mtd_partition db88f6281_nand_parts[] = {
 	},
 };
 
-static struct resource db88f6281_nand_resource = {
-	.flags		= IORESOURCE_MEM,
-	.start		= KIRKWOOD_NAND_MEM_PHYS_BASE,
-	.end		= KIRKWOOD_NAND_MEM_PHYS_BASE +
-			  KIRKWOOD_NAND_MEM_SIZE - 1,
-};
-
-static struct orion_nand_data db88f6281_nand_data = {
-	.parts		= db88f6281_nand_parts,
-	.nr_parts	= ARRAY_SIZE(db88f6281_nand_parts),
-	.cle		= 0,
-	.ale		= 1,
-	.width		= 8,
-	.chip_delay	= 25,
-};
-
-static struct platform_device db88f6281_nand_flash = {
-	.name		= "orion_nand",
-	.id		= -1,
-	.dev		= {
-		.platform_data	= &db88f6281_nand_data,
-	},
-	.resource	= &db88f6281_nand_resource,
-	.num_resources	= 1,
-};
-
 static struct mv643xx_eth_platform_data db88f6281_ge00_data = {
 	.phy_addr	= MV643XX_ETH_PHY_ADDR(8),
 };
@@ -79,6 +51,14 @@ static struct mvsdio_platform_data db88f6281_mvsdio_data = {
 };
 
 static unsigned int db88f6281_mpp_config[] __initdata = {
+	MPP0_NF_IO2,
+	MPP1_NF_IO3,
+	MPP2_NF_IO4,
+	MPP3_NF_IO5,
+	MPP4_NF_IO6,
+	MPP5_NF_IO7,
+	MPP18_NF_IO0,
+	MPP19_NF_IO1,
 	MPP37_GPIO,
 	MPP38_GPIO,
 	0
@@ -92,20 +72,25 @@ static void __init db88f6281_init(void)
 	kirkwood_init();
 	kirkwood_mpp_conf(db88f6281_mpp_config);
 
+	kirkwood_nand_init(ARRAY_AND_SIZE(db88f6281_nand_parts), 25);
 	kirkwood_ehci_init();
 	kirkwood_ge00_init(&db88f6281_ge00_data);
 	kirkwood_sata_init(&db88f6281_sata_data);
 	kirkwood_uart0_init();
 	kirkwood_sdio_init(&db88f6281_mvsdio_data);
-	
-	platform_device_register(&db88f6281_nand_flash);
 }
 
 static int __init db88f6281_pci_init(void)
 {
-	if (machine_is_db88f6281_bp())
-		kirkwood_pcie_init();
+	if (machine_is_db88f6281_bp()) {
+		u32 dev, rev;
 
+		kirkwood_pcie_id(&dev, &rev);
+		if (dev == MV88F6282_DEV_ID)
+			kirkwood_pcie_init(KW_PCIE1 | KW_PCIE0);
+		else
+			kirkwood_pcie_init(KW_PCIE0);
+	}
 	return 0;
 }
 subsys_initcall(db88f6281_pci_init);

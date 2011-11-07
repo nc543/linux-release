@@ -23,8 +23,7 @@
 #include <linux/init.h>
 #include <linux/clk.h>
 #include <linux/platform_device.h>
-
-#include <asm/io.h>
+#include <linux/io.h>
 
 #include <mach/at91_twi.h>
 #include <mach/board.h>
@@ -200,10 +199,10 @@ static int __devinit at91_i2c_probe(struct platform_device *pdev)
 	if (!res)
 		return -ENXIO;
 
-	if (!request_mem_region(res->start, res->end - res->start + 1, "at91_i2c"))
+	if (!request_mem_region(res->start, resource_size(res), "at91_i2c"))
 		return -EBUSY;
 
-	twi_base = ioremap(res->start, res->end - res->start + 1);
+	twi_base = ioremap(res->start, resource_size(res));
 	if (!twi_base) {
 		rc = -ENOMEM;
 		goto fail0;
@@ -252,7 +251,7 @@ fail2:
 fail1:
 	iounmap(twi_base);
 fail0:
-	release_mem_region(res->start, res->end - res->start + 1);
+	release_mem_region(res->start, resource_size(res));
 
 	return rc;
 }
@@ -268,7 +267,7 @@ static int __devexit at91_i2c_remove(struct platform_device *pdev)
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	iounmap(twi_base);
-	release_mem_region(res->start, res->end - res->start + 1);
+	release_mem_region(res->start, resource_size(res));
 
 	clk_disable(twi_clk);		/* disable peripheral clock */
 	clk_put(twi_clk);

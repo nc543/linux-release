@@ -13,6 +13,9 @@
  *
  */
 
+#define KMSG_COMPONENT "IPVS"
+#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+
 #include <linux/in.h>
 #include <linux/ip.h>
 #include <linux/kernel.h>
@@ -23,58 +26,6 @@
 #include <net/ip_vs.h>
 #include <net/ip.h>
 #include <net/ip6_checksum.h>
-
-static struct ip_vs_conn *
-udp_conn_in_get(int af, const struct sk_buff *skb, struct ip_vs_protocol *pp,
-		const struct ip_vs_iphdr *iph, unsigned int proto_off,
-		int inverse)
-{
-	struct ip_vs_conn *cp;
-	__be16 _ports[2], *pptr;
-
-	pptr = skb_header_pointer(skb, proto_off, sizeof(_ports), _ports);
-	if (pptr == NULL)
-		return NULL;
-
-	if (likely(!inverse)) {
-		cp = ip_vs_conn_in_get(af, iph->protocol,
-				       &iph->saddr, pptr[0],
-				       &iph->daddr, pptr[1]);
-	} else {
-		cp = ip_vs_conn_in_get(af, iph->protocol,
-				       &iph->daddr, pptr[1],
-				       &iph->saddr, pptr[0]);
-	}
-
-	return cp;
-}
-
-
-static struct ip_vs_conn *
-udp_conn_out_get(int af, const struct sk_buff *skb, struct ip_vs_protocol *pp,
-		 const struct ip_vs_iphdr *iph, unsigned int proto_off,
-		 int inverse)
-{
-	struct ip_vs_conn *cp;
-	__be16 _ports[2], *pptr;
-
-	pptr = skb_header_pointer(skb, proto_off, sizeof(_ports), _ports);
-	if (pptr == NULL)
-		return NULL;
-
-	if (likely(!inverse)) {
-		cp = ip_vs_conn_out_get(af, iph->protocol,
-					&iph->saddr, pptr[0],
-					&iph->daddr, pptr[1]);
-	} else {
-		cp = ip_vs_conn_out_get(af, iph->protocol,
-					&iph->daddr, pptr[1],
-					&iph->saddr, pptr[0]);
-	}
-
-	return cp;
-}
-
 
 static int
 udp_conn_schedule(int af, struct sk_buff *skb, struct ip_vs_protocol *pp,
@@ -442,7 +393,7 @@ static int udp_app_conn_bind(struct ip_vs_conn *cp)
 				break;
 			spin_unlock(&udp_app_lock);
 
-			IP_VS_DBG_BUF(9, "%s: Binding conn %s:%u->"
+			IP_VS_DBG_BUF(9, "%s(): Binding conn %s:%u->"
 				      "%s:%u to app %s on port %u\n",
 				      __func__,
 				      IP_VS_DBG_ADDR(cp->af, &cp->caddr),
@@ -469,7 +420,7 @@ static int udp_timeouts[IP_VS_UDP_S_LAST+1] = {
 	[IP_VS_UDP_S_LAST]		=	2*HZ,
 };
 
-static char * udp_state_name_table[IP_VS_UDP_S_LAST+1] = {
+static const char *const udp_state_name_table[IP_VS_UDP_S_LAST+1] = {
 	[IP_VS_UDP_S_NORMAL]		=	"UDP",
 	[IP_VS_UDP_S_LAST]		=	"BUG!",
 };
@@ -517,8 +468,8 @@ struct ip_vs_protocol ip_vs_protocol_udp = {
 	.init =			udp_init,
 	.exit =			udp_exit,
 	.conn_schedule =	udp_conn_schedule,
-	.conn_in_get =		udp_conn_in_get,
-	.conn_out_get =		udp_conn_out_get,
+	.conn_in_get =		ip_vs_conn_in_get_proto,
+	.conn_out_get =		ip_vs_conn_out_get_proto,
 	.snat_handler =		udp_snat_handler,
 	.dnat_handler =		udp_dnat_handler,
 	.csum_check =		udp_csum_check,

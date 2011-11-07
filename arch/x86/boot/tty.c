@@ -2,6 +2,7 @@
  *
  *   Copyright (C) 1991, 1992 Linus Torvalds
  *   Copyright 2007 rPath, Inc. - All Rights Reserved
+ *   Copyright 2009 Intel Corporation; author H. Peter Anvin
  *
  *   This file is part of the Linux kernel, and is made available under
  *   the terms of the GNU General Public License version 2.
@@ -9,37 +10,60 @@
  * ----------------------------------------------------------------------- */
 
 /*
- * Very simple screen I/O
- * XXX: Probably should add very simple serial I/O?
+ * Very simple screen and serial I/O
  */
 
 #include "boot.h"
+
+int early_serial_base;
+
+#define XMTRDY          0x20
+
+#define TXR             0       /*  Transmit register (WRITE) */
+#define LSR             5       /*  Line Status               */
 
 /*
  * These functions are in .inittext so they can be used to signal
  * error during initialization.
  */
 
+static void __attribute__((section(".inittext"))) serial_putchar(int ch)
+{
+	unsigned timeout = 0xffff;
+
+	while ((inb(early_serial_base + LSR) & XMTRDY) == 0 && --timeout)
+		cpu_relax();
+
+	outb(ch, early_serial_base + TXR);
+}
+
+static void __attribute__((section(".inittext"))) bios_putchar(int ch)
+{
+	struct biosregs ireg;
+
+	initregs(&ireg);
+	ireg.bx = 0x0007;
+	ireg.cx = 0x0001;
+	ireg.ah = 0x0e;
+	ireg.al = ch;
+	intcall(0x10, &ireg, NULL);
+}
+
 void __attribute__((section(".inittext"))) putchar(int ch)
 {
-	unsigned char c = ch;
-
-	if (c == '\n')
+	if (ch == '\n')
 		putchar('\r');	/* \n -> \r\n */
 
-	/* int $0x10 is known to have bugs involving touching registers
-	   it shouldn't.  Be extra conservative... */
-	asm volatile("pushal; pushw %%ds; int $0x10; popw %%ds; popal"
-		     : : "b" (0x0007), "c" (0x0001), "a" (0x0e00|ch));
+	bios_putchar(ch);
+
+	if (early_serial_base != 0)
+		serial_putchar(ch);
 }
 
 void __attribute__((section(".inittext"))) puts(const char *str)
 {
-	int n = 0;
-	while (*str) {
+	while (*str)
 		putchar(*str++);
-		n++;
-	}
 }
 
 /*
@@ -49,14 +73,13 @@ void __attribute__((section(".inittext"))) puts(const char *str)
 
 static u8 gettime(void)
 {
-	u16 ax = 0x0200;
-	u16 cx, dx;
+	struct biosregs ireg, oreg;
 
-	asm volatile("int $0x1a"
-		     : "+a" (ax), "=c" (cx), "=d" (dx)
-		     : : "ebx", "esi", "edi");
+	initregs(&ireg);
+	ireg.ah = 0x02;
+	intcall(0x1a, &ireg, &oreg);
 
-	return dx >> 8;
+	return oreg.dh;
 }
 
 /*
@@ -64,19 +87,24 @@ static u8 gettime(void)
  */
 int getchar(void)
 {
-	u16 ax = 0;
-	asm volatile("int $0x16" : "+a" (ax));
+	struct biosregs ireg, oreg;
 
-	return ax & 0xff;
+	initregs(&ireg);
+	/* ireg.ah = 0x00; */
+	intcall(0x16, &ireg, &oreg);
+
+	return oreg.al;
 }
 
 static int kbd_pending(void)
 {
-	u8 pending;
-	asm volatile("int $0x16; setnz %0"
-		     : "=qm" (pending)
-		     : "a" (0x0100));
-	return pending;
+	struct biosregs ireg, oreg;
+
+	initregs(&ireg);
+	ireg.ah = 0x01;
+	intcall(0x16, &ireg, &oreg);
+
+	return !(oreg.eflags & X86_EFLAGS_ZF);
 }
 
 void kbd_flush(void)
@@ -108,3 +136,4 @@ int getchar_timeout(void)
 
 	return 0;		/* Timeout! */
 }
+

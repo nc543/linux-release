@@ -22,7 +22,7 @@ startup:
 	bt	clear_bss
 	sub	r0, r2
 	mov.l	bss_start_addr, r0
-	mov	#0xe0, r1
+	mov	#0xffffffe0, r1
 	and	r1, r0			! align cache line
 	mov.l	text_start_addr, r3
 	mov	r0, r1
@@ -97,7 +97,11 @@ init_stack_addr:
 decompress_kernel_addr:
 	.long	decompress_kernel
 kernel_start_addr:
+#ifdef CONFIG_32BIT
+	.long	___pa(_text+PAGE_SIZE)
+#else
 	.long	_text+PAGE_SIZE
+#endif
 
 	.align	9
 fake_headers_as_bzImage:

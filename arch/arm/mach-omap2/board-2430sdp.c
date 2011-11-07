@@ -18,8 +18,9 @@
 #include <linux/platform_device.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/partitions.h>
+#include <linux/mtd/physmap.h>
 #include <linux/delay.h>
-#include <linux/i2c/twl4030.h>
+#include <linux/i2c/twl.h>
 #include <linux/err.h>
 #include <linux/clk.h>
 #include <linux/io.h>
@@ -28,22 +29,19 @@
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
-#include <asm/mach/flash.h>
 
 #include <mach/gpio.h>
-#include <mach/mux.h>
-#include <mach/board.h>
-#include <mach/common.h>
-#include <mach/gpmc.h>
-#include <mach/usb.h>
+#include <plat/board.h>
+#include <plat/common.h>
+#include <plat/gpmc.h>
+#include <plat/usb.h>
+#include <plat/gpmc-smc91x.h>
 
-#include "mmc-twl4030.h"
+#include "mux.h"
+#include "hsmmc.h"
 
 #define SDP2430_CS0_BASE	0x04000000
-#define	SDP2430_FLASH_CS	0
-#define	SDP2430_SMC91X_CS	5
-
-#define SDP2430_ETHR_GPIO_IRQ		149
+#define SECONDARY_LCD_GPIO		147
 
 static struct mtd_partition sdp2430_partitions[] = {
 	/* bootloader (U-Boot, etc) in first sector */
@@ -76,8 +74,7 @@ static struct mtd_partition sdp2430_partitions[] = {
 	}
 };
 
-static struct flash_platform_data sdp2430_flash_data = {
-	.map_name	= "cfi_probe",
+static struct physmap_flash_data sdp2430_flash_data = {
 	.width		= 2,
 	.parts		= sdp2430_partitions,
 	.nr_parts	= ARRAY_SIZE(sdp2430_partitions),
@@ -90,7 +87,7 @@ static struct resource sdp2430_flash_resource = {
 };
 
 static struct platform_device sdp2430_flash_device = {
-	.name		= "omapflash",
+	.name		= "physmap-flash",
 	.id		= 0,
 	.dev = {
 		.platform_data	= &sdp2430_flash_data,
@@ -99,110 +96,56 @@ static struct platform_device sdp2430_flash_device = {
 	.resource	= &sdp2430_flash_resource,
 };
 
-static struct resource sdp2430_smc91x_resources[] = {
-	[0] = {
-		.start	= SDP2430_CS0_BASE,
-		.end	= SDP2430_CS0_BASE + SZ_64M - 1,
-		.flags	= IORESOURCE_MEM,
-	},
-	[1] = {
-		.start	= OMAP_GPIO_IRQ(SDP2430_ETHR_GPIO_IRQ),
-		.end	= OMAP_GPIO_IRQ(SDP2430_ETHR_GPIO_IRQ),
-		.flags	= IORESOURCE_IRQ | IORESOURCE_IRQ_LOWLEVEL,
-	},
-};
-
-static struct platform_device sdp2430_smc91x_device = {
-	.name		= "smc91x",
+static struct platform_device sdp2430_lcd_device = {
+	.name		= "sdp2430_lcd",
 	.id		= -1,
-	.num_resources	= ARRAY_SIZE(sdp2430_smc91x_resources),
-	.resource	= sdp2430_smc91x_resources,
 };
 
 static struct platform_device *sdp2430_devices[] __initdata = {
-	&sdp2430_smc91x_device,
 	&sdp2430_flash_device,
+	&sdp2430_lcd_device,
 };
 
-static inline void __init sdp2430_init_smc91x(void)
+static struct omap_lcd_config sdp2430_lcd_config __initdata = {
+	.ctrl_name	= "internal",
+};
+
+#if defined(CONFIG_SMC91X) || defined(CONFIG_SMC91x_MODULE)
+
+static struct omap_smc91x_platform_data board_smc91x_data = {
+	.cs		= 5,
+	.gpio_irq	= 149,
+	.flags		= GPMC_MUX_ADD_DATA | GPMC_TIMINGS_SMC91C96 |
+				IORESOURCE_IRQ_LOWLEVEL,
+
+};
+
+static void __init board_smc91x_init(void)
 {
-	int eth_cs;
-	unsigned long cs_mem_base;
-	unsigned int rate;
-	struct clk *gpmc_fck;
-
-	eth_cs = SDP2430_SMC91X_CS;
-
-	gpmc_fck = clk_get(NULL, "gpmc_fck");	/* Always on ENABLE_ON_INIT */
-	if (IS_ERR(gpmc_fck)) {
-		WARN_ON(1);
-		return;
-	}
-
-	clk_enable(gpmc_fck);
-	rate = clk_get_rate(gpmc_fck);
-
-	/* Make sure CS1 timings are correct, for 2430 always muxed */
-	gpmc_cs_write_reg(eth_cs, GPMC_CS_CONFIG1, 0x00011200);
-
-	if (rate >= 160000000) {
-		gpmc_cs_write_reg(eth_cs, GPMC_CS_CONFIG2, 0x001f1f01);
-		gpmc_cs_write_reg(eth_cs, GPMC_CS_CONFIG3, 0x00080803);
-		gpmc_cs_write_reg(eth_cs, GPMC_CS_CONFIG4, 0x1c0b1c0a);
-		gpmc_cs_write_reg(eth_cs, GPMC_CS_CONFIG5, 0x041f1F1F);
-		gpmc_cs_write_reg(eth_cs, GPMC_CS_CONFIG6, 0x000004C4);
-	} else if (rate >= 130000000) {
-		gpmc_cs_write_reg(eth_cs, GPMC_CS_CONFIG2, 0x001f1f00);
-		gpmc_cs_write_reg(eth_cs, GPMC_CS_CONFIG3, 0x00080802);
-		gpmc_cs_write_reg(eth_cs, GPMC_CS_CONFIG4, 0x1C091C09);
-		gpmc_cs_write_reg(eth_cs, GPMC_CS_CONFIG5, 0x041f1F1F);
-		gpmc_cs_write_reg(eth_cs, GPMC_CS_CONFIG6, 0x000004C4);
-	} else { /* rate = 100000000 */
-		gpmc_cs_write_reg(eth_cs, GPMC_CS_CONFIG2, 0x001f1f00);
-		gpmc_cs_write_reg(eth_cs, GPMC_CS_CONFIG3, 0x00080802);
-		gpmc_cs_write_reg(eth_cs, GPMC_CS_CONFIG4, 0x1C091C09);
-		gpmc_cs_write_reg(eth_cs, GPMC_CS_CONFIG5, 0x031A1F1F);
-		gpmc_cs_write_reg(eth_cs, GPMC_CS_CONFIG6, 0x000003C2);
-	}
-
-	if (gpmc_cs_request(eth_cs, SZ_16M, &cs_mem_base) < 0) {
-		printk(KERN_ERR "Failed to request GPMC mem for smc91x\n");
-		goto out;
-	}
-
-	sdp2430_smc91x_resources[0].start = cs_mem_base + 0x300;
-	sdp2430_smc91x_resources[0].end = cs_mem_base + 0x30f;
-	udelay(100);
-
-	if (gpio_request(SDP2430_ETHR_GPIO_IRQ, "SMC91x irq") < 0) {
-		printk(KERN_ERR "Failed to request GPIO%d for smc91x IRQ\n",
-			SDP2430_ETHR_GPIO_IRQ);
-		gpmc_cs_free(eth_cs);
-		goto out;
-	}
-	gpio_direction_input(SDP2430_ETHR_GPIO_IRQ);
-
-out:
-	clk_disable(gpmc_fck);
-	clk_put(gpmc_fck);
+	omap_mux_init_gpio(149, OMAP_PIN_INPUT);
+	gpmc_smc91x_init(&board_smc91x_data);
 }
+
+#else
+
+static inline void board_smc91x_init(void)
+{
+}
+
+#endif
+
+static struct omap_board_config_kernel sdp2430_config[] = {
+	{OMAP_TAG_LCD, &sdp2430_lcd_config},
+};
 
 static void __init omap_2430sdp_init_irq(void)
 {
-	omap2_init_common_hw(NULL);
+	omap_board_config = sdp2430_config;
+	omap_board_config_size = ARRAY_SIZE(sdp2430_config);
+	omap2_init_common_hw(NULL, NULL);
 	omap_init_irq();
 	omap_gpio_init();
-	sdp2430_init_smc91x();
 }
-
-static struct omap_uart_config sdp2430_uart_config __initdata = {
-	.enabled_uarts = ((1 << 0) | (1 << 1) | (1 << 2)),
-};
-
-static struct omap_board_config_kernel sdp2430_config[] = {
-	{OMAP_TAG_UART, &sdp2430_uart_config},
-};
-
 
 static struct twl4030_gpio_platform_data sdp2430_gpio_data = {
 	.gpio_base	= OMAP_MAX_GPIO_LINES,
@@ -227,15 +170,24 @@ static struct i2c_board_info __initdata sdp2430_i2c_boardinfo[] = {
 	},
 };
 
+static struct i2c_board_info __initdata sdp2430_i2c1_boardinfo[] = {
+	{
+		I2C_BOARD_INFO("isp1301_omap", 0x2D),
+		.flags = I2C_CLIENT_WAKE,
+		.irq = OMAP_GPIO_IRQ(78),
+	},
+};
+
 static int __init omap2430_i2c_init(void)
 {
-	omap_register_i2c_bus(1, 400, NULL, 0);
+	omap_register_i2c_bus(1, 100, sdp2430_i2c1_boardinfo,
+			ARRAY_SIZE(sdp2430_i2c1_boardinfo));
 	omap_register_i2c_bus(2, 2600, sdp2430_i2c_boardinfo,
 			ARRAY_SIZE(sdp2430_i2c_boardinfo));
 	return 0;
 }
 
-static struct twl4030_hsmmc_info mmc[] __initdata = {
+static struct omap2_hsmmc_info mmc[] __initdata = {
 	{
 		.mmc		= 1,
 		.wires		= 4,
@@ -246,30 +198,66 @@ static struct twl4030_hsmmc_info mmc[] __initdata = {
 	{}	/* Terminator */
 };
 
+static struct omap_musb_board_data musb_board_data = {
+	.interface_type		= MUSB_INTERFACE_ULPI,
+	.mode			= MUSB_OTG,
+	.power			= 100,
+};
+static struct omap_usb_config sdp2430_usb_config __initdata = {
+	.otg		= 1,
+#ifdef  CONFIG_USB_GADGET_OMAP
+	.hmc_mode	= 0x0,
+#elif   defined(CONFIG_USB_OHCI_HCD) || defined(CONFIG_USB_OHCI_HCD_MODULE)
+	.hmc_mode	= 0x1,
+#endif
+	.pins[0]	= 3,
+};
+
+#ifdef CONFIG_OMAP_MUX
+static struct omap_board_mux board_mux[] __initdata = {
+	{ .reg_offset = OMAP_MUX_TERMINATOR },
+};
+#else
+#define board_mux	NULL
+#endif
+
 static void __init omap_2430sdp_init(void)
 {
+	int ret;
+
+	omap2430_mux_init(board_mux, OMAP_PACKAGE_ZAC);
+
 	omap2430_i2c_init();
 
 	platform_add_devices(sdp2430_devices, ARRAY_SIZE(sdp2430_devices));
-	omap_board_config = sdp2430_config;
-	omap_board_config_size = ARRAY_SIZE(sdp2430_config);
 	omap_serial_init();
-	twl4030_mmc_init(mmc);
-	usb_musb_init();
+	omap2_hsmmc_init(mmc);
+	omap2_usbfs_init(&sdp2430_usb_config);
+
+	omap_mux_init_signal("usb0hs_stp", OMAP_PULL_ENA | OMAP_PULL_UP);
+	usb_musb_init(&musb_board_data);
+
+	board_smc91x_init();
+
+	/* Turn off secondary LCD backlight */
+	ret = gpio_request(SECONDARY_LCD_GPIO, "Secondary LCD backlight");
+	if (ret == 0)
+		gpio_direction_output(SECONDARY_LCD_GPIO, 0);
 }
 
 static void __init omap_2430sdp_map_io(void)
 {
 	omap2_set_globals_243x();
-	omap2_map_common_io();
+	omap243x_map_common_io();
 }
 
 MACHINE_START(OMAP_2430SDP, "OMAP2430 sdp2430 board")
 	/* Maintainer: Syed Khasim - Texas Instruments Inc */
 	.phys_io	= 0x48000000,
-	.io_pg_offst	= ((0xd8000000) >> 18) & 0xfffc,
+	.io_pg_offst	= ((0xfa000000) >> 18) & 0xfffc,
 	.boot_params	= 0x80000100,
 	.map_io		= omap_2430sdp_map_io,
+	.reserve	= omap_reserve,
 	.init_irq	= omap_2430sdp_init_irq,
 	.init_machine	= omap_2430sdp_init,
 	.timer		= &omap_timer,

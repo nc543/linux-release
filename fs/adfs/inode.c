@@ -7,17 +7,9 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
-#include <linux/errno.h>
-#include <linux/fs.h>
-#include <linux/adfs_fs.h>
-#include <linux/time.h>
-#include <linux/stat.h>
-#include <linux/string.h>
-#include <linux/mm.h>
 #include <linux/smp_lock.h>
-#include <linux/module.h>
 #include <linux/buffer_head.h>
-
+#include <linux/writeback.h>
 #include "adfs.h"
 
 /*
@@ -28,9 +20,6 @@ static int
 adfs_get_block(struct inode *inode, sector_t block, struct buffer_head *bh,
 	       int create)
 {
-	if (block < 0)
-		goto abort_negative;
-
 	if (!create) {
 		if (block >= inode->i_blocks)
 			goto abort_toobig;
@@ -41,10 +30,6 @@ adfs_get_block(struct inode *inode, sector_t block, struct buffer_head *bh,
 		return 0;
 	}
 	/* don't support allocation of blocks yet */
-	return -EIO;
-
-abort_negative:
-	adfs_error(inode->i_sb, "block %d < 0", block);
 	return -EIO;
 
 abort_toobig:
@@ -65,10 +50,19 @@ static int adfs_write_begin(struct file *file, struct address_space *mapping,
 			loff_t pos, unsigned len, unsigned flags,
 			struct page **pagep, void **fsdata)
 {
+	int ret;
+
 	*pagep = NULL;
-	return cont_write_begin(file, mapping, pos, len, flags, pagep, fsdata,
+	ret = cont_write_begin(file, mapping, pos, len, flags, pagep, fsdata,
 				adfs_get_block,
 				&ADFS_I(mapping->host)->mmu_private);
+	if (unlikely(ret)) {
+		loff_t isize = mapping->host->i_size;
+		if (pos + len > isize)
+			vmtruncate(mapping->host, isize);
+	}
+
+	return ret;
 }
 
 static sector_t _adfs_bmap(struct address_space *mapping, sector_t block)
@@ -337,11 +331,9 @@ adfs_notify_change(struct dentry *dentry, struct iattr *attr)
 	if (error)
 		goto out;
 
+	/* XXX: this is missing some actual on-disk truncation.. */
 	if (ia_valid & ATTR_SIZE)
-		error = vmtruncate(inode, attr->ia_size);
-
-	if (error)
-		goto out;
+		truncate_setsize(inode, attr->ia_size);
 
 	if (ia_valid & ATTR_MTIME) {
 		inode->i_mtime = attr->ia_mtime;
@@ -376,7 +368,7 @@ out:
  * The adfs-specific inode data has already been updated by
  * adfs_notify_change()
  */
-int adfs_write_inode(struct inode *inode, int unused)
+int adfs_write_inode(struct inode *inode, struct writeback_control *wbc)
 {
 	struct super_block *sb = inode->i_sb;
 	struct object_info obj;
@@ -391,8 +383,7 @@ int adfs_write_inode(struct inode *inode, int unused)
 	obj.attr	= ADFS_I(inode)->attr;
 	obj.size	= inode->i_size;
 
-	ret = adfs_dir_update(sb, &obj);
+	ret = adfs_dir_update(sb, &obj, wbc->sync_mode == WB_SYNC_ALL);
 	unlock_kernel();
 	return ret;
 }
-MODULE_LICENSE("GPL");

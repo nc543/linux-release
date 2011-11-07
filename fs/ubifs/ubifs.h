@@ -28,6 +28,7 @@
 #include <linux/fs.h>
 #include <linux/err.h>
 #include <linux/sched.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/spinlock.h>
 #include <linux/mutex.h>
@@ -95,8 +96,9 @@
  */
 #define BGT_NAME_PATTERN "ubifs_bgt%d_%d"
 
-/* Default write-buffer synchronization timeout (5 secs) */
-#define DEFAULT_WBUF_TIMEOUT (5 * HZ)
+/* Write-buffer synchronization timeout interval in seconds */
+#define WBUF_TIMEOUT_SOFTLIMIT 3
+#define WBUF_TIMEOUT_HARDLIMIT 5
 
 /* Maximum possible inode number (only 32-bit inodes are supported now) */
 #define MAX_INUM 0xFFFFFFFF
@@ -104,12 +106,10 @@
 /* Number of non-data journal heads */
 #define NONDATA_JHEADS_CNT 2
 
-/* Garbage collector head */
-#define GCHD   0
-/* Base journal head number */
-#define BASEHD 1
-/* First "general purpose" journal head */
-#define DATAHD 2
+/* Shorter names for journal head numbers for internal usage */
+#define GCHD   UBIFS_GC_HEAD
+#define BASEHD UBIFS_BASE_HEAD
+#define DATAHD UBIFS_DATA_HEAD
 
 /* 'No change' value for 'ubifs_change_lp()' */
 #define LPROPS_NC 0x80000001
@@ -379,7 +379,7 @@ struct ubifs_gced_idx_leb {
  * The @ui_size is a "shadow" variable for @inode->i_size and UBIFS uses
  * @ui_size instead of @inode->i_size. The reason for this is that UBIFS cannot
  * make sure @inode->i_size is always changed under @ui_mutex, because it
- * cannot call 'vmtruncate()' with @ui_mutex locked, because it would deadlock
+ * cannot call 'truncate_setsize()' with @ui_mutex locked, because it would deadlock
  * with 'ubifs_writepage()' (see file.c). All the other inode fields are
  * changed under @ui_mutex, so they do not need "shadow" fields. Note, one
  * could consider to rework locking and base it on "shadow" fields.
@@ -650,9 +650,12 @@ typedef int (*ubifs_lpt_scan_callback)(struct ubifs_info *c,
  * @io_mutex: serializes write-buffer I/O
  * @lock: serializes @buf, @lnum, @offs, @avail, @used, @next_ino and @inodes
  *        fields
+ * @softlimit: soft write-buffer timeout interval
+ * @delta: hard and soft timeouts delta (the timer expire inteval is @softlimit
+ *         and @softlimit + @delta)
  * @timer: write-buffer timer
- * @timeout: timer expire interval in jiffies
- * @need_sync: it is set if its timer expired and needs sync
+ * @no_timer: non-zero if this write-buffer does not have a timer
+ * @need_sync: non-zero if the timer expired and the wbuf needs sync'ing
  * @next_ino: points to the next position of the following inode number
  * @inodes: stores the inode numbers of the nodes which are in wbuf
  *
@@ -678,9 +681,11 @@ struct ubifs_wbuf {
 	int (*sync_callback)(struct ubifs_info *c, int lnum, int free, int pad);
 	struct mutex io_mutex;
 	spinlock_t lock;
-	struct timer_list timer;
-	int timeout;
-	int need_sync;
+	ktime_t softlimit;
+	unsigned long long delta;
+	struct hrtimer timer;
+	unsigned int no_timer:1;
+	unsigned int need_sync:1;
 	int next_ino;
 	ino_t *inodes;
 };
@@ -1445,7 +1450,7 @@ int ubifs_sync_wbufs_by_inode(struct ubifs_info *c, struct inode *inode);
 
 /* scan.c */
 struct ubifs_scan_leb *ubifs_scan(const struct ubifs_info *c, int lnum,
-				  int offs, void *sbuf);
+				  int offs, void *sbuf, int quiet);
 void ubifs_scan_destroy(struct ubifs_scan_leb *sleb);
 int ubifs_scan_a_node(const struct ubifs_info *c, void *buf, int len, int lnum,
 		      int offs, int quiet);
@@ -1570,7 +1575,7 @@ int ubifs_tnc_start_commit(struct ubifs_info *c, struct ubifs_zbranch *zroot);
 int ubifs_tnc_end_commit(struct ubifs_info *c);
 
 /* shrinker.c */
-int ubifs_shrinker(int nr_to_scan, gfp_t gfp_mask);
+int ubifs_shrinker(struct shrinker *shrink, int nr_to_scan, gfp_t gfp_mask);
 
 /* commit.c */
 int ubifs_bg_thread(void *info);
@@ -1670,9 +1675,10 @@ const struct ubifs_lprops *ubifs_fast_find_free(struct ubifs_info *c);
 const struct ubifs_lprops *ubifs_fast_find_empty(struct ubifs_info *c);
 const struct ubifs_lprops *ubifs_fast_find_freeable(struct ubifs_info *c);
 const struct ubifs_lprops *ubifs_fast_find_frdi_idx(struct ubifs_info *c);
+int ubifs_calc_dark(const struct ubifs_info *c, int spc);
 
 /* file.c */
-int ubifs_fsync(struct file *file, struct dentry *dentry, int datasync);
+int ubifs_fsync(struct file *file, int datasync);
 int ubifs_setattr(struct dentry *dentry, struct iattr *attr);
 
 /* dir.c */

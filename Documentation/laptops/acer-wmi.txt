@@ -40,7 +40,7 @@ NOTE: The Acer Aspire One is not supported hardware. It cannot work with
 acer-wmi until Acer fix their ACPI-WMI implementation on them, so has been
 blacklisted until that happens.
 
-Please see the website for the current list of known working hardare:
+Please see the website for the current list of known working hardware:
 
 http://code.google.com/p/aceracpi/wiki/SupportedHardware
 
@@ -173,7 +173,7 @@ Credits
 *******
 
 Olaf Tauber, who did the real hard work when he developed acerhk
-http://www.informatik.hu-berlin.de/~tauber/acerhk
+http://www.cakey.de/acerhk/
 All the authors of laptop ACPI modules in the kernel, whose work
 was an inspiration in the early days of acer_acpi
 Mathieu Segaud, who solved the problem with having to modprobe the driver

@@ -35,6 +35,7 @@
 #include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/netdevice.h>
+#include <linux/slab.h>
 
 #include <linux/mlx4/driver.h>
 #include <linux/mlx4/device.h>
@@ -50,6 +51,78 @@ MODULE_VERSION(DRV_VERSION " ("DRV_RELDATE")");
 static const char mlx4_en_version[] =
 	DRV_NAME ": Mellanox ConnectX HCA Ethernet driver v"
 	DRV_VERSION " (" DRV_RELDATE ")\n";
+
+#define MLX4_EN_PARM_INT(X, def_val, desc) \
+	static unsigned int X = def_val;\
+	module_param(X , uint, 0444); \
+	MODULE_PARM_DESC(X, desc);
+
+
+/*
+ * Device scope module parameters
+ */
+
+
+/* Use a XOR rathern than Toeplitz hash function for RSS */
+MLX4_EN_PARM_INT(rss_xor, 0, "Use XOR hash function for RSS");
+
+/* RSS hash type mask - default to <saddr, daddr, sport, dport> */
+MLX4_EN_PARM_INT(rss_mask, 0xf, "RSS hash type bitmask");
+
+/* Number of LRO sessions per Rx ring (rounded up to a power of two) */
+MLX4_EN_PARM_INT(num_lro, MLX4_EN_MAX_LRO_DESCRIPTORS,
+		 "Number of LRO sessions per ring or disabled (0)");
+
+/* Priority pausing */
+MLX4_EN_PARM_INT(pfctx, 0, "Priority based Flow Control policy on TX[7:0]."
+			   " Per priority bit mask");
+MLX4_EN_PARM_INT(pfcrx, 0, "Priority based Flow Control policy on RX[7:0]."
+			   " Per priority bit mask");
+
+int en_print(const char *level, const struct mlx4_en_priv *priv,
+	     const char *format, ...)
+{
+	va_list args;
+	struct va_format vaf;
+	int i;
+
+	va_start(args, format);
+
+	vaf.fmt = format;
+	vaf.va = &args;
+	if (priv->registered)
+		i = printk("%s%s: %s: %pV",
+			   level, DRV_NAME, priv->dev->name, &vaf);
+	else
+		i = printk("%s%s: %s: Port %d: %pV",
+			   level, DRV_NAME, dev_name(&priv->mdev->pdev->dev),
+			   priv->port, &vaf);
+	va_end(args);
+
+	return i;
+}
+
+static int mlx4_en_get_profile(struct mlx4_en_dev *mdev)
+{
+	struct mlx4_en_profile *params = &mdev->profile;
+	int i;
+
+	params->rss_xor = (rss_xor != 0);
+	params->rss_mask = rss_mask & 0x1f;
+	params->num_lro = min_t(int, num_lro , MLX4_EN_MAX_LRO_DESCRIPTORS);
+	for (i = 1; i <= MLX4_MAX_PORTS; i++) {
+		params->prof[i].rx_pause = 1;
+		params->prof[i].rx_ppp = pfcrx;
+		params->prof[i].tx_pause = 1;
+		params->prof[i].tx_ppp = pfctx;
+		params->prof[i].tx_ring_size = MLX4_EN_DEF_TX_RING_SIZE;
+		params->prof[i].rx_ring_size = MLX4_EN_DEF_RX_RING_SIZE;
+		params->prof[i].tx_ring_num = MLX4_EN_NUM_TX_RINGS +
+			(!!pfcrx) * MLX4_EN_NUM_PPP_RINGS;
+	}
+
+	return 0;
+}
 
 static void mlx4_en_event(struct mlx4_dev *dev, void *endev_ptr,
 			  enum mlx4_dev_event event, int port)
@@ -102,15 +175,11 @@ static void mlx4_en_remove(struct mlx4_dev *dev, void *endev_ptr)
 
 static void *mlx4_en_add(struct mlx4_dev *dev)
 {
-	static int mlx4_en_version_printed;
 	struct mlx4_en_dev *mdev;
 	int i;
 	int err;
 
-	if (!mlx4_en_version_printed) {
-		printk(KERN_INFO "%s", mlx4_en_version);
-		mlx4_en_version_printed++;
-	}
+	printk_once(KERN_INFO "%s", mlx4_en_version);
 
 	mdev = kzalloc(sizeof *mdev, GFP_KERNEL);
 	if (!mdev) {
@@ -169,8 +238,9 @@ static void *mlx4_en_add(struct mlx4_dev *dev)
 	mlx4_foreach_port(i, dev, MLX4_PORT_TYPE_ETH) {
 		mlx4_info(mdev, "Using %d tx rings for port:%d\n",
 			  mdev->profile.prof[i].tx_ring_num, i);
-		mdev->profile.prof[i].rx_ring_num =
-			min_t(int, dev->caps.num_comp_vectors, MAX_RX_RINGS);
+		mdev->profile.prof[i].rx_ring_num = min_t(int,
+			roundup_pow_of_two(dev->caps.num_comp_vectors),
+			MAX_RX_RINGS);
 		mlx4_info(mdev, "Defaulting to %d rx rings for port:%d\n",
 			  mdev->profile.prof[i].rx_ring_num, i);
 	}
@@ -194,27 +264,10 @@ static void *mlx4_en_add(struct mlx4_dev *dev)
 	/* Create a netdev for each port */
 	mlx4_foreach_port(i, dev, MLX4_PORT_TYPE_ETH) {
 		mlx4_info(mdev, "Activating port:%d\n", i);
-		if (mlx4_en_init_netdev(mdev, i, &mdev->profile.prof[i])) {
+		if (mlx4_en_init_netdev(mdev, i, &mdev->profile.prof[i]))
 			mdev->pndev[i] = NULL;
-			goto err_free_netdev;
-		}
 	}
 	return mdev;
-
-
-err_free_netdev:
-	mlx4_foreach_port(i, dev, MLX4_PORT_TYPE_ETH) {
-		if (mdev->pndev[i])
-			mlx4_en_destroy_netdev(mdev->pndev[i]);
-	}
-
-	mutex_lock(&mdev->state_lock);
-	mdev->device_up = false;
-	mutex_unlock(&mdev->state_lock);
-	flush_workqueue(mdev->workqueue);
-
-	/* Stop event queue before we drop down to release shared SW state */
-	destroy_workqueue(mdev->workqueue);
 
 err_mr:
 	mlx4_mr_free(dev, &mdev->mr);

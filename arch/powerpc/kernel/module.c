@@ -43,8 +43,6 @@ void *module_alloc(unsigned long size)
 void module_free(struct module *mod, void *module_region)
 {
 	vfree(module_region);
-	/* FIXME: If module_region == mod->init_region, trim exception
-           table entries. */
 }
 
 static const Elf_Shdr *find_section(const Elf_Ehdr *hdr,
@@ -65,11 +63,6 @@ int module_finalize(const Elf_Ehdr *hdr,
 		const Elf_Shdr *sechdrs, struct module *me)
 {
 	const Elf_Shdr *sect;
-	int err;
-
-	err = module_bug_finalize(hdr, sechdrs, me);
-	if (err)
-		return err;
 
 	/* Apply feature fixups */
 	sect = find_section(hdr, sechdrs, "__ftr_fixup");
@@ -103,5 +96,4 @@ int module_finalize(const Elf_Ehdr *hdr,
 
 void module_arch_cleanup(struct module *mod)
 {
-	module_bug_cleanup(mod);
 }

@@ -55,6 +55,7 @@
  */
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/workqueue.h>
 #include <linux/wait.h>
@@ -158,7 +159,7 @@ static int hwahc_op_start(struct usb_hcd *usb_hcd)
 		goto error_set_cluster_id;
 
 	usb_hcd->uses_new_polling = 1;
-	usb_hcd->poll_rh = 1;
+	set_bit(HCD_FLAG_POLL_RH, &usb_hcd->flags);
 	usb_hcd->state = HC_STATE_RUNNING;
 	result = 0;
 out:
@@ -170,25 +171,6 @@ error_set_cluster_id:
 error_cluster_id_get:
 	goto out;
 
-}
-
-static int hwahc_op_suspend(struct usb_hcd *usb_hcd, pm_message_t msg)
-{
-	struct wusbhc *wusbhc = usb_hcd_to_wusbhc(usb_hcd);
-	struct hwahc *hwahc = container_of(wusbhc, struct hwahc, wusbhc);
-	dev_err(wusbhc->dev, "%s (%p [%p], 0x%lx) UNIMPLEMENTED\n", __func__,
-		usb_hcd, hwahc, *(unsigned long *) &msg);
-	return -ENOSYS;
-}
-
-static int hwahc_op_resume(struct usb_hcd *usb_hcd)
-{
-	struct wusbhc *wusbhc = usb_hcd_to_wusbhc(usb_hcd);
-	struct hwahc *hwahc = container_of(wusbhc, struct hwahc, wusbhc);
-
-	dev_err(wusbhc->dev, "%s (%p [%p]) UNIMPLEMENTED\n", __func__,
-		usb_hcd, hwahc);
-	return -ENOSYS;
 }
 
 /*
@@ -598,8 +580,6 @@ static struct hc_driver hwahc_hc_driver = {
 	.flags = HCD_USB2,		/* FIXME */
 	.reset = hwahc_op_reset,
 	.start = hwahc_op_start,
-	.pci_suspend = hwahc_op_suspend,
-	.pci_resume = hwahc_op_resume,
 	.stop = hwahc_op_stop,
 	.get_frame_number = hwahc_op_get_frame_number,
 	.urb_enqueue = hwahc_op_urb_enqueue,
@@ -796,7 +776,7 @@ static int hwahc_probe(struct usb_interface *usb_iface,
 		goto error_alloc;
 	}
 	usb_hcd->wireless = 1;
-	usb_hcd->flags |= HCD_FLAG_SAW_IRQ;
+	set_bit(HCD_FLAG_SAW_IRQ, &usb_hcd->flags);
 	wusbhc = usb_hcd_to_wusbhc(usb_hcd);
 	hwahc = container_of(wusbhc, struct hwahc, wusbhc);
 	hwahc_init(hwahc);

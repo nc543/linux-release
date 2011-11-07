@@ -32,6 +32,7 @@
 #include <linux/string.h>
 #include <linux/inet.h>
 #include <linux/list.h>
+#include <linux/pagemap.h>
 #include <asm/uaccess.h>
 #include <linux/idr.h>
 #include <net/9p/9p.h>
@@ -40,6 +41,7 @@
 #include "v9fs.h"
 #include "v9fs_vfs.h"
 #include "fid.h"
+#include "cache.h"
 
 static const struct file_operations v9fs_cached_file_operations;
 
@@ -57,9 +59,13 @@ int v9fs_file_open(struct inode *inode, struct file *file)
 	struct p9_fid *fid;
 	int omode;
 
-	P9_DPRINTK(P9_DEBUG_VFS, "inode: %p file: %p \n", inode, file);
+	P9_DPRINTK(P9_DEBUG_VFS, "inode: %p file: %p\n", inode, file);
 	v9ses = v9fs_inode2v9ses(inode);
-	omode = v9fs_uflags2omode(file->f_flags, v9fs_extended(v9ses));
+	if (v9fs_proto_dotl(v9ses))
+		omode = file->f_flags;
+	else
+		omode = v9fs_uflags2omode(file->f_flags,
+					v9fs_proto_dotu(v9ses));
 	fid = file->private_data;
 	if (!fid) {
 		fid = v9fs_fid_clone(file->f_path.dentry);
@@ -71,11 +77,12 @@ int v9fs_file_open(struct inode *inode, struct file *file)
 			p9_client_clunk(fid);
 			return err;
 		}
-		if (omode & P9_OTRUNC) {
-			inode->i_size = 0;
+		if (file->f_flags & O_TRUNC) {
+			i_size_write(inode, 0);
 			inode->i_blocks = 0;
 		}
-		if ((file->f_flags & O_APPEND) && (!v9fs_extended(v9ses)))
+		if ((file->f_flags & O_APPEND) &&
+			(!v9fs_proto_dotu(v9ses) && !v9fs_proto_dotl(v9ses)))
 			generic_file_llseek(file, 0, SEEK_END);
 	}
 
@@ -85,6 +92,10 @@ int v9fs_file_open(struct inode *inode, struct file *file)
 		/* enable cached file options */
 		if(file->f_op == &v9fs_file_operations)
 			file->f_op = &v9fs_cached_file_operations;
+
+#ifdef CONFIG_9P_FSCACHE
+		v9fs_cache_inode_set_cookie(inode, file);
+#endif
 	}
 
 	return 0;
@@ -108,7 +119,7 @@ static int v9fs_file_lock(struct file *filp, int cmd, struct file_lock *fl)
 	P9_DPRINTK(P9_DEBUG_VFS, "filp: %p lock: %p\n", filp, fl);
 
 	/* No mandatory locks */
-	if (__mandatory_lock(inode))
+	if (__mandatory_lock(inode) && fl->fl_type != F_UNLCK)
 		return -ENOLCK;
 
 	if ((IS_SETLK(cmd) || IS_SETLKW(cmd)) && fl->fl_type != F_UNLCK) {
@@ -133,7 +144,7 @@ ssize_t
 v9fs_file_readn(struct file *filp, char *data, char __user *udata, u32 count,
 	       u64 offset)
 {
-	int n, total;
+	int n, total, size;
 	struct p9_fid *fid = filp->private_data;
 
 	P9_DPRINTK(P9_DEBUG_VFS, "fid %d offset %llu count %d\n", fid->fid,
@@ -141,6 +152,7 @@ v9fs_file_readn(struct file *filp, char *data, char __user *udata, u32 count,
 
 	n = 0;
 	total = 0;
+	size = fid->iounit ? fid->iounit : fid->clnt->msize - P9_IOHDRSZ;
 	do {
 		n = p9_client_read(fid, data, udata, offset, count);
 		if (n <= 0)
@@ -154,7 +166,7 @@ v9fs_file_readn(struct file *filp, char *data, char __user *udata, u32 count,
 		offset += n;
 		count -= n;
 		total += n;
-	} while (count > 0 && n == (fid->clnt->msize - P9_IOHDRSZ));
+	} while (count > 0 && n == size);
 
 	if (n < 0)
 		total = n;
@@ -177,11 +189,13 @@ v9fs_file_read(struct file *filp, char __user *udata, size_t count,
 {
 	int ret;
 	struct p9_fid *fid;
+	size_t size;
 
 	P9_DPRINTK(P9_DEBUG_VFS, "count %zu offset %lld\n", count, *offset);
 	fid = filp->private_data;
 
-	if (count > (fid->clnt->msize - P9_IOHDRSZ))
+	size = fid->iounit ? fid->iounit : fid->clnt->msize - P9_IOHDRSZ;
+	if (count > size)
 		ret = v9fs_file_readn(filp, NULL, udata, count, *offset);
 	else
 		ret = p9_client_read(fid, NULL, udata, *offset, count);
@@ -209,7 +223,8 @@ v9fs_file_write(struct file *filp, const char __user * data,
 	struct p9_fid *fid;
 	struct p9_client *clnt;
 	struct inode *inode = filp->f_path.dentry->d_inode;
-	int origin = *offset;
+	loff_t origin = *offset;
+	unsigned long pg_start, pg_end;
 
 	P9_DPRINTK(P9_DEBUG_VFS, "data %p count %d offset %x\n", data,
 		(int)count, (int)*offset);
@@ -217,15 +232,13 @@ v9fs_file_write(struct file *filp, const char __user * data,
 	fid = filp->private_data;
 	clnt = fid->clnt;
 
-	rsize = fid->iounit;
-	if (!rsize || rsize > clnt->msize-P9_IOHDRSZ)
-		rsize = clnt->msize - P9_IOHDRSZ;
+	rsize = fid->iounit ? fid->iounit : clnt->msize - P9_IOHDRSZ;
 
 	do {
 		if (count < rsize)
 			rsize = count;
 
-		n = p9_client_write(fid, NULL, data+total, *offset+total,
+		n = p9_client_write(fid, NULL, data+total, origin+total,
 									rsize);
 		if (n <= 0)
 			break;
@@ -234,20 +247,35 @@ v9fs_file_write(struct file *filp, const char __user * data,
 	} while (count > 0);
 
 	if (total > 0) {
-		invalidate_inode_pages2_range(inode->i_mapping, origin,
-								origin+total);
+		pg_start = origin >> PAGE_CACHE_SHIFT;
+		pg_end = (origin + total - 1) >> PAGE_CACHE_SHIFT;
+		if (inode->i_mapping && inode->i_mapping->nrpages)
+			invalidate_inode_pages2_range(inode->i_mapping,
+						      pg_start, pg_end);
 		*offset += total;
-	}
-
-	if (*offset > inode->i_size) {
-		inode->i_size = *offset;
-		inode->i_blocks = (inode->i_size + 512 - 1) >> 9;
+		i_size_write(inode, i_size_read(inode) + total);
+		inode->i_blocks = (i_size_read(inode) + 512 - 1) >> 9;
 	}
 
 	if (n < 0)
 		return n;
 
 	return total;
+}
+
+static int v9fs_file_fsync(struct file *filp, int datasync)
+{
+	struct p9_fid *fid;
+	struct p9_wstat wstat;
+	int retval;
+
+	P9_DPRINTK(P9_DEBUG_VFS, "filp %p datasync %x\n", filp, datasync);
+
+	fid = filp->private_data;
+	v9fs_blank_wstat(&wstat);
+
+	retval = p9_client_wstat(fid, &wstat);
+	return retval;
 }
 
 static const struct file_operations v9fs_cached_file_operations = {
@@ -259,6 +287,7 @@ static const struct file_operations v9fs_cached_file_operations = {
 	.release = v9fs_dir_release,
 	.lock = v9fs_file_lock,
 	.mmap = generic_file_readonly_mmap,
+	.fsync = v9fs_file_fsync,
 };
 
 const struct file_operations v9fs_file_operations = {
@@ -269,4 +298,16 @@ const struct file_operations v9fs_file_operations = {
 	.release = v9fs_dir_release,
 	.lock = v9fs_file_lock,
 	.mmap = generic_file_readonly_mmap,
+	.fsync = v9fs_file_fsync,
+};
+
+const struct file_operations v9fs_file_operations_dotl = {
+	.llseek = generic_file_llseek,
+	.read = v9fs_file_read,
+	.write = v9fs_file_write,
+	.open = v9fs_file_open,
+	.release = v9fs_dir_release,
+	.lock = v9fs_file_lock,
+	.mmap = generic_file_readonly_mmap,
+	.fsync = v9fs_file_fsync,
 };

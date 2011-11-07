@@ -20,9 +20,11 @@
  */
 
 #include <linux/list.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <keys/user-type.h>
 #include <linux/key-type.h>
+#include <linux/inet.h>
 #include "cifsglob.h"
 #include "cifs_spnego.h"
 #include "cifs_debug.h"
@@ -73,9 +75,6 @@ struct key_type cifs_spnego_key_type = {
  * strlen(";sec=ntlmsspi") */
 #define MAX_MECH_STR_LEN	13
 
-/* max possible addr len eg FEDC:BA98:7654:3210:FEDC:BA98:7654:3210/128 */
-#define MAX_IPV6_ADDR_LEN	43
-
 /* strlen of "host=" */
 #define HOST_KEY_LEN		5
 
@@ -85,8 +84,14 @@ struct key_type cifs_spnego_key_type = {
 /* strlen of ";uid=0x" */
 #define UID_KEY_LEN		7
 
+/* strlen of ";creduid=0x" */
+#define CREDUID_KEY_LEN		11
+
 /* strlen of ";user=" */
 #define USER_KEY_LEN		6
+
+/* strlen of ";pid=0x" */
+#define PID_KEY_LEN		7
 
 /* get a key struct with a SPNEGO security blob, suitable for session setup */
 struct key *
@@ -102,10 +107,12 @@ cifs_get_spnego_key(struct cifsSesInfo *sesInfo)
 	   host=hostname sec=mechanism uid=0xFF user=username */
 	desc_len = MAX_VER_STR_LEN +
 		   HOST_KEY_LEN + strlen(hostname) +
-		   IP_KEY_LEN + MAX_IPV6_ADDR_LEN +
+		   IP_KEY_LEN + INET6_ADDRSTRLEN +
 		   MAX_MECH_STR_LEN +
 		   UID_KEY_LEN + (sizeof(uid_t) * 2) +
-		   USER_KEY_LEN + strlen(sesInfo->userName) + 1;
+		   CREDUID_KEY_LEN + (sizeof(uid_t) * 2) +
+		   USER_KEY_LEN + strlen(sesInfo->userName) +
+		   PID_KEY_LEN + (sizeof(pid_t) * 2) + 1;
 
 	spnego_key = ERR_PTR(-ENOMEM);
 	description = kzalloc(desc_len, GFP_KERNEL);
@@ -123,16 +130,16 @@ cifs_get_spnego_key(struct cifsSesInfo *sesInfo)
 	if (server->addr.sockAddr.sin_family == AF_INET)
 		sprintf(dp, "ip4=%pI4", &server->addr.sockAddr.sin_addr);
 	else if (server->addr.sockAddr.sin_family == AF_INET6)
-		sprintf(dp, "ip6=%pi6", &server->addr.sockAddr6.sin6_addr);
+		sprintf(dp, "ip6=%pI6", &server->addr.sockAddr6.sin6_addr);
 	else
 		goto out;
 
 	dp = description + strlen(description);
 
 	/* for now, only sec=krb5 and sec=mskrb5 are valid */
-	if (server->secType == Kerberos)
+	if (server->sec_kerberos)
 		sprintf(dp, ";sec=krb5");
-	else if (server->secType == MSKerberos)
+	else if (server->sec_mskerberos)
 		sprintf(dp, ";sec=mskrb5");
 	else
 		goto out;
@@ -141,9 +148,15 @@ cifs_get_spnego_key(struct cifsSesInfo *sesInfo)
 	sprintf(dp, ";uid=0x%x", sesInfo->linux_uid);
 
 	dp = description + strlen(description);
+	sprintf(dp, ";creduid=0x%x", sesInfo->cred_uid);
+
+	dp = description + strlen(description);
 	sprintf(dp, ";user=%s", sesInfo->userName);
 
-	cFYI(1, ("key description = %s", description));
+	dp = description + strlen(description);
+	sprintf(dp, ";pid=0x%x", current->pid);
+
+	cFYI(1, "key description = %s", description);
 	spnego_key = request_key(&cifs_spnego_key_type, description, "");
 
 #ifdef CONFIG_CIFS_DEBUG2

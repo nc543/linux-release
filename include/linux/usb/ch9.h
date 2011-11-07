@@ -191,6 +191,10 @@ struct usb_ctrlrequest {
 #define USB_DT_WIRE_ADAPTER		0x21
 #define USB_DT_RPIPE			0x22
 #define USB_DT_CS_RADIO_CONTROL		0x23
+/* From the T10 UAS specification */
+#define USB_DT_PIPE_USAGE		0x24
+/* From the USB 3.0 spec */
+#define	USB_DT_SS_ENDPOINT_COMP		0x30
 
 /* Conventional codes for class-specific descriptors.  The convention is
  * defined in the USB "Common Class" Spec (3.11).  Individual class specs
@@ -255,6 +259,8 @@ struct usb_device_descriptor {
 #define USB_CLASS_MISC			0xef
 #define USB_CLASS_APP_SPEC		0xfe
 #define USB_CLASS_VENDOR_SPEC		0xff
+
+#define USB_SUBCLASS_VENDOR_SPEC	0xff
 
 /*-------------------------------------------------------------------------*/
 
@@ -345,6 +351,12 @@ struct usb_endpoint_descriptor {
  */
 #define USB_ENDPOINT_NUMBER_MASK	0x0f	/* in bEndpointAddress */
 #define USB_ENDPOINT_DIR_MASK		0x80
+
+#define USB_ENDPOINT_SYNCTYPE		0x0c
+#define USB_ENDPOINT_SYNC_NONE		(0 << 2)
+#define USB_ENDPOINT_SYNC_ASYNC		(1 << 2)
+#define USB_ENDPOINT_SYNC_ADAPTIVE	(2 << 2)
+#define USB_ENDPOINT_SYNC_SYNC		(3 << 2)
 
 #define USB_ENDPOINT_XFERTYPE_MASK	0x03	/* in bmAttributes */
 #define USB_ENDPOINT_XFER_CONTROL	0
@@ -465,7 +477,7 @@ static inline int usb_endpoint_xfer_isoc(
 static inline int usb_endpoint_is_bulk_in(
 				const struct usb_endpoint_descriptor *epd)
 {
-	return (usb_endpoint_xfer_bulk(epd) && usb_endpoint_dir_in(epd));
+	return usb_endpoint_xfer_bulk(epd) && usb_endpoint_dir_in(epd);
 }
 
 /**
@@ -478,7 +490,7 @@ static inline int usb_endpoint_is_bulk_in(
 static inline int usb_endpoint_is_bulk_out(
 				const struct usb_endpoint_descriptor *epd)
 {
-	return (usb_endpoint_xfer_bulk(epd) && usb_endpoint_dir_out(epd));
+	return usb_endpoint_xfer_bulk(epd) && usb_endpoint_dir_out(epd);
 }
 
 /**
@@ -491,7 +503,7 @@ static inline int usb_endpoint_is_bulk_out(
 static inline int usb_endpoint_is_int_in(
 				const struct usb_endpoint_descriptor *epd)
 {
-	return (usb_endpoint_xfer_int(epd) && usb_endpoint_dir_in(epd));
+	return usb_endpoint_xfer_int(epd) && usb_endpoint_dir_in(epd);
 }
 
 /**
@@ -504,7 +516,7 @@ static inline int usb_endpoint_is_int_in(
 static inline int usb_endpoint_is_int_out(
 				const struct usb_endpoint_descriptor *epd)
 {
-	return (usb_endpoint_xfer_int(epd) && usb_endpoint_dir_out(epd));
+	return usb_endpoint_xfer_int(epd) && usb_endpoint_dir_out(epd);
 }
 
 /**
@@ -517,7 +529,7 @@ static inline int usb_endpoint_is_int_out(
 static inline int usb_endpoint_is_isoc_in(
 				const struct usb_endpoint_descriptor *epd)
 {
-	return (usb_endpoint_xfer_isoc(epd) && usb_endpoint_dir_in(epd));
+	return usb_endpoint_xfer_isoc(epd) && usb_endpoint_dir_in(epd);
 }
 
 /**
@@ -530,8 +542,24 @@ static inline int usb_endpoint_is_isoc_in(
 static inline int usb_endpoint_is_isoc_out(
 				const struct usb_endpoint_descriptor *epd)
 {
-	return (usb_endpoint_xfer_isoc(epd) && usb_endpoint_dir_out(epd));
+	return usb_endpoint_xfer_isoc(epd) && usb_endpoint_dir_out(epd);
 }
+
+/*-------------------------------------------------------------------------*/
+
+/* USB_DT_SS_ENDPOINT_COMP: SuperSpeed Endpoint Companion descriptor */
+struct usb_ss_ep_comp_descriptor {
+	__u8  bLength;
+	__u8  bDescriptorType;
+
+	__u8  bMaxBurst;
+	__u8  bmAttributes;
+	__u16 wBytesPerInterval;
+} __attribute__ ((packed));
+
+#define USB_DT_SS_EP_COMP_SIZE		6
+/* Bits 4:0 of bmAttributes if this is a bulk endpoint */
+#define USB_SS_MAX_STREAMS(p)		(1 << (p & 0x1f))
 
 /*-------------------------------------------------------------------------*/
 
@@ -751,7 +779,8 @@ enum usb_device_speed {
 	USB_SPEED_UNKNOWN = 0,			/* enumerating */
 	USB_SPEED_LOW, USB_SPEED_FULL,		/* usb 1.1 */
 	USB_SPEED_HIGH,				/* usb 2.0 */
-	USB_SPEED_VARIABLE,			/* wireless (usb 2.5) */
+	USB_SPEED_WIRELESS,			/* wireless (usb 2.5) */
+	USB_SPEED_SUPER,			/* usb 3.0 */
 };
 
 enum usb_device_state {

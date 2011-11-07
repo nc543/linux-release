@@ -18,7 +18,9 @@
 
 #include <linux/module.h>
 #include <linux/fd.h>
+#include <linux/slab.h>
 #include <linux/blkdev.h>
+#include <linux/smp_lock.h>
 #include <linux/hdreg.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
@@ -514,7 +516,7 @@ static int floppy_read_sectors(struct floppy_state *fs,
 			ret = swim_read_sector(fs, side, track, sector,
 						buffer);
 			if (try-- == 0)
-				return -1;
+				return -EIO;
 		} while (ret != 512);
 
 		buffer += ret;
@@ -528,45 +530,31 @@ static void redo_fd_request(struct request_queue *q)
 	struct request *req;
 	struct floppy_state *fs;
 
-	while ((req = elv_next_request(q))) {
+	req = blk_fetch_request(q);
+	while (req) {
+		int err = -EIO;
 
 		fs = req->rq_disk->private_data;
-		if (req->sector < 0 || req->sector >= fs->total_secs) {
-			end_request(req, 0);
-			continue;
-		}
-		if (req->current_nr_sectors == 0) {
-			end_request(req, 1);
-			continue;
-		}
-		if (!fs->disk_in) {
-			end_request(req, 0);
-			continue;
-		}
-		if (rq_data_dir(req) == WRITE) {
-			if (fs->write_protected) {
-				end_request(req, 0);
-				continue;
-			}
-		}
+		if (blk_rq_pos(req) >= fs->total_secs)
+			goto done;
+		if (!fs->disk_in)
+			goto done;
+		if (rq_data_dir(req) == WRITE && fs->write_protected)
+			goto done;
+
 		switch (rq_data_dir(req)) {
 		case WRITE:
 			/* NOT IMPLEMENTED */
-			end_request(req, 0);
 			break;
 		case READ:
-			if (floppy_read_sectors(fs, req->sector,
-						req->current_nr_sectors,
-						req->buffer)) {
-				end_request(req, 0);
-				continue;
-			}
-			req->nr_sectors -= req->current_nr_sectors;
-			req->sector += req->current_nr_sectors;
-			req->buffer += req->current_nr_sectors * 512;
-			end_request(req, 1);
+			err = floppy_read_sectors(fs, blk_rq_pos(req),
+						  blk_rq_cur_sectors(req),
+						  req->buffer);
 			break;
 		}
+	done:
+		if (!__blk_end_request_cur(req, err))
+			req = blk_fetch_request(q);
 	}
 }
 
@@ -674,11 +662,23 @@ out:
 	return err;
 }
 
+static int floppy_unlocked_open(struct block_device *bdev, fmode_t mode)
+{
+	int ret;
+
+	lock_kernel();
+	ret = floppy_open(bdev, mode);
+	unlock_kernel();
+
+	return ret;
+}
+
 static int floppy_release(struct gendisk *disk, fmode_t mode)
 {
 	struct floppy_state *fs = disk->private_data;
 	struct swim __iomem *base = fs->swd->base;
 
+	lock_kernel();
 	if (fs->ref_count < 0)
 		fs->ref_count = 0;
 	else if (fs->ref_count > 0)
@@ -686,6 +686,7 @@ static int floppy_release(struct gendisk *disk, fmode_t mode)
 
 	if (fs->ref_count == 0)
 		swim_motor(base, OFF);
+	unlock_kernel();
 
 	return 0;
 }
@@ -703,7 +704,9 @@ static int floppy_ioctl(struct block_device *bdev, fmode_t mode,
 	case FDEJECT:
 		if (fs->ref_count != 1)
 			return -EBUSY;
+		lock_kernel();
 		err = floppy_eject(fs);
+		unlock_kernel();
 		return err;
 
 	case FDGETPRM:
@@ -762,11 +765,11 @@ static int floppy_revalidate(struct gendisk *disk)
 	return !fs->disk_in;
 }
 
-static struct block_device_operations floppy_fops = {
+static const struct block_device_operations floppy_fops = {
 	.owner		 = THIS_MODULE,
-	.open		 = floppy_open,
+	.open		 = floppy_unlocked_open,
 	.release	 = floppy_release,
-	.locked_ioctl	 = floppy_ioctl,
+	.ioctl		 = floppy_ioctl,
 	.getgeo		 = floppy_getgeo,
 	.media_changed	 = floppy_check_change,
 	.revalidate_disk = floppy_revalidate,
@@ -878,7 +881,7 @@ static int __devinit swim_probe(struct platform_device *dev)
 	struct swim_priv *swd;
 	int ret;
 
-	res = platform_get_resource_byname(dev, IORESOURCE_MEM, "swim-regs");
+	res = platform_get_resource(dev, IORESOURCE_MEM, 0);
 	if (!res) {
 		ret = -ENODEV;
 		goto out;
@@ -956,7 +959,7 @@ static int __devexit swim_remove(struct platform_device *dev)
 
 	iounmap(swd->base);
 
-	res = platform_get_resource_byname(dev, IORESOURCE_MEM, "swim-regs");
+	res = platform_get_resource(dev, IORESOURCE_MEM, 0);
 	if (res)
 		release_mem_region(res->start, resource_size(res));
 

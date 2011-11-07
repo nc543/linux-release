@@ -19,20 +19,10 @@
 #include <linux/module.h>
 #include <linux/spinlock.h>
 
-#include <mach/hardware.h>
 #include <mach/mux.h>
+#include <mach/common.h>
 
-static const struct mux_config *mux_table;
-static unsigned long pin_table_sz;
-
-int __init davinci_mux_register(const struct mux_config *pins,
-				unsigned long size)
-{
-	mux_table = pins;
-	pin_table_sz = size;
-
-	return 0;
-}
+static void __iomem *pinmux_base;
 
 /*
  * Sets the DAVINCI MUX register based on the table
@@ -40,23 +30,29 @@ int __init davinci_mux_register(const struct mux_config *pins,
 int __init_or_module davinci_cfg_reg(const unsigned long index)
 {
 	static DEFINE_SPINLOCK(mux_spin_lock);
-	void __iomem *base = IO_ADDRESS(DAVINCI_SYSTEM_MODULE_BASE);
+	struct davinci_soc_info *soc_info = &davinci_soc_info;
 	unsigned long flags;
 	const struct mux_config *cfg;
 	unsigned int reg_orig = 0, reg = 0;
 	unsigned int mask, warn = 0;
 
-	if (!mux_table)
-		BUG();
+	if (WARN_ON(!soc_info->pinmux_pins))
+		return -ENODEV;
 
-	if (index >= pin_table_sz) {
+	if (!pinmux_base) {
+		pinmux_base = ioremap(soc_info->pinmux_base, SZ_4K);
+		if (WARN_ON(!pinmux_base))
+			return -ENOMEM;
+	}
+
+	if (index >= soc_info->pinmux_pins_num) {
 		printk(KERN_ERR "Invalid pin mux index: %lu (%lu)\n",
-		       index, pin_table_sz);
+		       index, soc_info->pinmux_pins_num);
 		dump_stack();
 		return -ENODEV;
 	}
 
-	cfg = &mux_table[index];
+	cfg = &soc_info->pinmux_pins[index];
 
 	if (cfg->name == NULL) {
 		printk(KERN_ERR "No entry for the specified index\n");
@@ -68,7 +64,7 @@ int __init_or_module davinci_cfg_reg(const unsigned long index)
 		unsigned	tmp1, tmp2;
 
 		spin_lock_irqsave(&mux_spin_lock, flags);
-		reg_orig = __raw_readl(base + cfg->mux_reg);
+		reg_orig = __raw_readl(pinmux_base + cfg->mux_reg);
 
 		mask = (cfg->mask << cfg->mask_offset);
 		tmp1 = reg_orig & mask;
@@ -80,7 +76,7 @@ int __init_or_module davinci_cfg_reg(const unsigned long index)
 		if (tmp1 != tmp2)
 			warn = 1;
 
-		__raw_writel(reg, base + cfg->mux_reg);
+		__raw_writel(reg, pinmux_base + cfg->mux_reg);
 		spin_unlock_irqrestore(&mux_spin_lock, flags);
 	}
 
@@ -101,3 +97,17 @@ int __init_or_module davinci_cfg_reg(const unsigned long index)
 	return 0;
 }
 EXPORT_SYMBOL(davinci_cfg_reg);
+
+int __init_or_module davinci_cfg_reg_list(const short pins[])
+{
+	int i, error = -EINVAL;
+
+	if (pins)
+		for (i = 0; pins[i] >= 0; i++) {
+			error = davinci_cfg_reg(pins[i]);
+			if (error)
+				break;
+		}
+
+	return error;
+}

@@ -16,6 +16,7 @@
 #include <linux/platform_device.h>
 #include <linux/gpio.h>
 #include <linux/interrupt.h>
+#include <linux/usb/gpio_vbus.h>
 
 #include <asm/mach-types.h>
 #include <asm/sizes.h>
@@ -27,6 +28,9 @@
 #include <mach/colibri.h>
 #include <mach/pxafb.h>
 #include <mach/ohci.h>
+#include <mach/audio.h>
+#include <mach/pxa27x-udc.h>
+#include <mach/udc.h>
 
 #include "generic.h"
 #include "devices.h"
@@ -100,6 +104,42 @@ void __init colibri_pxa320_init_ohci(void)
 static inline void colibri_pxa320_init_ohci(void) {}
 #endif /* CONFIG_USB_OHCI_HCD || CONFIG_USB_OHCI_HCD_MODULE */
 
+#if defined(CONFIG_USB_GADGET_PXA27X)||defined(CONFIG_USB_GADGET_PXA27X_MODULE)
+static struct gpio_vbus_mach_info colibri_pxa320_gpio_vbus_info = {
+	.gpio_vbus		= mfp_to_gpio(MFP_PIN_GPIO96),
+	.gpio_pullup		= -1,
+};
+
+static struct platform_device colibri_pxa320_gpio_vbus = {
+	.name	= "gpio-vbus",
+	.id	= -1,
+	.dev	= {
+		.platform_data	= &colibri_pxa320_gpio_vbus_info,
+	},
+};
+
+static void colibri_pxa320_udc_command(int cmd)
+{
+	if (cmd == PXA2XX_UDC_CMD_CONNECT)
+		UP2OCR = UP2OCR_HXOE | UP2OCR_DPPUE;
+	else if (cmd == PXA2XX_UDC_CMD_DISCONNECT)
+		UP2OCR = UP2OCR_HXOE;
+}
+
+static struct pxa2xx_udc_mach_info colibri_pxa320_udc_info __initdata = {
+	.udc_command		= colibri_pxa320_udc_command,
+	.gpio_pullup		= -1,
+};
+
+static void __init colibri_pxa320_init_udc(void)
+{
+	pxa_set_udc_info(&colibri_pxa320_udc_info);
+	platform_device_register(&colibri_pxa320_gpio_vbus);
+}
+#else
+static inline void colibri_pxa320_init_udc(void) {}
+#endif
+
 static mfp_cfg_t colibri_pxa320_mmc_pin_config[] __initdata = {
 	GPIO22_MMC1_CLK,
 	GPIO23_MMC1_CMD,
@@ -145,7 +185,8 @@ static void __init colibri_pxa320_init_lcd(void)
 static inline void colibri_pxa320_init_lcd(void) {}
 #endif
 
-#if defined(SND_AC97_CODEC) || defined(SND_AC97_CODEC_MODULE)
+#if	defined(CONFIG_SND_AC97_CODEC) || \
+	defined(CONFIG_SND_AC97_CODEC_MODULE)
 static mfp_cfg_t colibri_pxa320_ac97_pin_config[] __initdata = {
 	GPIO34_AC97_SYSCLK,
 	GPIO35_AC97_SDATA_IN_0,
@@ -164,15 +205,53 @@ static inline void __init colibri_pxa320_init_ac97(void)
 static inline void colibri_pxa320_init_ac97(void) {}
 #endif
 
+/*
+ * The following configuration is verified to work with the Toradex Orchid
+ * carrier board
+ */
+static mfp_cfg_t colibri_pxa320_uart_pin_config[] __initdata = {
+	/* UART 1 configuration (may be set by bootloader) */
+	GPIO99_UART1_CTS,
+	GPIO104_UART1_RTS,
+	GPIO97_UART1_RXD,
+	GPIO98_UART1_TXD,
+	GPIO101_UART1_DTR,
+	GPIO103_UART1_DSR,
+	GPIO100_UART1_DCD,
+	GPIO102_UART1_RI,
+
+	/* UART 2 configuration */
+	GPIO109_UART2_CTS,
+	GPIO112_UART2_RTS,
+	GPIO110_UART2_RXD,
+	GPIO111_UART2_TXD,
+
+	/* UART 3 configuration */
+	GPIO30_UART3_RXD,
+	GPIO31_UART3_TXD,
+};
+
+static void __init colibri_pxa320_init_uart(void)
+{
+	pxa3xx_mfp_config(ARRAY_AND_SIZE(colibri_pxa320_uart_pin_config));
+}
+
 void __init colibri_pxa320_init(void)
 {
+	pxa_set_ffuart_info(NULL);
+	pxa_set_btuart_info(NULL);
+	pxa_set_stuart_info(NULL);
+
 	colibri_pxa320_init_eth();
 	colibri_pxa320_init_ohci();
+	colibri_pxa3xx_init_nand();
 	colibri_pxa320_init_lcd();
 	colibri_pxa3xx_init_lcd(mfp_to_gpio(GPIO49_GPIO));
 	colibri_pxa320_init_ac97();
 	colibri_pxa3xx_init_mmc(ARRAY_AND_SIZE(colibri_pxa320_mmc_pin_config),
 				mfp_to_gpio(MFP_PIN_GPIO28));
+	colibri_pxa320_init_uart();
+	colibri_pxa320_init_udc();
 }
 
 MACHINE_START(COLIBRI320, "Toradex Colibri PXA320")

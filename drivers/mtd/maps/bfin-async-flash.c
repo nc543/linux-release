@@ -6,7 +6,7 @@
  * for example.  All board-specific configuration goes in your
  * board resources file.
  *
- * Copyright 2000 Nicolas Pitre <nico@cam.org>
+ * Copyright 2000 Nicolas Pitre <nico@fluxnic.net>
  * Copyright 2005-2008 Analog Devices Inc.
  *
  * Enter bugs at http://blackfin.uclinux.org/
@@ -22,6 +22,7 @@
 #include <linux/mtd/partitions.h>
 #include <linux/mtd/physmap.h>
 #include <linux/platform_device.h>
+#include <linux/slab.h>
 #include <linux/types.h>
 
 #include <asm/blackfin.h>
@@ -40,6 +41,9 @@ struct async_state {
 	uint32_t flash_ambctl0, flash_ambctl1;
 	uint32_t save_ambctl0, save_ambctl1;
 	unsigned long irq_flags;
+#ifdef CONFIG_MTD_PARTITIONS
+	struct mtd_partition *parts;
+#endif
 };
 
 static void switch_to_flash(struct async_state *state)
@@ -66,7 +70,7 @@ static void switch_back(struct async_state *state)
 	local_irq_restore(state->irq_flags);
 }
 
-static map_word bfin_read(struct map_info *map, unsigned long ofs)
+static map_word bfin_flash_read(struct map_info *map, unsigned long ofs)
 {
 	struct async_state *state = (struct async_state *)map->map_priv_1;
 	uint16_t word;
@@ -82,7 +86,7 @@ static map_word bfin_read(struct map_info *map, unsigned long ofs)
 	return test;
 }
 
-static void bfin_copy_from(struct map_info *map, void *to, unsigned long from, ssize_t len)
+static void bfin_flash_copy_from(struct map_info *map, void *to, unsigned long from, ssize_t len)
 {
 	struct async_state *state = (struct async_state *)map->map_priv_1;
 
@@ -93,7 +97,7 @@ static void bfin_copy_from(struct map_info *map, void *to, unsigned long from, s
 	switch_back(state);
 }
 
-static void bfin_write(struct map_info *map, map_word d1, unsigned long ofs)
+static void bfin_flash_write(struct map_info *map, map_word d1, unsigned long ofs)
 {
 	struct async_state *state = (struct async_state *)map->map_priv_1;
 	uint16_t d;
@@ -108,7 +112,7 @@ static void bfin_write(struct map_info *map, map_word d1, unsigned long ofs)
 	switch_back(state);
 }
 
-static void bfin_copy_to(struct map_info *map, unsigned long to, const void *from, ssize_t len)
+static void bfin_flash_copy_to(struct map_info *map, unsigned long to, const void *from, ssize_t len)
 {
 	struct async_state *state = (struct async_state *)map->map_priv_1;
 
@@ -137,10 +141,10 @@ static int __devinit bfin_flash_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	state->map.name       = DRIVER_NAME;
-	state->map.read       = bfin_read;
-	state->map.copy_from  = bfin_copy_from;
-	state->map.write      = bfin_write;
-	state->map.copy_to    = bfin_copy_to;
+	state->map.read       = bfin_flash_read;
+	state->map.copy_from  = bfin_flash_copy_from;
+	state->map.write      = bfin_flash_write;
+	state->map.copy_to    = bfin_flash_copy_to;
 	state->map.bankwidth  = pdata->width;
 	state->map.size       = memory->end - memory->start + 1;
 	state->map.virt       = (void __iomem *)memory->start;
@@ -170,6 +174,7 @@ static int __devinit bfin_flash_probe(struct platform_device *pdev)
 	if (ret > 0) {
 		pr_devinit(KERN_NOTICE DRIVER_NAME ": Using commandline partition definition\n");
 		add_mtd_partitions(state->mtd, pdata->parts, ret);
+		state->parts = pdata->parts;
 
 	} else if (pdata->nr_parts) {
 		pr_devinit(KERN_NOTICE DRIVER_NAME ": Using board partition definition\n");
@@ -193,6 +198,7 @@ static int __devexit bfin_flash_remove(struct platform_device *pdev)
 	gpio_free(state->enet_flash_pin);
 #ifdef CONFIG_MTD_PARTITIONS
 	del_mtd_partitions(state->mtd);
+	kfree(state->parts);
 #endif
 	map_destroy(state->mtd);
 	kfree(state);

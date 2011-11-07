@@ -368,7 +368,7 @@ static int __init iga_init(struct fb_info *info, struct iga_par *par)
 	return 1;
 }
 
-int __init igafb_init(void)
+static int __init igafb_init(void)
 {
         struct fb_info *info;
         struct pci_dev *pdev;
@@ -395,17 +395,16 @@ int __init igafb_init(void)
 	/* We leak a reference here but as it cannot be unloaded this is
 	   fine. If you write unload code remember to free it in unload */
 	
-	size = sizeof(struct fb_info) + sizeof(struct iga_par) + sizeof(u32)*16;
+	size = sizeof(struct iga_par) + sizeof(u32)*16;
 
-        info = kzalloc(size, GFP_ATOMIC);
+	info = framebuffer_alloc(size, &pdev->dev);
         if (!info) {
                 printk("igafb_init: can't alloc fb_info\n");
 		 pci_dev_put(pdev);
                 return -ENOMEM;
         }
 
-	par = (struct iga_par *) (info + 1);
-	
+	par = info->par;
 
 	if ((addr = pdev->resource[0].start) == 0) {
                 printk("igafb_init: no memory start\n");
@@ -526,13 +525,13 @@ int __init igafb_init(void)
 	info->var = default_var;
 	info->fix = igafb_fix;
 	info->pseudo_palette = (void *)(par + 1);
-	info->device = &pdev->dev;
 
 	if (!iga_init(info, par)) {
 		iounmap((void *)par->io_base);
 		iounmap(info->screen_base);
 		kfree(par->mmap_map);
 		kfree(info);
+		return -ENODEV;
         }
 
 #ifdef CONFIG_SPARC
@@ -558,7 +557,7 @@ int __init igafb_init(void)
 	return 0;
 }
 
-int __init igafb_setup(char *options)
+static int __init igafb_setup(char *options)
 {
     char *this_opt;
 

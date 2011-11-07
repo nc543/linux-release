@@ -36,9 +36,8 @@ struct tcp_congestion_ops;
  * (i.e. things that depend on the address family)
  */
 struct inet_connection_sock_af_ops {
-	int	    (*queue_xmit)(struct sk_buff *skb, int ipfragok);
-	void	    (*send_check)(struct sock *sk, int len,
-				  struct sk_buff *skb);
+	int	    (*queue_xmit)(struct sk_buff *skb);
+	void	    (*send_check)(struct sock *sk, struct sk_buff *skb);
 	int	    (*rebuild_header)(struct sock *sk);
 	int	    (*conn_request)(struct sock *sk, struct sk_buff *skb);
 	struct sock *(*syn_recv_sock)(struct sock *sk, struct sk_buff *skb,
@@ -48,13 +47,13 @@ struct inet_connection_sock_af_ops {
 	u16	    net_header_len;
 	u16	    sockaddr_len;
 	int	    (*setsockopt)(struct sock *sk, int level, int optname, 
-				  char __user *optval, int optlen);
+				  char __user *optval, unsigned int optlen);
 	int	    (*getsockopt)(struct sock *sk, int level, int optname, 
 				  char __user *optval, int __user *optlen);
 #ifdef CONFIG_COMPAT
 	int	    (*compat_setsockopt)(struct sock *sk,
 				int level, int optname,
-				char __user *optval, int optlen);
+				char __user *optval, unsigned int optlen);
 	int	    (*compat_getsockopt)(struct sock *sk,
 				int level, int optname,
 				char __user *optval, int __user *optlen);
@@ -332,5 +331,5 @@ extern void inet_csk_addr2sockaddr(struct sock *sk, struct sockaddr *uaddr);
 extern int inet_csk_compat_getsockopt(struct sock *sk, int level, int optname,
 				      char __user *optval, int __user *optlen);
 extern int inet_csk_compat_setsockopt(struct sock *sk, int level, int optname,
-				      char __user *optval, int optlen);
+				      char __user *optval, unsigned int optlen);
 #endif /* _INET_CONNECTION_SOCK_H */

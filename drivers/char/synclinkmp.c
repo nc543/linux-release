@@ -812,13 +812,15 @@ static void close(struct tty_struct *tty, struct file *filp)
 
 	if (tty_port_close_start(&info->port, tty, filp) == 0)
 		goto cleanup;
-		
+
+	mutex_lock(&info->port.mutex);
  	if (info->port.flags & ASYNC_INITIALIZED)
  		wait_until_sent(tty, info->timeout);
 
 	flush_buffer(tty);
 	tty_ldisc_flush(tty);
 	shutdown(info);
+	mutex_unlock(&info->port.mutex);
 
 	tty_port_close_end(&info->port, tty);
 	info->port.tty = NULL;
@@ -834,6 +836,7 @@ cleanup:
 static void hangup(struct tty_struct *tty)
 {
 	SLMP_INFO *info = tty->driver_data;
+	unsigned long flags;
 
 	if (debug_level >= DEBUG_LEVEL_INFO)
 		printk("%s(%d):%s hangup()\n",
@@ -842,12 +845,16 @@ static void hangup(struct tty_struct *tty)
 	if (sanity_check(info, tty->name, "hangup"))
 		return;
 
+	mutex_lock(&info->port.mutex);
 	flush_buffer(tty);
 	shutdown(info);
 
+	spin_lock_irqsave(&info->port.lock, flags);
 	info->port.count = 0;
 	info->port.flags &= ~ASYNC_NORMAL_ACTIVE;
 	info->port.tty = NULL;
+	spin_unlock_irqrestore(&info->port.lock, flags);
+	mutex_unlock(&info->port.mutex);
 
 	wake_up_interruptible(&info->port.open_wait);
 }
@@ -1061,9 +1068,7 @@ static void wait_until_sent(struct tty_struct *tty, int timeout)
 	if (sanity_check(info, tty->name, "wait_until_sent"))
 		return;
 
-	lock_kernel();
-
-	if (!(info->port.flags & ASYNC_INITIALIZED))
+	if (!test_bit(ASYNCB_INITIALIZED, &info->port.flags))
 		goto exit;
 
 	orig_jiffies = jiffies;
@@ -1093,8 +1098,10 @@ static void wait_until_sent(struct tty_struct *tty, int timeout)
 				break;
 		}
 	} else {
-		//TODO: determine if there is something similar to USC16C32
-		// 	TXSTATUS_ALL_SENT status
+		/*
+		 * TODO: determine if there is something similar to USC16C32
+		 * 	 TXSTATUS_ALL_SENT status
+		 */
 		while ( info->tx_active && info->tx_enabled) {
 			msleep_interruptible(jiffies_to_msecs(char_time));
 			if (signal_pending(current))
@@ -1105,7 +1112,6 @@ static void wait_until_sent(struct tty_struct *tty, int timeout)
 	}
 
 exit:
-	unlock_kernel();
 	if (debug_level >= DEBUG_LEVEL_INFO)
 		printk("%s(%d):%s wait_until_sent() exit\n",
 			 __FILE__,__LINE__, info->device_name );
@@ -1121,7 +1127,6 @@ static int write_room(struct tty_struct *tty)
 	if (sanity_check(info, tty->name, "write_room"))
 		return 0;
 
-	lock_kernel();
 	if (info->params.mode == MGSL_MODE_HDLC) {
 		ret = (info->tx_active) ? 0 : HDLC_MAX_FRAME_SIZE;
 	} else {
@@ -1129,7 +1134,6 @@ static int write_room(struct tty_struct *tty)
 		if (ret < 0)
 			ret = 0;
 	}
-	unlock_kernel();
 
 	if (debug_level >= DEBUG_LEVEL_INFO)
 		printk("%s(%d):%s write_room()=%d\n",
@@ -1250,7 +1254,7 @@ static void tx_release(struct tty_struct *tty)
  *
  * Return Value:	0 if success, otherwise error code
  */
-static int do_ioctl(struct tty_struct *tty, struct file *file,
+static int ioctl(struct tty_struct *tty, struct file *file,
 		 unsigned int cmd, unsigned long arg)
 {
 	SLMP_INFO *info = tty->driver_data;
@@ -1338,16 +1342,6 @@ static int do_ioctl(struct tty_struct *tty, struct file *file,
 		return -ENOIOCTLCMD;
 	}
 	return 0;
-}
-
-static int ioctl(struct tty_struct *tty, struct file *file,
-		 unsigned int cmd, unsigned long arg)
-{
-	int ret;
-	lock_kernel();
-	ret = do_ioctl(tty, file, cmd, arg);
-	unlock_kernel();
-	return ret;
 }
 
 /*
@@ -1607,10 +1601,9 @@ static int hdlcdev_attach(struct net_device *dev, unsigned short encoding,
  *
  * skb  socket buffer containing HDLC frame
  * dev  pointer to network device structure
- *
- * returns 0 if success, otherwise error code
  */
-static int hdlcdev_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t hdlcdev_xmit(struct sk_buff *skb,
+				      struct net_device *dev)
 {
 	SLMP_INFO *info = dev_to_port(dev);
 	unsigned long flags;
@@ -1641,7 +1634,7 @@ static int hdlcdev_xmit(struct sk_buff *skb, struct net_device *dev)
 	 	tx_start(info);
 	spin_unlock_irqrestore(&info->lock,flags);
 
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /**
@@ -2883,7 +2876,9 @@ static int get_stats(SLMP_INFO * info, struct mgsl_icount __user *user_icount)
 	if (!user_icount) {
 		memset(&info->icount, 0, sizeof(info->icount));
 	} else {
+		mutex_lock(&info->port.mutex);
 		COPY_TO_USER(err, user_icount, &info->icount, sizeof(struct mgsl_icount));
+		mutex_unlock(&info->port.mutex);
 		if (err)
 			return -EFAULT;
 	}
@@ -2898,7 +2893,9 @@ static int get_params(SLMP_INFO * info, MGSL_PARAMS __user *user_params)
 		printk("%s(%d):%s get_params()\n",
 			 __FILE__,__LINE__, info->device_name);
 
+	mutex_lock(&info->port.mutex);
 	COPY_TO_USER(err,user_params, &info->params, sizeof(MGSL_PARAMS));
+	mutex_unlock(&info->port.mutex);
 	if (err) {
 		if ( debug_level >= DEBUG_LEVEL_INFO )
 			printk( "%s(%d):%s get_params() user buffer copy failed\n",
@@ -2926,11 +2923,13 @@ static int set_params(SLMP_INFO * info, MGSL_PARAMS __user *new_params)
 		return -EFAULT;
 	}
 
+	mutex_lock(&info->port.mutex);
 	spin_lock_irqsave(&info->lock,flags);
 	memcpy(&info->params,&tmp_params,sizeof(MGSL_PARAMS));
 	spin_unlock_irqrestore(&info->lock,flags);
 
  	change_params(info);
+	mutex_unlock(&info->port.mutex);
 
 	return 0;
 }
@@ -3277,13 +3276,16 @@ static int carrier_raised(struct tty_port *port)
 	return (info->serial_signals & SerialSignal_DCD) ? 1 : 0;
 }
 
-static void raise_dtr_rts(struct tty_port *port)
+static void dtr_rts(struct tty_port *port, int on)
 {
 	SLMP_INFO *info = container_of(port, SLMP_INFO, port);
 	unsigned long flags;
 
 	spin_lock_irqsave(&info->lock,flags);
-	info->serial_signals |= SerialSignal_RTS + SerialSignal_DTR;
+	if (on)
+		info->serial_signals |= SerialSignal_RTS + SerialSignal_DTR;
+	else
+		info->serial_signals &= ~(SerialSignal_RTS + SerialSignal_DTR);
  	set_signals(info);
 	spin_unlock_irqrestore(&info->lock,flags);
 }
@@ -3363,7 +3365,9 @@ static int block_til_ready(struct tty_struct *tty, struct file *filp,
 			printk("%s(%d):%s block_til_ready() count=%d\n",
 				 __FILE__,__LINE__, tty->driver->name, port->count );
 
+		tty_unlock();
 		schedule();
+		tty_lock();
 	}
 
 	set_current_state(TASK_RUNNING);
@@ -3746,7 +3750,7 @@ static void add_device(SLMP_INFO *info)
 
 static const struct tty_port_operations port_ops = {
 	.carrier_raised = carrier_raised,
-	.raise_dtr_rts = raise_dtr_rts,
+	.dtr_rts = dtr_rts,
 };
 
 /* Allocate and initialize a device instance structure

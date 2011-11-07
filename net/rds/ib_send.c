@@ -243,8 +243,12 @@ void rds_ib_send_cq_comp_handler(struct ib_cq *cq, void *context)
 				struct rds_message *rm;
 
 				rm = rds_send_get_message(conn, send->s_op);
-				if (rm)
+				if (rm) {
+					if (rm->m_rdma_op)
+						rds_ib_send_unmap_rdma(ic, rm->m_rdma_op);
 					rds_ib_send_rdma_complete(rm, wc.status);
+					rds_message_put(rm);
+				}
 			}
 
 			oldest = (oldest + 1) % ic->i_send_ring.w_nr;
@@ -252,8 +256,8 @@ void rds_ib_send_cq_comp_handler(struct ib_cq *cq, void *context)
 
 		rds_ib_ring_free(&ic->i_send_ring, completed);
 
-		if (test_and_clear_bit(RDS_LL_SEND_FULL, &conn->c_flags)
-		 || test_bit(0, &conn->c_map_queued))
+		if (test_and_clear_bit(RDS_LL_SEND_FULL, &conn->c_flags) ||
+		    test_bit(0, &conn->c_map_queued))
 			queue_delayed_work(rds_wq, &conn->c_send_w, 0);
 
 		/* We expect errors as the qp is drained during shutdown */
@@ -311,7 +315,7 @@ void rds_ib_send_cq_comp_handler(struct ib_cq *cq, void *context)
  * and using atomic_cmpxchg when updating the two counters.
  */
 int rds_ib_send_grab_credits(struct rds_ib_connection *ic,
-			     u32 wanted, u32 *adv_credits, int need_posted)
+			     u32 wanted, u32 *adv_credits, int need_posted, int max_posted)
 {
 	unsigned int avail, posted, got = 0, advertise;
 	long oldval, newval;
@@ -351,7 +355,7 @@ try_again:
 	 * available.
 	 */
 	if (posted && (got || need_posted)) {
-		advertise = min_t(unsigned int, posted, RDS_MAX_ADV_CREDIT);
+		advertise = min_t(unsigned int, posted, max_posted);
 		newval -= IB_SET_POST_CREDITS(advertise);
 	}
 
@@ -482,6 +486,13 @@ int rds_ib_xmit(struct rds_connection *conn, struct rds_message *rm,
 	BUG_ON(off % RDS_FRAG_SIZE);
 	BUG_ON(hdr_off != 0 && hdr_off != sizeof(struct rds_header));
 
+	/* Do not send cong updates to IB loopback */
+	if (conn->c_loopback
+	    && rm->m_inc.i_hdr.h_flags & RDS_FLAG_CONG_BITMAP) {
+		rds_cong_map_updated(conn->c_fcong, ~(u64) 0);
+		return sizeof(struct rds_header) + RDS_CONG_MAP_BYTES;
+	}
+
 	/* FIXME we may overallocate here */
 	if (be32_to_cpu(rm->m_inc.i_hdr.h_len) == 0)
 		i = 1;
@@ -498,7 +509,7 @@ int rds_ib_xmit(struct rds_connection *conn, struct rds_message *rm,
 
 	credit_alloc = work_alloc;
 	if (ic->i_flowctl) {
-		credit_alloc = rds_ib_send_grab_credits(ic, work_alloc, &posted, 0);
+		credit_alloc = rds_ib_send_grab_credits(ic, work_alloc, &posted, 0, RDS_MAX_ADV_CREDIT);
 		adv_credits += posted;
 		if (credit_alloc < work_alloc) {
 			rds_ib_ring_unalloc(&ic->i_send_ring, work_alloc - credit_alloc);
@@ -506,7 +517,7 @@ int rds_ib_xmit(struct rds_connection *conn, struct rds_message *rm,
 			flow_controlled++;
 		}
 		if (work_alloc == 0) {
-			rds_ib_ring_unalloc(&ic->i_send_ring, work_alloc);
+			set_bit(RDS_LL_SEND_FULL, &conn->c_flags);
 			rds_ib_stats_inc(s_ib_tx_throttle);
 			ret = -ENOMEM;
 			goto out;
@@ -571,11 +582,10 @@ int rds_ib_xmit(struct rds_connection *conn, struct rds_message *rm,
 		/*
 		 * Update adv_credits since we reset the ACK_REQUIRED bit.
 		 */
-		rds_ib_send_grab_credits(ic, 0, &posted, 1);
+		rds_ib_send_grab_credits(ic, 0, &posted, 1, RDS_MAX_ADV_CREDIT - adv_credits);
 		adv_credits += posted;
 		BUG_ON(adv_credits > 255);
-	} else if (ic->i_rm != rm)
-		BUG();
+	}
 
 	send = &ic->i_sends[pos];
 	first = send;
@@ -714,8 +724,8 @@ add_header:
 			ic->i_rm = prev->s_rm;
 			prev->s_rm = NULL;
 		}
-		/* Finesse this later */
-		BUG();
+
+		rds_ib_conn_error(ic->conn, "ib_post_send failed\n");
 		goto out;
 	}
 

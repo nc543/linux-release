@@ -33,6 +33,8 @@ struct r10_private_data_s {
 					       * 1 stripe.
 					       */
 
+	sector_t		dev_sectors;  /* temp copy of mddev->dev_sectors */
+
 	int chunk_shift; /* shift from chunks to sectors */
 	sector_t chunk_mask;
 
@@ -57,15 +59,14 @@ struct r10_private_data_s {
 	mempool_t *r10bio_pool;
 	mempool_t *r10buf_pool;
 	struct page		*tmppage;
+
+	/* When taking over an array from a different personality, we store
+	 * the new thread here until we fully activate the array.
+	 */
+	struct mdk_thread_s	*thread;
 };
 
 typedef struct r10_private_data_s conf_t;
-
-/*
- * this is the only point in the RAID code where we violate
- * C type safety. mddev->private is an 'opaque' pointer.
- */
-#define mddev_to_conf(mddev) ((conf_t *) mddev->private)
 
 /*
  * this is our 'private' RAID10 bio.

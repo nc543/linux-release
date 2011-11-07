@@ -16,21 +16,13 @@
 #include <linux/init.h>
 #include <linux/zorro.h>
 #include <linux/module.h>
+#include <linux/platform_device.h>
 
 #include <asm/setup.h>
 #include <asm/amigahw.h>
 #include <asm/amigaints.h>
 #include <asm/amigayle.h>
 
-
-    /*
-     *  Bases of the IDE interfaces
-     */
-
-#define GAYLE_BASE_4000	0xdd2020	/* A4000/A4000T */
-#define GAYLE_BASE_1200	0xda0000	/* A1200/A600 and E-Matrix 530 */
-
-#define GAYLE_IDEREG_SIZE	0x2000
 
     /*
      *  Offsets from one of the above bases
@@ -66,31 +58,26 @@ MODULE_PARM_DESC(doubler, "enable support for IDE doublers");
      *  Check and acknowledge the interrupt status
      */
 
-static int gayle_ack_intr_a4000(ide_hwif_t *hwif)
+static int gayle_test_irq(ide_hwif_t *hwif)
 {
-    unsigned char ch;
+	unsigned char ch;
 
-    ch = z_readb(hwif->io_ports.irq_addr);
-    if (!(ch & GAYLE_IRQ_IDE))
-	return 0;
-    return 1;
+	ch = z_readb(hwif->io_ports.irq_addr);
+	if (!(ch & GAYLE_IRQ_IDE))
+		return 0;
+	return 1;
 }
 
-static int gayle_ack_intr_a1200(ide_hwif_t *hwif)
+static void gayle_a1200_clear_irq(ide_drive_t *drive)
 {
-    unsigned char ch;
+	ide_hwif_t *hwif = drive->hwif;
 
-    ch = z_readb(hwif->io_ports.irq_addr);
-    if (!(ch & GAYLE_IRQ_IDE))
-	return 0;
-    (void)z_readb(hwif->io_ports.status_addr);
-    z_writeb(0x7c, hwif->io_ports.irq_addr);
-    return 1;
+	(void)z_readb(hwif->io_ports.status_addr);
+	z_writeb(0x7c, hwif->io_ports.irq_addr);
 }
 
-static void __init gayle_setup_ports(hw_regs_t *hw, unsigned long base,
-				     unsigned long ctl, unsigned long irq_port,
-				     ide_ack_intr_t *ack_intr)
+static void __init gayle_setup_ports(struct ide_hw *hw, unsigned long base,
+				     unsigned long ctl, unsigned long irq_port)
 {
 	int i;
 
@@ -105,79 +92,111 @@ static void __init gayle_setup_ports(hw_regs_t *hw, unsigned long base,
 	hw->io_ports.irq_addr = irq_port;
 
 	hw->irq = IRQ_AMIGA_PORTS;
-	hw->ack_intr = ack_intr;
-
-	hw->chipset = ide_generic;
 }
+
+static const struct ide_port_ops gayle_a4000_port_ops = {
+	.test_irq		= gayle_test_irq,
+};
+
+static const struct ide_port_ops gayle_a1200_port_ops = {
+	.clear_irq		= gayle_a1200_clear_irq,
+	.test_irq		= gayle_test_irq,
+};
 
 static const struct ide_port_info gayle_port_info = {
 	.host_flags		= IDE_HFLAG_MMIO | IDE_HFLAG_SERIALIZE |
 				  IDE_HFLAG_NO_DMA,
 	.irq_flags		= IRQF_SHARED,
+	.chipset		= ide_generic,
 };
 
     /*
      *  Probe for a Gayle IDE interface (and optionally for an IDE doubler)
      */
 
-static int __init gayle_init(void)
+static int __init amiga_gayle_ide_probe(struct platform_device *pdev)
 {
-    unsigned long phys_base, res_start, res_n;
-    unsigned long base, ctrlport, irqport;
-    ide_ack_intr_t *ack_intr;
-    int a4000, i, rc;
-    hw_regs_t hw[GAYLE_NUM_HWIFS], *hws[] = { NULL, NULL, NULL, NULL };
+	struct resource *res;
+	struct gayle_ide_platform_data *pdata;
+	unsigned long base, ctrlport, irqport;
+	unsigned int i;
+	int error;
+	struct ide_hw hw[GAYLE_NUM_HWIFS], *hws[GAYLE_NUM_HWIFS];
+	struct ide_port_info d = gayle_port_info;
+	struct ide_host *host;
 
-    if (!MACH_IS_AMIGA)
-	return -ENODEV;
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!res)
+		return -ENODEV;
 
-    if ((a4000 = AMIGAHW_PRESENT(A4000_IDE)) || AMIGAHW_PRESENT(A1200_IDE))
-	goto found;
-
-#ifdef CONFIG_ZORRO
-    if (zorro_find_device(ZORRO_PROD_MTEC_VIPER_MK_V_E_MATRIX_530_SCSI_IDE,
-			  NULL))
-	goto found;
-#endif
-    return -ENODEV;
-
-found:
-	printk(KERN_INFO "ide: Gayle IDE controller (A%d style%s)\n",
-			 a4000 ? 4000 : 1200,
-			 ide_doubler ? ", IDE doubler" : "");
-
-	if (a4000) {
-	    phys_base = GAYLE_BASE_4000;
-	    irqport = (unsigned long)ZTWO_VADDR(GAYLE_IRQ_4000);
-	    ack_intr = gayle_ack_intr_a4000;
-	} else {
-	    phys_base = GAYLE_BASE_1200;
-	    irqport = (unsigned long)ZTWO_VADDR(GAYLE_IRQ_1200);
-	    ack_intr = gayle_ack_intr_a1200;
-	}
-
-	res_start = ((unsigned long)phys_base) & ~(GAYLE_NEXT_PORT-1);
-	res_n = GAYLE_IDEREG_SIZE;
-
-	if (!request_mem_region(res_start, res_n, "IDE"))
+	if (!request_mem_region(res->start, resource_size(res), "IDE"))
 		return -EBUSY;
 
-    for (i = 0; i < GAYLE_NUM_PROBE_HWIFS; i++) {
-	base = (unsigned long)ZTWO_VADDR(phys_base + i * GAYLE_NEXT_PORT);
-	ctrlport = GAYLE_HAS_CONTROL_REG ? (base + GAYLE_CONTROL) : 0;
+	pdata = pdev->dev.platform_data;
+	pr_info("ide: Gayle IDE controller (A%u style%s)\n",
+		pdata->explicit_ack ? 1200 : 4000,
+		ide_doubler ? ", IDE doubler" : "");
 
-	gayle_setup_ports(&hw[i], base, ctrlport, irqport, ack_intr);
+	base = (unsigned long)ZTWO_VADDR(pdata->base);
+	ctrlport = 0;
+	irqport = (unsigned long)ZTWO_VADDR(pdata->irqport);
+	if (pdata->explicit_ack)
+		d.port_ops = &gayle_a1200_port_ops;
+	else
+		d.port_ops = &gayle_a4000_port_ops;
 
-	hws[i] = &hw[i];
-    }
+	for (i = 0; i < GAYLE_NUM_PROBE_HWIFS; i++, base += GAYLE_NEXT_PORT) {
+		if (GAYLE_HAS_CONTROL_REG)
+			ctrlport = base + GAYLE_CONTROL;
 
-    rc = ide_host_add(&gayle_port_info, hws, NULL);
-    if (rc)
-	release_mem_region(res_start, res_n);
+		gayle_setup_ports(&hw[i], base, ctrlport, irqport);
+		hws[i] = &hw[i];
+	}
 
-    return rc;
+	error = ide_host_add(&d, hws, i, &host);
+	if (error)
+		goto out;
+
+	platform_set_drvdata(pdev, host);
+	return 0;
+
+out:
+	release_mem_region(res->start, resource_size(res));
+	return error;
 }
 
-module_init(gayle_init);
+static int __exit amiga_gayle_ide_remove(struct platform_device *pdev)
+{
+	struct ide_host *host = platform_get_drvdata(pdev);
+	struct resource *res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+
+	ide_host_remove(host);
+	release_mem_region(res->start, resource_size(res));
+	return 0;
+}
+
+static struct platform_driver amiga_gayle_ide_driver = {
+	.remove = __exit_p(amiga_gayle_ide_remove),
+	.driver   = {
+		.name	= "amiga-gayle-ide",
+		.owner	= THIS_MODULE,
+	},
+};
+
+static int __init amiga_gayle_ide_init(void)
+{
+	return platform_driver_probe(&amiga_gayle_ide_driver,
+				     amiga_gayle_ide_probe);
+}
+
+module_init(amiga_gayle_ide_init);
+
+static void __exit amiga_gayle_ide_exit(void)
+{
+	platform_driver_unregister(&amiga_gayle_ide_driver);
+}
+
+module_exit(amiga_gayle_ide_exit);
 
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("platform:amiga-gayle-ide");

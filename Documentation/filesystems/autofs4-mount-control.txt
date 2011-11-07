@@ -146,7 +146,7 @@ found to be inadequate, in this case. The Generic Netlink system was
 used for this as raw Netlink would lead to a significant increase in
 complexity. There's no question that the Generic Netlink system is an
 elegant solution for common case ioctl functions but it's not a complete
-replacement probably because it's primary purpose in life is to be a
+replacement probably because its primary purpose in life is to be a
 message bus implementation rather than specifically an ioctl replacement.
 While it would be possible to work around this there is one concern
 that lead to the decision to not use it. This is that the autofs
@@ -369,7 +369,7 @@ The call requires an initialized struct autofs_dev_ioctl. There are two
 possible variations. Both use the path field set to the path of the mount
 point to check and the size field adjusted appropriately. One uses the
 ioctlfd field to identify a specific mount point to check while the other
-variation uses the path and optionaly arg1 set to an autofs mount type.
+variation uses the path and optionally arg1 set to an autofs mount type.
 The call returns 1 if this is a mount point and sets arg1 to the device
 number of the mount and field arg2 to the relevant super block magic
 number (described below) or 0 if it isn't a mountpoint. In both cases

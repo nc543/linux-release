@@ -24,30 +24,34 @@
  */
 
 #include <linux/delay.h>
+#include <linux/gpio.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
+#include <linux/pm.h>
 #include <asm/mach-au1x00/au1000.h>
 #include <asm/mach-pb1x00/pb1000.h>
+#include <asm/reboot.h>
 #include <prom.h>
 
-
-struct au1xxx_irqmap __initdata au1xxx_irq_map[] = {
-	{ AU1000_GPIO_15, IRQF_TRIGGER_LOW, 0 },
-};
-
+#include "../platform.h"
 
 const char *get_system_type(void)
 {
 	return "Alchemy Pb1000";
 }
 
-void board_reset(void)
+static void board_reset(char *c)
 {
+	asm volatile ("jr %0" : : "r" (0xbfc00000));
 }
 
-void __init board_init_irq(void)
+static void board_power_off(void)
 {
-	au1xxx_setup_irqmap(au1xxx_irq_map, ARRAY_SIZE(au1xxx_irq_map));
+	while (1)
+		asm volatile (
+		"	.set	mips32					\n"
+		"	wait						\n"
+		"	.set	mips0					\n");
 }
 
 void __init board_setup(void)
@@ -56,14 +60,8 @@ void __init board_setup(void)
 	u32 sys_freqctrl, sys_clksrc;
 	u32 prid = read_c0_prid();
 
-#ifdef CONFIG_SERIAL_8250_CONSOLE
-	char *argptr = prom_getcmdline();
-	argptr = strstr(argptr, "console=");
-	if (argptr == NULL) {
-		argptr = prom_getcmdline();
-		strcat(argptr, " console=ttyS0,115200");
-	}
-#endif
+	sys_freqctrl = 0;
+	sys_clksrc = 0;
 
 	/* Set AUX clock to 12 MHz * 8 = 96 MHz */
 	au_writel(8, SYS_AUXPLL);
@@ -130,8 +128,11 @@ void __init board_setup(void)
 	pin_func |= SYS_PF_USB;
 
 	au_writel(pin_func, SYS_PINFUNC);
-	au_writel(0x2800, SYS_TRIOUTCLR);
-	au_writel(0x0030, SYS_OUTPUTCLR);
+
+	alchemy_gpio_direction_input(11);
+	alchemy_gpio_direction_input(13);
+	alchemy_gpio_direction_output(4, 0);
+	alchemy_gpio_direction_output(5, 0);
 #endif /* defined(CONFIG_USB_OHCI_HCD) || defined(CONFIG_USB_OHCI_HCD_MODULE) */
 
 	/* Make GPIO 15 an input (for interrupt line) */
@@ -140,7 +141,7 @@ void __init board_setup(void)
 	pin_func |= SYS_PF_I2S;
 	au_writel(pin_func, SYS_PINFUNC);
 
-	au_writel(0x8000, SYS_TRIOUTCLR);
+	alchemy_gpio_direction_input(15);
 
 	static_cfg0 = au_readl(MEM_STCFG0) & ~0xc00;
 	au_writel(static_cfg0, MEM_STCFG0);
@@ -188,4 +189,21 @@ void __init board_setup(void)
 		au_writel(au_readl(SYS_POWERCTRL) | (0x3 << 5), SYS_POWERCTRL);
 		break;
 	}
+
+	pm_power_off = board_power_off;
+	_machine_halt = board_power_off;
+	_machine_restart = board_reset;
 }
+
+static int __init pb1000_init_irq(void)
+{
+	set_irq_type(AU1000_GPIO15_INT, IRQF_TRIGGER_LOW);
+	return 0;
+}
+arch_initcall(pb1000_init_irq);
+
+static int __init pb1000_device_init(void)
+{
+	return db1x_register_norflash(8 * 1024 * 1024, 4, 0);
+}
+device_initcall(pb1000_device_init);

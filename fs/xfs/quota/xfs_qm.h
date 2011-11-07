@@ -72,17 +72,6 @@ extern kmem_zone_t	*qm_dqtrxzone;
 #define XFS_QM_MAX_DQCLUSTER_LOGSZ	3
 
 typedef xfs_dqhash_t	xfs_dqlist_t;
-/*
- * The freelist head. The first two fields match the first two in the
- * xfs_dquot_t structure (in xfs_dqmarker_t)
- */
-typedef struct xfs_frlist {
-       struct xfs_dquot *qh_next;
-       struct xfs_dquot *qh_prev;
-       struct mutex	 qh_lock;
-       uint		 qh_version;
-       uint		 qh_nelems;
-} xfs_frlist_t;
 
 /*
  * Quota Manager (global) structure. Lives only in core.
@@ -91,7 +80,9 @@ typedef struct xfs_qm {
 	xfs_dqlist_t	*qm_usr_dqhtable;/* udquot hash table */
 	xfs_dqlist_t	*qm_grp_dqhtable;/* gdquot hash table */
 	uint		 qm_dqhashmask;	 /* # buckets in dq hashtab - 1 */
-	xfs_frlist_t	 qm_dqfreelist;	 /* freelist of dquots */
+	struct list_head qm_dqfrlist;	 /* freelist of dquots */
+	struct mutex	 qm_dqfrlist_lock;
+	int		 qm_dqfrlist_cnt;
 	atomic_t	 qm_totaldquots; /* total incore dquots */
 	uint		 qm_nrefs;	 /* file systems with quota on */
 	int		 qm_dqfree_ratio;/* ratio of free to inuse dquots */
@@ -106,7 +97,9 @@ typedef struct xfs_qm {
 typedef struct xfs_quotainfo {
 	xfs_inode_t	*qi_uquotaip;	 /* user quota inode */
 	xfs_inode_t	*qi_gquotaip;	 /* group quota inode */
-	xfs_dqlist_t	 qi_dqlist;	 /* all dquots in filesys */
+	struct list_head qi_dqlist;	 /* all dquots in filesys */
+	struct mutex	 qi_dqlist_lock;
+	int		 qi_dquots;
 	int		 qi_dqreclaims;	 /* a change here indicates
 					    a removal in the dqlist */
 	time_t		 qi_btimelimit;	 /* limit for blks timer */
@@ -126,8 +119,6 @@ typedef struct xfs_quotainfo {
 	xfs_qcnt_t	 qi_rtbsoftlimit;/* default realtime blk soft limit */
 } xfs_quotainfo_t;
 
-
-extern xfs_dqtrxops_t	xfs_trans_dquot_ops;
 
 extern void	xfs_trans_mod_dquot(xfs_trans_t *, xfs_dquot_t *, uint, long);
 extern int	xfs_trans_reserve_quota_bydquots(xfs_trans_t *, xfs_mount_t *,
@@ -159,17 +150,11 @@ typedef struct xfs_dquot_acct {
 #define XFS_QM_RTBWARNLIMIT	5
 
 extern void		xfs_qm_destroy_quotainfo(xfs_mount_t *);
-extern void		xfs_qm_mount_quotas(xfs_mount_t *);
 extern int		xfs_qm_quotacheck(xfs_mount_t *);
-extern void		xfs_qm_unmount_quotadestroy(xfs_mount_t *);
-extern void		xfs_qm_unmount_quotas(xfs_mount_t *);
 extern int		xfs_qm_write_sb_changes(xfs_mount_t *, __int64_t);
-extern int		xfs_qm_sync(xfs_mount_t *, int);
 
 /* dquot stuff */
 extern boolean_t	xfs_qm_dqalloc_incore(xfs_dquot_t **);
-extern int		xfs_qm_dqattach(xfs_inode_t *, uint);
-extern void		xfs_qm_dqdetach(xfs_inode_t *);
 extern int		xfs_qm_dqpurge_all(xfs_mount_t *, uint);
 extern void		xfs_qm_dqrele_all_inodes(xfs_mount_t *, uint);
 
@@ -182,23 +167,6 @@ extern int		xfs_qm_scall_setqlim(xfs_mount_t *, xfs_dqid_t, uint,
 extern int		xfs_qm_scall_getqstat(xfs_mount_t *, fs_quota_stat_t *);
 extern int		xfs_qm_scall_quotaon(xfs_mount_t *, uint);
 extern int		xfs_qm_scall_quotaoff(xfs_mount_t *, uint);
-
-/* vop stuff */
-extern int		xfs_qm_vop_dqalloc(xfs_mount_t *, xfs_inode_t *,
-					uid_t, gid_t, prid_t, uint,
-					xfs_dquot_t **, xfs_dquot_t **);
-extern void		xfs_qm_vop_dqattach_and_dqmod_newinode(
-					xfs_trans_t *, xfs_inode_t *,
-					xfs_dquot_t *, xfs_dquot_t *);
-extern int		xfs_qm_vop_rename_dqattach(xfs_inode_t **);
-extern xfs_dquot_t *	xfs_qm_vop_chown(xfs_trans_t *, xfs_inode_t *,
-					xfs_dquot_t **, xfs_dquot_t *);
-extern int		xfs_qm_vop_chown_reserve(xfs_trans_t *, xfs_inode_t *,
-					xfs_dquot_t *, xfs_dquot_t *, uint);
-
-/* list stuff */
-extern void		xfs_qm_freelist_append(xfs_frlist_t *, xfs_dquot_t *);
-extern void		xfs_qm_freelist_unlink(xfs_dquot_t *);
 
 #ifdef DEBUG
 extern int		xfs_qm_internalqcheck(xfs_mount_t *);

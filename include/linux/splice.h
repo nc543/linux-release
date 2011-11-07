@@ -11,8 +11,7 @@
 #include <linux/pipe_fs_i.h>
 
 /*
- * splice is tied to pipes as a transport (at least for now), so we'll just
- * add the splice flags here.
+ * Flags passed in from splice/tee/vmsplice
  */
 #define SPLICE_F_MOVE	(0x01)	/* move pages instead of copying */
 #define SPLICE_F_NONBLOCK (0x02) /* don't block on the pipe splicing (but */
@@ -82,5 +81,12 @@ extern ssize_t splice_to_pipe(struct pipe_inode_info *,
 			      struct splice_pipe_desc *);
 extern ssize_t splice_direct_to_actor(struct file *, struct splice_desc *,
 				      splice_direct_actor *);
+
+/*
+ * for dynamic pipe sizing
+ */
+extern int splice_grow_spd(struct pipe_inode_info *, struct splice_pipe_desc *);
+extern void splice_shrink_spd(struct pipe_inode_info *,
+				struct splice_pipe_desc *);
 
 #endif

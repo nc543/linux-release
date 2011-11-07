@@ -54,7 +54,7 @@
 struct at24_data {
 	struct at24_platform_data chip;
 	struct memory_accessor macc;
-	bool use_smbus;
+	int use_smbus;
 
 	/*
 	 * Lock protects against activities from other Linux tasks,
@@ -158,6 +158,7 @@ static ssize_t at24_eeprom_read(struct at24_data *at24, char *buf,
 	struct i2c_msg msg[2];
 	u8 msgbuf[2];
 	struct i2c_client *client;
+	unsigned long timeout, read_time;
 	int status, i;
 
 	memset(msg, 0, sizeof(msg));
@@ -183,47 +184,85 @@ static ssize_t at24_eeprom_read(struct at24_data *at24, char *buf,
 	if (count > io_limit)
 		count = io_limit;
 
-	/* Smaller eeproms can work given some SMBus extension calls */
-	if (at24->use_smbus) {
+	switch (at24->use_smbus) {
+	case I2C_SMBUS_I2C_BLOCK_DATA:
+		/* Smaller eeproms can work given some SMBus extension calls */
 		if (count > I2C_SMBUS_BLOCK_MAX)
 			count = I2C_SMBUS_BLOCK_MAX;
-		status = i2c_smbus_read_i2c_block_data(client, offset,
-				count, buf);
-		dev_dbg(&client->dev, "smbus read %zu@%d --> %d\n",
-				count, offset, status);
-		return (status < 0) ? -EIO : status;
+		break;
+	case I2C_SMBUS_WORD_DATA:
+		count = 2;
+		break;
+	case I2C_SMBUS_BYTE_DATA:
+		count = 1;
+		break;
+	default:
+		/*
+		 * When we have a better choice than SMBus calls, use a
+		 * combined I2C message. Write address; then read up to
+		 * io_limit data bytes. Note that read page rollover helps us
+		 * here (unlike writes). msgbuf is u8 and will cast to our
+		 * needs.
+		 */
+		i = 0;
+		if (at24->chip.flags & AT24_FLAG_ADDR16)
+			msgbuf[i++] = offset >> 8;
+		msgbuf[i++] = offset;
+
+		msg[0].addr = client->addr;
+		msg[0].buf = msgbuf;
+		msg[0].len = i;
+
+		msg[1].addr = client->addr;
+		msg[1].flags = I2C_M_RD;
+		msg[1].buf = buf;
+		msg[1].len = count;
 	}
 
 	/*
-	 * When we have a better choice than SMBus calls, use a combined
-	 * I2C message. Write address; then read up to io_limit data bytes.
-	 * Note that read page rollover helps us here (unlike writes).
-	 * msgbuf is u8 and will cast to our needs.
+	 * Reads fail if the previous write didn't complete yet. We may
+	 * loop a few times until this one succeeds, waiting at least
+	 * long enough for one entire page write to work.
 	 */
-	i = 0;
-	if (at24->chip.flags & AT24_FLAG_ADDR16)
-		msgbuf[i++] = offset >> 8;
-	msgbuf[i++] = offset;
+	timeout = jiffies + msecs_to_jiffies(write_timeout);
+	do {
+		read_time = jiffies;
+		switch (at24->use_smbus) {
+		case I2C_SMBUS_I2C_BLOCK_DATA:
+			status = i2c_smbus_read_i2c_block_data(client, offset,
+					count, buf);
+			break;
+		case I2C_SMBUS_WORD_DATA:
+			status = i2c_smbus_read_word_data(client, offset);
+			if (status >= 0) {
+				buf[0] = status & 0xff;
+				buf[1] = status >> 8;
+				status = count;
+			}
+			break;
+		case I2C_SMBUS_BYTE_DATA:
+			status = i2c_smbus_read_byte_data(client, offset);
+			if (status >= 0) {
+				buf[0] = status;
+				status = count;
+			}
+			break;
+		default:
+			status = i2c_transfer(client->adapter, msg, 2);
+			if (status == 2)
+				status = count;
+		}
+		dev_dbg(&client->dev, "read %zu@%d --> %d (%ld)\n",
+				count, offset, status, jiffies);
 
-	msg[0].addr = client->addr;
-	msg[0].buf = msgbuf;
-	msg[0].len = i;
+		if (status == count)
+			return count;
 
-	msg[1].addr = client->addr;
-	msg[1].flags = I2C_M_RD;
-	msg[1].buf = buf;
-	msg[1].len = count;
+		/* REVISIT: at HZ=100, this is sloooow */
+		msleep(1);
+	} while (time_before(read_time, timeout));
 
-	status = i2c_transfer(client->adapter, msg, 2);
-	dev_dbg(&client->dev, "i2c read %zu@%d --> %d\n",
-			count, offset, status);
-
-	if (status == 2)
-		return count;
-	else if (status >= 0)
-		return -EIO;
-	else
-		return status;
+	return -ETIMEDOUT;
 }
 
 static ssize_t at24_read(struct at24_data *at24,
@@ -260,7 +299,8 @@ static ssize_t at24_read(struct at24_data *at24,
 	return retval;
 }
 
-static ssize_t at24_bin_read(struct kobject *kobj, struct bin_attribute *attr,
+static ssize_t at24_bin_read(struct file *filp, struct kobject *kobj,
+		struct bin_attribute *attr,
 		char *buf, loff_t off, size_t count)
 {
 	struct at24_data *at24;
@@ -381,7 +421,8 @@ static ssize_t at24_write(struct at24_data *at24, const char *buf, loff_t off,
 	return retval;
 }
 
-static ssize_t at24_bin_write(struct kobject *kobj, struct bin_attribute *attr,
+static ssize_t at24_bin_write(struct file *filp, struct kobject *kobj,
+		struct bin_attribute *attr,
 		char *buf, loff_t off, size_t count)
 {
 	struct at24_data *at24;
@@ -420,7 +461,7 @@ static int at24_probe(struct i2c_client *client, const struct i2c_device_id *id)
 {
 	struct at24_platform_data chip;
 	bool writable;
-	bool use_smbus = false;
+	int use_smbus = 0;
 	struct at24_data *at24;
 	int err;
 	unsigned i, num_addresses;
@@ -461,12 +502,19 @@ static int at24_probe(struct i2c_client *client, const struct i2c_device_id *id)
 			err = -EPFNOSUPPORT;
 			goto err_out;
 		}
-		if (!i2c_check_functionality(client->adapter,
+		if (i2c_check_functionality(client->adapter,
 				I2C_FUNC_SMBUS_READ_I2C_BLOCK)) {
+			use_smbus = I2C_SMBUS_I2C_BLOCK_DATA;
+		} else if (i2c_check_functionality(client->adapter,
+				I2C_FUNC_SMBUS_READ_WORD_DATA)) {
+			use_smbus = I2C_SMBUS_WORD_DATA;
+		} else if (i2c_check_functionality(client->adapter,
+				I2C_FUNC_SMBUS_READ_BYTE_DATA)) {
+			use_smbus = I2C_SMBUS_BYTE_DATA;
+		} else {
 			err = -EPFNOSUPPORT;
 			goto err_out;
 		}
-		use_smbus = true;
 	}
 
 	if (chip.flags & AT24_FLAG_TAKE8ADDR)
@@ -491,6 +539,7 @@ static int at24_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	 * Export the EEPROM bytes through sysfs, since that's convenient.
 	 * By default, only root should see the data (maybe passwords etc)
 	 */
+	sysfs_bin_attr_init(&at24->bin);
 	at24->bin.attr.name = "eeprom";
 	at24->bin.attr.mode = chip.flags & AT24_FLAG_IRUGO ? S_IRUGO : S_IRUSR;
 	at24->bin.read = at24_bin_read;
@@ -551,11 +600,16 @@ static int at24_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	dev_info(&client->dev, "%zu byte %s EEPROM %s\n",
 		at24->bin.size, client->name,
 		writable ? "(writable)" : "(read-only)");
+	if (use_smbus == I2C_SMBUS_WORD_DATA ||
+	    use_smbus == I2C_SMBUS_BYTE_DATA) {
+		dev_notice(&client->dev, "Falling back to %s reads, "
+			   "performance will suffer\n", use_smbus ==
+			   I2C_SMBUS_WORD_DATA ? "word" : "byte");
+	}
 	dev_dbg(&client->dev,
-		"page_size %d, num_addresses %d, write_max %d%s\n",
+		"page_size %d, num_addresses %d, write_max %d, use_smbus %d\n",
 		chip.page_size, num_addresses,
-		at24->write_max,
-		use_smbus ? ", use_smbus" : "");
+		at24->write_max, use_smbus);
 
 	/* export data to kernel code */
 	if (chip.setup)
@@ -589,7 +643,6 @@ static int __devexit at24_remove(struct i2c_client *client)
 
 	kfree(at24->writebuf);
 	kfree(at24);
-	i2c_set_clientdata(client, NULL);
 	return 0;
 }
 

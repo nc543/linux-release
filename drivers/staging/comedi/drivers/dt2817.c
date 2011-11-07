@@ -47,19 +47,32 @@ Configuration options:
 #define DT2817_CR 0
 #define DT2817_DATA 1
 
-static int dt2817_attach(struct comedi_device * dev, struct comedi_devconfig * it);
-static int dt2817_detach(struct comedi_device * dev);
+static int dt2817_attach(struct comedi_device *dev,
+			 struct comedi_devconfig *it);
+static int dt2817_detach(struct comedi_device *dev);
 static struct comedi_driver driver_dt2817 = {
-      driver_name:"dt2817",
-      module:THIS_MODULE,
-      attach:dt2817_attach,
-      detach:dt2817_detach,
+	.driver_name = "dt2817",
+	.module = THIS_MODULE,
+	.attach = dt2817_attach,
+	.detach = dt2817_detach,
 };
 
-COMEDI_INITCLEANUP(driver_dt2817);
+static int __init driver_dt2817_init_module(void)
+{
+	return comedi_driver_register(&driver_dt2817);
+}
 
-static int dt2817_dio_insn_config(struct comedi_device * dev, struct comedi_subdevice * s,
-	struct comedi_insn * insn, unsigned int * data)
+static void __exit driver_dt2817_cleanup_module(void)
+{
+	comedi_driver_unregister(&driver_dt2817);
+}
+
+module_init(driver_dt2817_init_module);
+module_exit(driver_dt2817_cleanup_module);
+
+static int dt2817_dio_insn_config(struct comedi_device *dev,
+				  struct comedi_subdevice *s,
+				  struct comedi_insn *insn, unsigned int *data)
 {
 	int mask;
 	int chan;
@@ -96,8 +109,9 @@ static int dt2817_dio_insn_config(struct comedi_device * dev, struct comedi_subd
 	return 1;
 }
 
-static int dt2817_dio_insn_bits(struct comedi_device * dev, struct comedi_subdevice * s,
-	struct comedi_insn * insn, unsigned int * data)
+static int dt2817_dio_insn_bits(struct comedi_device *dev,
+				struct comedi_subdevice *s,
+				struct comedi_insn *insn, unsigned int *data)
 {
 	unsigned int changed;
 
@@ -115,13 +129,13 @@ static int dt2817_dio_insn_bits(struct comedi_device * dev, struct comedi_subdev
 			outb(s->state & 0xff, dev->iobase + DT2817_DATA + 0);
 		if (changed & 0x0000ff00)
 			outb((s->state >> 8) & 0xff,
-				dev->iobase + DT2817_DATA + 1);
+			     dev->iobase + DT2817_DATA + 1);
 		if (changed & 0x00ff0000)
 			outb((s->state >> 16) & 0xff,
-				dev->iobase + DT2817_DATA + 2);
+			     dev->iobase + DT2817_DATA + 2);
 		if (changed & 0xff000000)
 			outb((s->state >> 24) & 0xff,
-				dev->iobase + DT2817_DATA + 3);
+			     dev->iobase + DT2817_DATA + 3);
 	}
 	data[1] = inb(dev->iobase + DT2817_DATA + 0);
 	data[1] |= (inb(dev->iobase + DT2817_DATA + 1) << 8);
@@ -131,7 +145,7 @@ static int dt2817_dio_insn_bits(struct comedi_device * dev, struct comedi_subdev
 	return 2;
 }
 
-static int dt2817_attach(struct comedi_device * dev, struct comedi_devconfig * it)
+static int dt2817_attach(struct comedi_device *dev, struct comedi_devconfig *it)
 {
 	int ret;
 	struct comedi_subdevice *s;
@@ -146,7 +160,8 @@ static int dt2817_attach(struct comedi_device * dev, struct comedi_devconfig * i
 	dev->iobase = iobase;
 	dev->board_name = "dt2817";
 
-	if ((ret = alloc_subdevices(dev, 1)) < 0)
+	ret = alloc_subdevices(dev, 1);
+	if (ret < 0)
 		return ret;
 
 	s = dev->subdevices + 0;
@@ -167,7 +182,7 @@ static int dt2817_attach(struct comedi_device * dev, struct comedi_devconfig * i
 	return 0;
 }
 
-static int dt2817_detach(struct comedi_device * dev)
+static int dt2817_detach(struct comedi_device *dev)
 {
 	printk("comedi%d: dt2817: remove\n", dev->minor);
 
@@ -176,3 +191,7 @@ static int dt2817_detach(struct comedi_device * dev)
 
 	return 0;
 }
+
+MODULE_AUTHOR("Comedi http://www.comedi.org");
+MODULE_DESCRIPTION("Comedi low-level driver");
+MODULE_LICENSE("GPL");

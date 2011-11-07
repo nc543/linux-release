@@ -165,6 +165,7 @@ enum {
 	MLX4_WQE_CTRL_IP_CSUM		= 1 << 4,
 	MLX4_WQE_CTRL_TCP_UDP_CSUM	= 1 << 5,
 	MLX4_WQE_CTRL_INS_VLAN		= 1 << 6,
+	MLX4_WQE_CTRL_STRONG_ORDER	= 1 << 7,
 };
 
 struct mlx4_wqe_ctrl_seg {
@@ -282,6 +283,13 @@ struct mlx4_wqe_raddr_seg {
 struct mlx4_wqe_atomic_seg {
 	__be64			swap_add;
 	__be64			compare;
+};
+
+struct mlx4_wqe_masked_atomic_seg {
+	__be64			swap_add;
+	__be64			compare;
+	__be64			swap_add_mask;
+	__be64			compare_mask;
 };
 
 struct mlx4_wqe_data_seg {

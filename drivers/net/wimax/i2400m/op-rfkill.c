@@ -34,6 +34,7 @@
  */
 #include "i2400m.h"
 #include <linux/wimax/i2400m.h>
+#include <linux/slab.h>
 
 
 
@@ -54,8 +55,10 @@ int i2400m_radio_is(struct i2400m *i2400m, enum wimax_rf_state state)
 		/* state == WIMAX_RF_ON */
 		return i2400m->state != I2400M_SS_RF_OFF
 			&& i2400m->state != I2400M_SS_RF_SHUTDOWN;
-	else
+	else {
 		BUG();
+		return -EINVAL;	/* shut gcc warnings on certain arches */
+	}
 }
 
 
@@ -88,7 +91,7 @@ int i2400m_op_rfkill_sw_toggle(struct wimax_dev *wimax_dev,
 	struct {
 		struct i2400m_l3l4_hdr hdr;
 		struct i2400m_tlv_rf_operation sw_rf;
-	} __attribute__((packed)) *cmd;
+	} __packed *cmd;
 	char strerr[32];
 
 	d_fnstart(4, dev, "(wimax_dev %p state %d)\n", wimax_dev, state);

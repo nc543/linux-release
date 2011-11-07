@@ -553,7 +553,8 @@ u8_t zfiWlanSetKey(zdev_t* dev, struct zsKeyInfo keyInfo)
         if (keyInfo.flag & ZM_KEY_FLAG_PK)
         {
             /* Find STA's information */
-            if ((id = zfApFindSta(dev, keyInfo.macAddr)) == 0xffff)
+            id = zfApFindSta(dev, keyInfo.macAddr);
+            if (id == 0xffff)
             {
                 /* Can't STA in the staTable */
                 return ZM_STATUS_FAILURE;
@@ -2013,7 +2014,7 @@ u16_t zfiConfigWdsPort(zdev_t* dev, u8_t wdsPortId, u16_t flag, u16_t* wdsAddr,
 
     zmw_get_wlan_dev(dev);
 
-    if (wdsPortId > ZM_MAX_WDS_SUPPORT)
+    if (wdsPortId >= ZM_MAX_WDS_SUPPORT)
     {
         return ZM_ERR_WDS_PORT_ID;
     }

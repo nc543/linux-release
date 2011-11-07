@@ -23,15 +23,11 @@
 #include <asm/s390_ext.h>
 #include <asm/timer.h>
 #include <asm/irq_regs.h>
-#include <asm/cpu.h>
-
-static ext_int_info_t ext_int_info_timer;
+#include <asm/cputime.h>
 
 static DEFINE_PER_CPU(struct vtimer_queue, virt_cpu_timer);
 
-DEFINE_PER_CPU(struct s390_idle_data, s390_idle) = {
-	.lock = __SPIN_LOCK_UNLOCKED(s390_idle.lock)
-};
+DEFINE_PER_CPU(struct s390_idle_data, s390_idle);
 
 static inline __u64 get_vtimer(void)
 {
@@ -125,39 +121,44 @@ void account_system_vtime(struct task_struct *tsk)
 }
 EXPORT_SYMBOL_GPL(account_system_vtime);
 
-void vtime_start_cpu(void)
+void vtime_start_cpu(__u64 int_clock, __u64 enter_timer)
 {
 	struct s390_idle_data *idle = &__get_cpu_var(s390_idle);
 	struct vtimer_queue *vq = &__get_cpu_var(virt_cpu_timer);
 	__u64 idle_time, expires;
 
+	if (idle->idle_enter == 0ULL)
+		return;
+
 	/* Account time spent with enabled wait psw loaded as idle time. */
-	idle_time = S390_lowcore.int_clock - idle->idle_enter;
+	idle_time = int_clock - idle->idle_enter;
 	account_idle_time(idle_time);
 	S390_lowcore.steal_timer +=
 		idle->idle_enter - S390_lowcore.last_update_clock;
-	S390_lowcore.last_update_clock = S390_lowcore.int_clock;
+	S390_lowcore.last_update_clock = int_clock;
 
 	/* Account system time spent going idle. */
 	S390_lowcore.system_timer += S390_lowcore.last_update_timer - vq->idle;
-	S390_lowcore.last_update_timer = S390_lowcore.async_enter_timer;
+	S390_lowcore.last_update_timer = enter_timer;
 
 	/* Restart vtime CPU timer */
 	if (vq->do_spt) {
 		/* Program old expire value but first save progress. */
-		expires = vq->idle - S390_lowcore.async_enter_timer;
+		expires = vq->idle - enter_timer;
 		expires += get_vtimer();
 		set_vtimer(expires);
 	} else {
 		/* Don't account the CPU timer delta while the cpu was idle. */
-		vq->elapsed -= vq->idle - S390_lowcore.async_enter_timer;
+		vq->elapsed -= vq->idle - enter_timer;
 	}
 
-	spin_lock(&idle->lock);
+	idle->sequence++;
+	smp_wmb();
 	idle->idle_time += idle_time;
 	idle->idle_enter = 0ULL;
 	idle->idle_count++;
-	spin_unlock(&idle->lock);
+	smp_wmb();
+	idle->sequence++;
 }
 
 void vtime_stop_cpu(void)
@@ -168,6 +169,8 @@ void vtime_stop_cpu(void)
 
 	/* Wait for external, I/O or machine check interrupt. */
 	psw.mask = psw_kernel_bits | PSW_MASK_WAIT | PSW_MASK_IO | PSW_MASK_EXT;
+
+	idle->nohz_delay = 0;
 
 	/* Check if the CPU timer needs to be reprogrammed. */
 	if (vq->do_spt) {
@@ -244,15 +247,23 @@ cputime64_t s390_get_idle_time(int cpu)
 {
 	struct s390_idle_data *idle;
 	unsigned long long now, idle_time, idle_enter;
+	unsigned int sequence;
 
 	idle = &per_cpu(s390_idle, cpu);
-	spin_lock(&idle->lock);
+
 	now = get_clock();
+repeat:
+	sequence = idle->sequence;
+	smp_rmb();
+	if (sequence & 1)
+		goto repeat;
 	idle_time = 0;
 	idle_enter = idle->idle_enter;
 	if (idle_enter != 0ULL && idle_enter < now)
 		idle_time = now - idle_enter;
-	spin_unlock(&idle->lock);
+	smp_rmb();
+	if (idle->sequence != sequence)
+		goto repeat;
 	return idle_time;
 }
 
@@ -557,8 +568,7 @@ void init_cpu_vtimer(void)
 void __init vtime_init(void)
 {
 	/* request the cpu timer external interrupt */
-	if (register_early_external_interrupt(0x1005, do_cpu_timer_interrupt,
-					      &ext_int_info_timer) != 0)
+	if (register_external_interrupt(0x1005, do_cpu_timer_interrupt))
 		panic("Couldn't request external interrupt 0x1005");
 
 	/* Enable cpu timer interrupts on the boot cpu. */

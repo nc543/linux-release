@@ -20,6 +20,7 @@
 #include <linux/kthread.h>
 #include <linux/pagemap.h>
 #include <linux/poll.h>
+#include <linux/slab.h>
 #include <linux/swap.h>
 #include <linux/syscalls.h>
 #include <linux/vmalloc.h>
@@ -168,8 +169,7 @@ int pohmelfs_data_recv_and_check(struct netfs_state *st, void *data, unsigned in
  * Polling machinery.
  */
 
-struct netfs_poll_helper
-{
+struct netfs_poll_helper {
 	poll_table 		pt;
 	struct netfs_state	*st;
 };
@@ -681,7 +681,7 @@ static int pohmelfs_root_cap_response(struct netfs_state *st)
 		printk(KERN_INFO "Mounting POHMELFS (%d) "
 			"with extended attributes support.\n", psb->idx);
 
-	if (atomic_read(&psb->total_inodes) <= 1)
+	if (atomic_long_read(&psb->total_inodes) <= 1)
 		atomic_long_set(&psb->total_inodes, cap->nr_files);
 
 	dprintk("%s: total: %llu, avail: %llu, flags: %llx, inodes: %llu.\n",
@@ -713,8 +713,8 @@ static int pohmelfs_crypto_cap_response(struct netfs_state *st)
 
 	dprintk("%s: cipher '%s': %s, hash: '%s': %s.\n",
 			__func__,
-			psb->cipher_string, (cap->cipher_strlen)?"SUPPORTED":"NOT SUPPORTED",
-			psb->hash_string, (cap->hash_strlen)?"SUPPORTED":"NOT SUPPORTED");
+			psb->cipher_string, (cap->cipher_strlen) ? "SUPPORTED" : "NOT SUPPORTED",
+			psb->hash_string, (cap->hash_strlen) ? "SUPPORTED" : "NOT SUPPORTED");
 
 	if (!cap->hash_strlen) {
 		if (psb->hash_strlen && psb->crypto_fail_unsupported)
@@ -748,11 +748,11 @@ static int pohmelfs_capabilities_response(struct netfs_state *st)
 		return err;
 
 	switch (cmd->id) {
-		case POHMELFS_CRYPTO_CAPABILITIES:
+	case POHMELFS_CRYPTO_CAPABILITIES:
 			return pohmelfs_crypto_cap_response(st);
-		case POHMELFS_ROOT_CAPABILITIES:
+	case POHMELFS_ROOT_CAPABILITIES:
 			return pohmelfs_root_cap_response(st);
-		default:
+	default:
 			break;
 	}
 	return -EINVAL;
@@ -774,7 +774,7 @@ static int pohmelfs_getxattr_response(struct netfs_state *st)
 	m = pohmelfs_mcache_search(psb, cmd->id);
 
 	dprintk("%s: id: %llu, gen: %llu, err: %d.\n",
-		__func__, cmd->id, (m)?m->gen:0, error);
+		__func__, cmd->id, (m) ? m->gen : 0, error);
 
 	if (!m) {
 		printk("%s: failed to find getxattr cache entry: id: %llu.\n", __func__, cmd->id);
@@ -824,7 +824,7 @@ int pohmelfs_data_lock_response(struct netfs_state *st)
 	m = pohmelfs_mcache_search(psb, id);
 
 	dprintk("%s: id: %llu, gen: %llu, err: %d.\n",
-		__func__, cmd->id, (m)?m->gen:0, err);
+		__func__, cmd->id, (m) ? m->gen : 0, err);
 
 	if (!m) {
 		pohmelfs_data_recv(st, st->data, cmd->size);
@@ -915,9 +915,9 @@ static int pohmelfs_recv(void *data)
 				unsigned char *hash = e->data;
 
 				dprintk("%s: received hash: ", __func__);
-				for (i=0; i<cmd->csize; ++i) {
+				for (i = 0; i < cmd->csize; ++i)
 					printk("%02x ", hash[i]);
-				}
+
 				printk("\n");
 			}
 #endif
@@ -933,37 +933,37 @@ static int pohmelfs_recv(void *data)
 		}
 
 		switch (cmd->cmd) {
-			case NETFS_READ_PAGE:
+		case NETFS_READ_PAGE:
 				err = pohmelfs_read_page_response(st);
 				break;
-			case NETFS_READDIR:
+		case NETFS_READDIR:
 				err = pohmelfs_readdir_response(st);
 				break;
-			case NETFS_LOOKUP:
+		case NETFS_LOOKUP:
 				err = pohmelfs_lookup_response(st);
 				break;
-			case NETFS_CREATE:
+		case NETFS_CREATE:
 				err = pohmelfs_create_response(st);
 				break;
-			case NETFS_REMOVE:
+		case NETFS_REMOVE:
 				err = pohmelfs_remove_response(st);
 				break;
-			case NETFS_TRANS:
+		case NETFS_TRANS:
 				err = pohmelfs_transaction_response(st);
 				break;
-			case NETFS_PAGE_CACHE:
+		case NETFS_PAGE_CACHE:
 				err = pohmelfs_page_cache_response(st);
 				break;
-			case NETFS_CAPABILITIES:
+		case NETFS_CAPABILITIES:
 				err = pohmelfs_capabilities_response(st);
 				break;
-			case NETFS_LOCK:
+		case NETFS_LOCK:
 				err = pohmelfs_data_lock_response(st);
 				break;
-			case NETFS_XATTR_GET:
+		case NETFS_XATTR_GET:
 				err = pohmelfs_getxattr_response(st);
 				break;
-			default:
+		default:
 				printk("%s: wrong cmd: %u, id: %llu, start: %llu, size: %u, ext: %u.\n",
 					__func__, cmd->cmd, cmd->id, cmd->start, cmd->size, cmd->ext);
 				netfs_state_reset(st);
@@ -1006,13 +1006,12 @@ int netfs_state_init(struct netfs_state *st)
 
 	if (st->socket->ops->family == AF_INET) {
 		struct sockaddr_in *sin = (struct sockaddr_in *)&ctl->addr;
-		printk(KERN_INFO "%s: (re)connected to peer %u.%u.%u.%u:%d.\n", __func__,
-			NIPQUAD(sin->sin_addr.s_addr), ntohs(sin->sin_port));
+		printk(KERN_INFO "%s: (re)connected to peer %pi4:%d.\n", __func__,
+			&sin->sin_addr.s_addr, ntohs(sin->sin_port));
 	} else if (st->socket->ops->family == AF_INET6) {
 		struct sockaddr_in6 *sin = (struct sockaddr_in6 *)&ctl->addr;
-		printk(KERN_INFO "%s: (re)connected to peer "
-			"%pi6:%d",
-			__func__, &sin->sin6_addr, ntohs(sin->sin6_port));
+		printk(KERN_INFO "%s: (re)connected to peer %pi6:%d", __func__,
+				&sin->sin6_addr, ntohs(sin->sin6_port));
 	}
 
 	return 0;
@@ -1032,13 +1031,12 @@ void netfs_state_exit(struct netfs_state *st)
 
 		if (st->socket->ops->family == AF_INET) {
 			struct sockaddr_in *sin = (struct sockaddr_in *)&st->ctl.addr;
-			printk("%s: disconnected from peer %u.%u.%u.%u:%d.\n", __func__,
-				NIPQUAD(sin->sin_addr.s_addr), ntohs(sin->sin_port));
+			printk(KERN_INFO "%s: disconnected from peer %pi4:%d.\n", __func__,
+				&sin->sin_addr.s_addr, ntohs(sin->sin_port));
 		} else if (st->socket->ops->family == AF_INET6) {
 			struct sockaddr_in6 *sin = (struct sockaddr_in6 *)&st->ctl.addr;
-			printk("%s: disconnected from peer "
-				"%pi6:%d",
-				__func__, &sin->sin6_addr, ntohs(sin->sin6_port));
+			printk(KERN_INFO "%s: disconnected from peer %pi6:%d", __func__,
+				&sin->sin6_addr, ntohs(sin->sin6_port));
 		}
 
 		sock_release(st->socket);

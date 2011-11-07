@@ -82,7 +82,7 @@ static ide_startstop_t __ide_do_rw_disk(ide_drive_t *drive, struct request *rq,
 					sector_t block)
 {
 	ide_hwif_t *hwif	= drive->hwif;
-	u16 nsectors		= (u16)rq->nr_sectors;
+	u16 nsectors		= (u16)blk_rq_sectors(rq);
 	u8 lba48		= !!(drive->dev_flags & IDE_DFLAG_LBA48);
 	u8 dma			= !!(drive->dev_flags & IDE_DFLAG_USING_DMA);
 	struct ide_cmd		cmd;
@@ -90,7 +90,7 @@ static ide_startstop_t __ide_do_rw_disk(ide_drive_t *drive, struct request *rq,
 	ide_startstop_t		rc;
 
 	if ((hwif->host_flags & IDE_HFLAG_NO_LBA48_DMA) && lba48 && dma) {
-		if (block + rq->nr_sectors > 1ULL << 28)
+		if (block + blk_rq_sectors(rq) > 1ULL << 28)
 			dma = 0;
 		else
 			lba48 = 0;
@@ -184,20 +184,13 @@ static ide_startstop_t ide_do_rw_disk(ide_drive_t *drive, struct request *rq,
 	ide_hwif_t *hwif = drive->hwif;
 
 	BUG_ON(drive->dev_flags & IDE_DFLAG_BLOCKED);
-
-	if (!blk_fs_request(rq)) {
-		blk_dump_rq_flags(rq, "ide_do_rw_disk - bad command");
-		if (rq->errors == 0)
-			rq->errors = -EIO;
-		ide_complete_rq(drive, -EIO, ide_rq_bytes(rq));
-		return ide_stopped;
-	}
+	BUG_ON(rq->cmd_type != REQ_TYPE_FS);
 
 	ledtrig_ide_activity();
 
-	pr_debug("%s: %sing: block=%llu, sectors=%lu, buffer=0x%08lx\n",
+	pr_debug("%s: %sing: block=%llu, sectors=%u, buffer=0x%08lx\n",
 		 drive->name, rq_data_dir(rq) == READ ? "read" : "writ",
-		 (unsigned long long)block, rq->nr_sectors,
+		 (unsigned long long)block, blk_rq_sectors(rq),
 		 (unsigned long)rq->buffer);
 
 	if (hwif->rw_disk)
@@ -302,14 +295,12 @@ static const struct drive_list_entry hpa_list[] = {
 	{ NULL,		NULL }
 };
 
-static void idedisk_check_hpa(ide_drive_t *drive)
+static u64 ide_disk_hpa_get_native_capacity(ide_drive_t *drive, int lba48)
 {
-	unsigned long long capacity, set_max;
-	int lba48 = ata_id_lba48_enabled(drive->id);
+	u64 capacity, set_max;
 
 	capacity = drive->capacity64;
-
-	set_max = idedisk_read_native_max_address(drive, lba48);
+	set_max  = idedisk_read_native_max_address(drive, lba48);
 
 	if (ide_in_drive_list(drive->id, hpa_list)) {
 		/*
@@ -320,8 +311,30 @@ static void idedisk_check_hpa(ide_drive_t *drive)
 			set_max--;
 	}
 
+	return set_max;
+}
+
+static u64 ide_disk_hpa_set_capacity(ide_drive_t *drive, u64 set_max, int lba48)
+{
+	set_max = idedisk_set_max_address(drive, set_max, lba48);
+	if (set_max)
+		drive->capacity64 = set_max;
+
+	return set_max;
+}
+
+static void idedisk_check_hpa(ide_drive_t *drive)
+{
+	u64 capacity, set_max;
+	int lba48 = ata_id_lba48_enabled(drive->id);
+
+	capacity = drive->capacity64;
+	set_max  = ide_disk_hpa_get_native_capacity(drive, lba48);
+
 	if (set_max <= capacity)
 		return;
+
+	drive->probed_capacity = set_max;
 
 	printk(KERN_INFO "%s: Host Protected Area detected.\n"
 			 "\tcurrent capacity is %llu sectors (%llu MB)\n"
@@ -330,13 +343,13 @@ static void idedisk_check_hpa(ide_drive_t *drive)
 			 capacity, sectors_to_MB(capacity),
 			 set_max, sectors_to_MB(set_max));
 
-	set_max = idedisk_set_max_address(drive, set_max, lba48);
+	if ((drive->dev_flags & IDE_DFLAG_NOHPA) == 0)
+		return;
 
-	if (set_max) {
-		drive->capacity64 = set_max;
+	set_max = ide_disk_hpa_set_capacity(drive, set_max, lba48);
+	if (set_max)
 		printk(KERN_INFO "%s: Host Protected Area disabled.\n",
 				 drive->name);
-	}
 }
 
 static int ide_disk_get_capacity(ide_drive_t *drive)
@@ -358,6 +371,8 @@ static int ide_disk_get_capacity(ide_drive_t *drive)
 		drive->capacity64 = drive->cyl * drive->head * drive->sect;
 	}
 
+	drive->probed_capacity = drive->capacity64;
+
 	if (lba) {
 		drive->dev_flags |= IDE_DFLAG_LBA;
 
@@ -376,7 +391,7 @@ static int ide_disk_get_capacity(ide_drive_t *drive)
 		       "%llu sectors (%llu MB)\n",
 		       drive->name, (unsigned long long)drive->capacity64,
 		       sectors_to_MB(drive->capacity64));
-		drive->capacity64 = 1ULL << 28;
+		drive->probed_capacity = drive->capacity64 = 1ULL << 28;
 	}
 
 	if ((drive->hwif->host_flags & IDE_HFLAG_NO_LBA48_DMA) &&
@@ -392,10 +407,35 @@ static int ide_disk_get_capacity(ide_drive_t *drive)
 	return 0;
 }
 
-static void idedisk_prepare_flush(struct request_queue *q, struct request *rq)
+static void ide_disk_unlock_native_capacity(ide_drive_t *drive)
+{
+	u16 *id = drive->id;
+	int lba48 = ata_id_lba48_enabled(id);
+
+	if ((drive->dev_flags & IDE_DFLAG_LBA) == 0 ||
+	    ata_id_hpa_enabled(id) == 0)
+		return;
+
+	/*
+	 * according to the spec the SET MAX ADDRESS command shall be
+	 * immediately preceded by a READ NATIVE MAX ADDRESS command
+	 */
+	if (!ide_disk_hpa_get_native_capacity(drive, lba48))
+		return;
+
+	if (ide_disk_hpa_set_capacity(drive, drive->probed_capacity, lba48))
+		drive->dev_flags |= IDE_DFLAG_NOHPA; /* disable HPA on resume */
+}
+
+static int idedisk_prep_fn(struct request_queue *q, struct request *rq)
 {
 	ide_drive_t *drive = q->queuedata;
-	struct ide_cmd *cmd = kmalloc(sizeof(*cmd), GFP_ATOMIC);
+	struct ide_cmd *cmd;
+
+	if (!(rq->cmd_flags & REQ_FLUSH))
+		return BLKPREP_OK;
+
+	cmd = kmalloc(sizeof(*cmd), GFP_ATOMIC);
 
 	/* FIXME: map struct ide_taskfile on rq->cmd[] */
 	BUG_ON(cmd == NULL);
@@ -411,8 +451,10 @@ static void idedisk_prepare_flush(struct request_queue *q, struct request *rq)
 	cmd->protocol = ATA_PROT_NODATA;
 
 	rq->cmd_type = REQ_TYPE_ATA_TASKFILE;
-	rq->cmd_flags |= REQ_SOFTBARRIER;
 	rq->special = cmd;
+	cmd->rq = rq;
+
+	return BLKPREP_OK;
 }
 
 ide_devset_get(multcount, mult_count);
@@ -429,14 +471,14 @@ static int set_multcount(ide_drive_t *drive, int arg)
 	if (arg < 0 || arg > (drive->id[ATA_ID_MAX_MULTSECT] & 0xff))
 		return -EINVAL;
 
-	if (drive->special.b.set_multmode)
+	if (drive->special_flags & IDE_SFLAG_SET_MULTMODE)
 		return -EBUSY;
 
 	rq = blk_get_request(drive->queue, READ, __GFP_WAIT);
 	rq->cmd_type = REQ_TYPE_ATA_TASKFILE;
 
 	drive->mult_req = arg;
-	drive->special.b.set_multmode = 1;
+	drive->special_flags |= IDE_SFLAG_SET_MULTMODE;
 	error = blk_execute_rq(drive->queue, NULL, rq, 0);
 	blk_put_request(rq);
 
@@ -478,7 +520,6 @@ static void update_ordered(ide_drive_t *drive)
 {
 	u16 *id = drive->id;
 	unsigned ordered = QUEUE_ORDERED_NONE;
-	prepare_flush_fn *prep_fn = NULL;
 
 	if (drive->dev_flags & IDE_DFLAG_WCACHE) {
 		unsigned long long capacity;
@@ -503,12 +544,12 @@ static void update_ordered(ide_drive_t *drive)
 
 		if (barrier) {
 			ordered = QUEUE_ORDERED_DRAIN_FLUSH;
-			prep_fn = idedisk_prepare_flush;
+			blk_queue_prep_rq(drive->queue, idedisk_prep_fn);
 		}
 	} else
 		ordered = QUEUE_ORDERED_DRAIN;
 
-	blk_queue_ordered(drive->queue, ordered, prep_fn);
+	blk_queue_ordered(drive->queue, ordered);
 }
 
 ide_devset_get_flag(wcache, IDE_DFLAG_WCACHE);
@@ -636,11 +677,11 @@ static void ide_disk_setup(ide_drive_t *drive)
 		if (max_s > hwif->rqsize)
 			max_s = hwif->rqsize;
 
-		blk_queue_max_sectors(q, max_s);
+		blk_queue_max_hw_sectors(q, max_s);
 	}
 
 	printk(KERN_INFO "%s: max request size: %dKiB\n", drive->name,
-		q->max_sectors / 2);
+	       queue_max_sectors(q) / 2);
 
 	if (ata_id_is_ssd(id))
 		queue_flag_set_unlocked(QUEUE_FLAG_NONROT, q);
@@ -740,12 +781,13 @@ static int ide_disk_set_doorlock(ide_drive_t *drive, struct gendisk *disk,
 }
 
 const struct ide_disk_ops ide_ata_disk_ops = {
-	.check		= ide_disk_check,
-	.get_capacity	= ide_disk_get_capacity,
-	.setup		= ide_disk_setup,
-	.flush		= ide_disk_flush,
-	.init_media	= ide_disk_init_media,
-	.set_doorlock	= ide_disk_set_doorlock,
-	.do_request	= ide_do_rw_disk,
-	.ioctl		= ide_disk_ioctl,
+	.check			= ide_disk_check,
+	.unlock_native_capacity	= ide_disk_unlock_native_capacity,
+	.get_capacity		= ide_disk_get_capacity,
+	.setup			= ide_disk_setup,
+	.flush			= ide_disk_flush,
+	.init_media		= ide_disk_init_media,
+	.set_doorlock		= ide_disk_set_doorlock,
+	.do_request		= ide_do_rw_disk,
+	.ioctl			= ide_disk_ioctl,
 };

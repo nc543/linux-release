@@ -380,9 +380,9 @@ enum bigend_bits {
 #define MBX_ADDR_SPACE_360 0x80	/* wanXL100s/200/400 */
 #define MBX_ADDR_MASK_360 (MBX_ADDR_SPACE_360-1)
 
-static inline int plx9080_abort_dma(void *iobase, unsigned int channel)
+static inline int plx9080_abort_dma(void __iomem *iobase, unsigned int channel)
 {
-	void *dma_cs_addr;
+	void __iomem *dma_cs_addr;
 	uint8_t dma_status;
 	const int timeout = 10000;
 	unsigned int i;
@@ -399,13 +399,13 @@ static inline int plx9080_abort_dma(void *iobase, unsigned int channel)
 
 	/*  wait to make sure done bit is zero */
 	for (i = 0; (dma_status & PLX_DMA_DONE_BIT) && i < timeout; i++) {
-		comedi_udelay(1);
+		udelay(1);
 		dma_status = readb(dma_cs_addr);
 	}
 	if (i == timeout) {
-		rt_printk
-			("plx9080: cancel() timed out waiting for dma %i done clear\n",
-			channel);
+		printk
+		    ("plx9080: cancel() timed out waiting for dma %i done clear\n",
+		     channel);
 		return -ETIMEDOUT;
 	}
 	/*  disable and abort channel */
@@ -413,13 +413,13 @@ static inline int plx9080_abort_dma(void *iobase, unsigned int channel)
 	/*  wait for dma done bit */
 	dma_status = readb(dma_cs_addr);
 	for (i = 0; (dma_status & PLX_DMA_DONE_BIT) == 0 && i < timeout; i++) {
-		comedi_udelay(1);
+		udelay(1);
 		dma_status = readb(dma_cs_addr);
 	}
 	if (i == timeout) {
-		rt_printk
-			("plx9080: cancel() timed out waiting for dma %i done set\n",
-			channel);
+		printk
+		    ("plx9080: cancel() timed out waiting for dma %i done set\n",
+		     channel);
 		return -ETIMEDOUT;
 	}
 

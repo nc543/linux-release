@@ -14,6 +14,7 @@
 #include <linux/string.h>
 #include <asm/machvec.h>
 #include <asm/sections.h>
+#include <asm/addrspace.h>
 #include <asm/setup.h>
 #include <asm/io.h>
 #include <asm/irq.h>
@@ -117,6 +118,14 @@ void __init sh_mv_setup(void)
 		sh_mv.mv_##elem = generic_##elem; \
 } while (0)
 
+#ifdef CONFIG_HAS_IOPORT
+
+#ifdef P2SEG
+	__set_io_port_base(P2SEG);
+#else
+	__set_io_port_base(0);
+#endif
+
 	mv_set(inb);	mv_set(inw);	mv_set(inl);
 	mv_set(outb);	mv_set(outw);	mv_set(outl);
 
@@ -128,7 +137,12 @@ void __init sh_mv_setup(void)
 
 	mv_set(ioport_map);
 	mv_set(ioport_unmap);
+
+#endif
+
 	mv_set(irq_demux);
+	mv_set(mode_pins);
+	mv_set(mem_init);
 
 	if (!sh_mv.mv_nr_irqs)
 		sh_mv.mv_nr_irqs = NR_IRQS;

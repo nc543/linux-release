@@ -10,12 +10,13 @@
 #define __PCSP_H__
 
 #include <linux/hrtimer.h>
+#include <linux/timex.h>
 #if defined(CONFIG_MIPS) || defined(CONFIG_X86)
 /* Use the global PIT lock ! */
 #include <asm/i8253.h>
 #else
 #include <asm/8253pit.h>
-static DEFINE_SPINLOCK(i8253_lock);
+static DEFINE_RAW_SPINLOCK(i8253_lock);
 #endif
 
 #define PCSP_SOUND_VERSION 0x400	/* read 4.00 */
@@ -82,6 +83,6 @@ extern enum hrtimer_restart pcsp_do_timer(struct hrtimer *handle);
 extern void pcsp_sync_stop(struct snd_pcsp *chip);
 
 extern int snd_pcsp_new_pcm(struct snd_pcsp *chip);
-extern int snd_pcsp_new_mixer(struct snd_pcsp *chip);
+extern int snd_pcsp_new_mixer(struct snd_pcsp *chip, int nopcm);
 
 #endif

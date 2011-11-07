@@ -13,6 +13,7 @@
  */
 
 #include <linux/kvm_host.h>
+#include <linux/slab.h>
 #include <linux/err.h>
 
 #include <asm/reg.h>
@@ -60,8 +61,11 @@ int kvmppc_core_vcpu_setup(struct kvm_vcpu *vcpu)
 
 	kvmppc_e500_tlb_setup(vcpu_e500);
 
-	/* Use the same core vertion as host's */
+	/* Registers init */
 	vcpu->arch.pvr = mfspr(SPRN_PVR);
+
+	/* Since booke kvm only support one core, update all vcpus' PIR to 0 */
+	vcpu->vcpu_id = 0;
 
 	return 0;
 }
@@ -132,7 +136,7 @@ void kvmppc_core_vcpu_free(struct kvm_vcpu *vcpu)
 	kmem_cache_free(kvm_vcpu_cache, vcpu_e500);
 }
 
-static int kvmppc_e500_init(void)
+static int __init kvmppc_e500_init(void)
 {
 	int r, i;
 	unsigned long ivor[3];
@@ -157,10 +161,10 @@ static int kvmppc_e500_init(void)
 	flush_icache_range(kvmppc_booke_handlers,
 			kvmppc_booke_handlers + max_ivor + kvmppc_handler_len);
 
-	return kvm_init(NULL, sizeof(struct kvmppc_vcpu_e500), THIS_MODULE);
+	return kvm_init(NULL, sizeof(struct kvmppc_vcpu_e500), 0, THIS_MODULE);
 }
 
-static void kvmppc_e500_exit(void)
+static void __exit kvmppc_e500_exit(void)
 {
 	kvmppc_booke_exit();
 }

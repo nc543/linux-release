@@ -23,7 +23,6 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/string.h>
-#include <linux/slab.h>
 #include <linux/delay.h>
 #include "dvb_frontend.h"
 #include "au8522.h"
@@ -84,6 +83,14 @@ static int au8522_i2c_gate_ctrl(struct dvb_frontend *fe, int enable)
 	struct au8522_state *state = fe->demodulator_priv;
 
 	dprintk("%s(%d)\n", __func__, enable);
+
+	if (state->operational_mode == AU8522_ANALOG_MODE) {
+		/* We're being asked to manage the gate even though we're
+		   not in digital mode.  This can occur if we get switched
+		   over to analog mode before the dvb_frontend kernel thread
+		   has completely shutdown */
+		return 0;
+	}
 
 	if (enable)
 		return au8522_writereg(state, 0x106, 1);
@@ -367,11 +374,90 @@ static struct {
 	{ 0x8231, 0x13 },
 };
 
-/* QAM Modulation table */
+/* QAM64 Modulation table */
 static struct {
 	u16 reg;
 	u16 data;
-} QAM_mod_tab[] = {
+} QAM64_mod_tab[] = {
+	{ 0x00a3, 0x09 },
+	{ 0x00a4, 0x00 },
+	{ 0x0081, 0xc4 },
+	{ 0x00a5, 0x40 },
+	{ 0x00aa, 0x77 },
+	{ 0x00ad, 0x77 },
+	{ 0x00a6, 0x67 },
+	{ 0x0262, 0x20 },
+	{ 0x021c, 0x30 },
+	{ 0x00b8, 0x3e },
+	{ 0x00b9, 0xf0 },
+	{ 0x00ba, 0x01 },
+	{ 0x00bb, 0x18 },
+	{ 0x00bc, 0x50 },
+	{ 0x00bd, 0x00 },
+	{ 0x00be, 0xea },
+	{ 0x00bf, 0xef },
+	{ 0x00c0, 0xfc },
+	{ 0x00c1, 0xbd },
+	{ 0x00c2, 0x1f },
+	{ 0x00c3, 0xfc },
+	{ 0x00c4, 0xdd },
+	{ 0x00c5, 0xaf },
+	{ 0x00c6, 0x00 },
+	{ 0x00c7, 0x38 },
+	{ 0x00c8, 0x30 },
+	{ 0x00c9, 0x05 },
+	{ 0x00ca, 0x4a },
+	{ 0x00cb, 0xd0 },
+	{ 0x00cc, 0x01 },
+	{ 0x00cd, 0xd9 },
+	{ 0x00ce, 0x6f },
+	{ 0x00cf, 0xf9 },
+	{ 0x00d0, 0x70 },
+	{ 0x00d1, 0xdf },
+	{ 0x00d2, 0xf7 },
+	{ 0x00d3, 0xc2 },
+	{ 0x00d4, 0xdf },
+	{ 0x00d5, 0x02 },
+	{ 0x00d6, 0x9a },
+	{ 0x00d7, 0xd0 },
+	{ 0x0250, 0x0d },
+	{ 0x0251, 0xcd },
+	{ 0x0252, 0xe0 },
+	{ 0x0253, 0x05 },
+	{ 0x0254, 0xa7 },
+	{ 0x0255, 0xff },
+	{ 0x0256, 0xed },
+	{ 0x0257, 0x5b },
+	{ 0x0258, 0xae },
+	{ 0x0259, 0xe6 },
+	{ 0x025a, 0x3d },
+	{ 0x025b, 0x0f },
+	{ 0x025c, 0x0d },
+	{ 0x025d, 0xea },
+	{ 0x025e, 0xf2 },
+	{ 0x025f, 0x51 },
+	{ 0x0260, 0xf5 },
+	{ 0x0261, 0x06 },
+	{ 0x021a, 0x00 },
+	{ 0x0546, 0x40 },
+	{ 0x0210, 0xc7 },
+	{ 0x0211, 0xaa },
+	{ 0x0212, 0xab },
+	{ 0x0213, 0x02 },
+	{ 0x0502, 0x00 },
+	{ 0x0121, 0x04 },
+	{ 0x0122, 0x04 },
+	{ 0x052e, 0x10 },
+	{ 0x00a4, 0xca },
+	{ 0x00a7, 0x40 },
+	{ 0x0526, 0x01 },
+};
+
+/* QAM256 Modulation table */
+static struct {
+	u16 reg;
+	u16 data;
+} QAM256_mod_tab[] = {
 	{ 0x80a3, 0x09 },
 	{ 0x80a4, 0x00 },
 	{ 0x8081, 0xc4 },
@@ -464,12 +550,19 @@ static int au8522_enable_modulation(struct dvb_frontend *fe,
 		au8522_set_if(fe, state->config->vsb_if);
 		break;
 	case QAM_64:
-	case QAM_256:
-		dprintk("%s() QAM 64/256\n", __func__);
-		for (i = 0; i < ARRAY_SIZE(QAM_mod_tab); i++)
+		dprintk("%s() QAM 64\n", __func__);
+		for (i = 0; i < ARRAY_SIZE(QAM64_mod_tab); i++)
 			au8522_writereg(state,
-				QAM_mod_tab[i].reg,
-				QAM_mod_tab[i].data);
+				QAM64_mod_tab[i].reg,
+				QAM64_mod_tab[i].data);
+		au8522_set_if(fe, state->config->qam_if);
+		break;
+	case QAM_256:
+		dprintk("%s() QAM 256\n", __func__);
+		for (i = 0; i < ARRAY_SIZE(QAM256_mod_tab); i++)
+			au8522_writereg(state,
+				QAM256_mod_tab[i].reg,
+				QAM256_mod_tab[i].data);
 		au8522_set_if(fe, state->config->qam_if);
 		break;
 	default:
@@ -522,6 +615,13 @@ int au8522_init(struct dvb_frontend *fe)
 {
 	struct au8522_state *state = fe->demodulator_priv;
 	dprintk("%s()\n", __func__);
+
+	state->operational_mode = AU8522_DIGITAL_MODE;
+
+	/* Clear out any state associated with the digital side of the
+	   chip, so that when it gets powered back up it won't think
+	   that it is already tuned */
+	state->current_frequency = 0;
 
 	au8522_writereg(state, 0xa4, 1 << 5);
 
@@ -618,6 +718,15 @@ int au8522_sleep(struct dvb_frontend *fe)
 {
 	struct au8522_state *state = fe->demodulator_priv;
 	dprintk("%s()\n", __func__);
+
+	/* Only power down if the digital side is currently using the chip */
+	if (state->operational_mode == AU8522_ANALOG_MODE) {
+		/* We're not in one of the expected power modes, which means
+		   that the DVB thread is probably telling us to go to sleep
+		   even though the analog frontend has already started using
+		   the chip.  So ignore the request */
+		return 0;
+	}
 
 	/* turn off led */
 	au8522_led_ctrl(state, 0);
@@ -847,6 +956,8 @@ struct dvb_frontend *au8522_attach(const struct au8522_config *config,
 	/* setup the state */
 	state->config = config;
 	state->i2c = i2c;
+	state->operational_mode = AU8522_DIGITAL_MODE;
+
 	/* create dvb_frontend */
 	memcpy(&state->frontend.ops, &au8522_ops,
 	       sizeof(struct dvb_frontend_ops));

@@ -22,12 +22,12 @@
 */
 
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/moduleparam.h>
 #include <linux/firmware.h>
 #include <linux/netdevice.h>
 
-#include <pcmcia/cs_types.h>
 #include <pcmcia/cs.h>
 #include <pcmcia/cistpl.h>
 #include <pcmcia/ds.h>
@@ -48,6 +48,7 @@
 MODULE_AUTHOR("Holger Schurig <hs4233@mail.mn-solutions.de>");
 MODULE_DESCRIPTION("Driver for Marvell 83xx compact flash WLAN cards");
 MODULE_LICENSE("GPL");
+MODULE_FIRMWARE("libertas_cs_helper.fw");
 
 
 
@@ -59,6 +60,7 @@ struct if_cs_card {
 	struct pcmcia_device *p_dev;
 	struct lbs_private *priv;
 	void __iomem *iobase;
+	bool align_regs;
 };
 
 
@@ -273,7 +275,37 @@ static int if_cs_poll_while_fw_download(struct if_cs_card *card, uint addr, u8 r
  */
 #define IF_CS_PRODUCT_ID		0x0000001C
 #define IF_CS_CF8385_B1_REV		0x12
+#define IF_CS_CF8381_B3_REV		0x04
+#define IF_CS_CF8305_B1_REV		0x03
 
+/*
+ * Used to detect other cards than CF8385 since their revisions of silicon
+ * doesn't match those from CF8385, eg. CF8381 B3 works with this driver.
+ */
+#define CF8305_MANFID		0x02db
+#define CF8305_CARDID		0x8103
+#define CF8381_MANFID		0x02db
+#define CF8381_CARDID		0x6064
+#define CF8385_MANFID		0x02df
+#define CF8385_CARDID		0x8103
+
+static inline int if_cs_hw_is_cf8305(struct pcmcia_device *p_dev)
+{
+	return (p_dev->manf_id == CF8305_MANFID &&
+		p_dev->card_id == CF8305_CARDID);
+}
+
+static inline int if_cs_hw_is_cf8381(struct pcmcia_device *p_dev)
+{
+	return (p_dev->manf_id == CF8381_MANFID &&
+		p_dev->card_id == CF8381_CARDID);
+}
+
+static inline int if_cs_hw_is_cf8385(struct pcmcia_device *p_dev)
+{
+	return (p_dev->manf_id == CF8385_MANFID &&
+		p_dev->card_id == CF8385_CARDID);
+}
 
 /********************************************************************/
 /* I/O and interrupt handling                                       */
@@ -535,7 +567,15 @@ static int if_cs_prog_helper(struct if_cs_card *card)
 
 	lbs_deb_enter(LBS_DEB_CS);
 
-	scratch = if_cs_read8(card, IF_CS_SCRATCH);
+	/*
+	 * This is the only place where an unaligned register access happens on
+	 * the CF8305 card, therefore for the sake of speed of the driver, we do
+	 * the alignment correction here.
+	 */
+	if (card->align_regs)
+		scratch = if_cs_read16(card, IF_CS_SCRATCH) >> 8;
+	else
+		scratch = if_cs_read8(card, IF_CS_SCRATCH);
 
 	/* "If the value is 0x5a, the firmware is already
 	 * downloaded successfully"
@@ -551,7 +591,7 @@ static int if_cs_prog_helper(struct if_cs_card *card)
 
 	/* TODO: make firmware file configurable */
 	ret = request_firmware(&fw, "libertas_cs_helper.fw",
-		&handle_to_dev(card->p_dev));
+		&card->p_dev->dev);
 	if (ret) {
 		lbs_pr_err("can't load helper firmware\n");
 		ret = -ENODEV;
@@ -624,7 +664,7 @@ static int if_cs_prog_real(struct if_cs_card *card)
 
 	/* TODO: make firmware file configurable */
 	ret = request_firmware(&fw, "libertas_cs.fw",
-		&handle_to_dev(card->p_dev));
+		&card->p_dev->dev);
 	if (ret) {
 		lbs_pr_err("can't load firmware\n");
 		ret = -ENODEV;
@@ -736,7 +776,7 @@ static void if_cs_release(struct pcmcia_device *p_dev)
 
 	lbs_deb_enter(LBS_DEB_CS);
 
-	free_irq(p_dev->irq.AssignedIRQ, card);
+	free_irq(p_dev->irq, card);
 	pcmcia_disable_device(p_dev);
 	if (card->iobase)
 		ioport_unmap(card->iobase);
@@ -754,17 +794,36 @@ static void if_cs_release(struct pcmcia_device *p_dev)
  * configure the card at this point -- we wait until we receive a card
  * insertion event.
  */
+
+static int if_cs_ioprobe(struct pcmcia_device *p_dev,
+			 cistpl_cftable_entry_t *cfg,
+			 cistpl_cftable_entry_t *dflt,
+			 unsigned int vcc,
+			 void *priv_data)
+{
+	p_dev->resource[0]->flags |= IO_DATA_PATH_WIDTH_AUTO;
+	p_dev->resource[0]->start = cfg->io.win[0].base;
+	p_dev->resource[0]->end = cfg->io.win[0].len;
+
+	/* Do we need to allocate an interrupt? */
+	p_dev->conf.Attributes |= CONF_ENABLE_IRQ;
+
+	/* IO window settings */
+	if (cfg->io.nwin != 1) {
+		lbs_pr_err("wrong CIS (check number of IO windows)\n");
+		return -ENODEV;
+	}
+
+	/* This reserves IO space but doesn't actually enable it */
+	return pcmcia_request_io(p_dev);
+}
+
 static int if_cs_probe(struct pcmcia_device *p_dev)
 {
 	int ret = -ENOMEM;
+	unsigned int prod_id;
 	struct lbs_private *priv;
 	struct if_cs_card *card;
-	/* CIS parsing */
-	tuple_t tuple;
-	cisparse_t parse;
-	cistpl_cftable_entry_t *cfg = &parse.cftable_entry;
-	cistpl_io_t *io = &cfg->io;
-	u_char buf[64];
 
 	lbs_deb_enter(LBS_DEB_CS);
 
@@ -776,66 +835,26 @@ static int if_cs_probe(struct pcmcia_device *p_dev)
 	card->p_dev = p_dev;
 	p_dev->priv = card;
 
-	p_dev->irq.Attributes = IRQ_TYPE_DYNAMIC_SHARING;
-	p_dev->irq.Handler = NULL;
-	p_dev->irq.IRQInfo1 = IRQ_INFO2_VALID | IRQ_LEVEL_ID;
-
 	p_dev->conf.Attributes = 0;
 	p_dev->conf.IntType = INT_MEMORY_AND_IO;
 
-	tuple.Attributes = 0;
-	tuple.TupleData = buf;
-	tuple.TupleDataMax = sizeof(buf);
-	tuple.TupleOffset = 0;
-
-	tuple.DesiredTuple = CISTPL_CFTABLE_ENTRY;
-	if ((ret = pcmcia_get_first_tuple(p_dev, &tuple)) != 0 ||
-	    (ret = pcmcia_get_tuple_data(p_dev, &tuple)) != 0 ||
-	    (ret = pcmcia_parse_tuple(&tuple, &parse)) != 0)
-	{
-		lbs_pr_err("error in pcmcia_get_first_tuple etc\n");
+	if (pcmcia_loop_config(p_dev, if_cs_ioprobe, NULL)) {
+		lbs_pr_err("error in pcmcia_loop_config\n");
 		goto out1;
 	}
 
-	p_dev->conf.ConfigIndex = cfg->index;
-
-	/* Do we need to allocate an interrupt? */
-	if (cfg->irq.IRQInfo1) {
-		p_dev->conf.Attributes |= CONF_ENABLE_IRQ;
-	}
-
-	/* IO window settings */
-	if (cfg->io.nwin != 1) {
-		lbs_pr_err("wrong CIS (check number of IO windows)\n");
-		ret = -ENODEV;
-		goto out1;
-	}
-	p_dev->io.Attributes1 = IO_DATA_PATH_WIDTH_AUTO;
-	p_dev->io.BasePort1 = io->win[0].base;
-	p_dev->io.NumPorts1 = io->win[0].len;
-
-	/* This reserves IO space but doesn't actually enable it */
-	ret = pcmcia_request_io(p_dev, &p_dev->io);
-	if (ret) {
-		lbs_pr_err("error in pcmcia_request_io\n");
-		goto out1;
-	}
 
 	/*
 	 * Allocate an interrupt line.  Note that this does not assign
 	 * a handler to the interrupt, unless the 'Handler' member of
 	 * the irq structure is initialized.
 	 */
-	if (p_dev->conf.Attributes & CONF_ENABLE_IRQ) {
-		ret = pcmcia_request_irq(p_dev, &p_dev->irq);
-		if (ret) {
-			lbs_pr_err("error in pcmcia_request_irq\n");
-			goto out1;
-		}
-	}
+	if (!p_dev->irq)
+		goto out1;
 
 	/* Initialize io access */
-	card->iobase = ioport_map(p_dev->io.BasePort1, p_dev->io.NumPorts1);
+	card->iobase = ioport_map(p_dev->resource[0]->start,
+				resource_size(p_dev->resource[0]));
 	if (!card->iobase) {
 		lbs_pr_err("error in ioport_map\n");
 		ret = -EIO;
@@ -854,12 +873,33 @@ static int if_cs_probe(struct pcmcia_device *p_dev)
 	}
 
 	/* Finally, report what we've done */
-	lbs_deb_cs("irq %d, io 0x%04x-0x%04x\n",
-	       p_dev->irq.AssignedIRQ, p_dev->io.BasePort1,
-	       p_dev->io.BasePort1 + p_dev->io.NumPorts1 - 1);
+	lbs_deb_cs("irq %d, io %pR", p_dev->irq, p_dev->resource[0]);
+
+	/*
+	 * Most of the libertas cards can do unaligned register access, but some
+	 * weird ones can not. That's especially true for the CF8305 card.
+	 */
+	card->align_regs = 0;
 
 	/* Check if we have a current silicon */
-	if (if_cs_read8(card, IF_CS_PRODUCT_ID) < IF_CS_CF8385_B1_REV) {
+	prod_id = if_cs_read8(card, IF_CS_PRODUCT_ID);
+	if (if_cs_hw_is_cf8305(p_dev)) {
+		card->align_regs = 1;
+		if (prod_id < IF_CS_CF8305_B1_REV) {
+			lbs_pr_err("old chips like 8305 rev B3 "
+				"aren't supported\n");
+			ret = -ENODEV;
+			goto out2;
+		}
+	}
+
+	if (if_cs_hw_is_cf8381(p_dev) && prod_id < IF_CS_CF8381_B3_REV) {
+		lbs_pr_err("old chips like 8381 rev B3 aren't supported\n");
+		ret = -ENODEV;
+		goto out2;
+	}
+
+	if (if_cs_hw_is_cf8385(p_dev) && prod_id < IF_CS_CF8385_B1_REV) {
 		lbs_pr_err("old chips like 8385 rev B1 aren't supported\n");
 		ret = -ENODEV;
 		goto out2;
@@ -867,7 +907,7 @@ static int if_cs_probe(struct pcmcia_device *p_dev)
 
 	/* Load the firmware early, before calling into libertas.ko */
 	ret = if_cs_prog_helper(card);
-	if (ret == 0)
+	if (ret == 0 && !if_cs_hw_is_cf8305(p_dev))
 		ret = if_cs_prog_real(card);
 	if (ret)
 		goto out2;
@@ -883,10 +923,13 @@ static int if_cs_probe(struct pcmcia_device *p_dev)
 	card->priv = priv;
 	priv->card = card;
 	priv->hw_host_to_card = if_cs_host_to_card;
+	priv->enter_deep_sleep = NULL;
+	priv->exit_deep_sleep = NULL;
+	priv->reset_deep_sleep_wakeup = NULL;
 	priv->fw_ready = 1;
 
 	/* Now actually get the IRQ */
-	ret = request_irq(p_dev->irq.AssignedIRQ, if_cs_interrupt,
+	ret = request_irq(p_dev->irq, if_cs_interrupt,
 		IRQF_SHARED, DRV_NAME, card);
 	if (ret) {
 		lbs_pr_err("error in request_irq\n");
@@ -903,9 +946,6 @@ static int if_cs_probe(struct pcmcia_device *p_dev)
 		lbs_pr_err("could not activate card\n");
 		goto out3;
 	}
-
-	/* The firmware for the CF card supports powersave */
-	priv->ps_supported = 1;
 
 	ret = 0;
 	goto out;
@@ -950,7 +990,9 @@ static void if_cs_detach(struct pcmcia_device *p_dev)
 /********************************************************************/
 
 static struct pcmcia_device_id if_cs_ids[] = {
-	PCMCIA_DEVICE_MANF_CARD(0x02df, 0x8103),
+	PCMCIA_DEVICE_MANF_CARD(CF8305_MANFID, CF8305_CARDID),
+	PCMCIA_DEVICE_MANF_CARD(CF8381_MANFID, CF8381_CARDID),
+	PCMCIA_DEVICE_MANF_CARD(CF8385_MANFID, CF8385_CARDID),
 	PCMCIA_DEVICE_NULL,
 };
 MODULE_DEVICE_TABLE(pcmcia, if_cs_ids);

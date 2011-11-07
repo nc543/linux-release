@@ -49,21 +49,15 @@
 #define edac_printk(level, prefix, fmt, arg...) \
 	printk(level "EDAC " prefix ": " fmt, ##arg)
 
-#define edac_printk_verbose(level, prefix, fmt, arg...) \
-	printk(level "EDAC " prefix ": " "in %s, line at %d: " fmt,	\
-	       __FILE__, __LINE__, ##arg)
-
 #define edac_mc_printk(mci, level, fmt, arg...) \
 	printk(level "EDAC MC%d: " fmt, mci->mc_idx, ##arg)
 
 #define edac_mc_chipset_printk(mci, level, prefix, fmt, arg...) \
 	printk(level "EDAC " prefix " MC%d: " fmt, mci->mc_idx, ##arg)
 
-/* edac_device printk */
 #define edac_device_printk(ctl, level, fmt, arg...) \
 	printk(level "EDAC DEVICE%d: " fmt, ctl->dev_idx, ##arg)
 
-/* edac_pci printk */
 #define edac_pci_printk(ctl, level, fmt, arg...) \
 	printk(level "EDAC PCI%d: " fmt, ctl->pci_idx, ##arg)
 
@@ -74,21 +68,14 @@
 
 #ifdef CONFIG_EDAC_DEBUG
 extern int edac_debug_level;
+extern const char *edac_mem_types[];
 
-#ifndef CONFIG_EDAC_DEBUG_VERBOSE
-#define edac_debug_printk(level, fmt, arg...)                            \
-	do {                                                             \
-		if (level <= edac_debug_level)                           \
-			edac_printk(KERN_DEBUG, EDAC_DEBUG, fmt, ##arg); \
+#define edac_debug_printk(level, fmt, arg...)                           \
+	do {                                                            \
+		if (level <= edac_debug_level)                          \
+			edac_printk(KERN_DEBUG, EDAC_DEBUG,		\
+				    "%s: " fmt, __func__, ##arg);	\
 	} while (0)
-#else  /* CONFIG_EDAC_DEBUG_VERBOSE */
-#define edac_debug_printk(level, fmt, arg...)                            \
-	do {                                                             \
-		if (level <= edac_debug_level)                           \
-			edac_printk_verbose(KERN_DEBUG, EDAC_DEBUG, fmt, \
-					    ##arg);			\
-	} while (0)
-#endif
 
 #define debugf0( ... ) edac_debug_printk(0, __VA_ARGS__ )
 #define debugf1( ... ) edac_debug_printk(1, __VA_ARGS__ )
@@ -149,6 +136,8 @@ enum mem_type {
 	MEM_FB_DDR2,		/* fully buffered DDR2 */
 	MEM_RDDR2,		/* Registered DDR2 RAM */
 	MEM_XDR,		/* Rambus XDR */
+	MEM_DDR3,		/* DDR3 RAM */
+	MEM_RDDR3,		/* Registered DDR3 RAM */
 };
 
 #define MEM_FLAG_EMPTY		BIT(MEM_EMPTY)
@@ -166,6 +155,8 @@ enum mem_type {
 #define MEM_FLAG_FB_DDR2        BIT(MEM_FB_DDR2)
 #define MEM_FLAG_RDDR2          BIT(MEM_RDDR2)
 #define MEM_FLAG_XDR            BIT(MEM_XDR)
+#define MEM_FLAG_DDR3		 BIT(MEM_DDR3)
+#define MEM_FLAG_RDDR3		 BIT(MEM_RDDR3)
 
 /* chipset Error Detection and Correction capabilities and mode */
 enum edac_type {
@@ -281,7 +272,7 @@ enum scrub_type {
  *			is irrespective of the memory devices being mounted
  *			on both sides of the memory stick.
  *
- * Socket set:		All of the memory sticks that are required for for
+ * Socket set:		All of the memory sticks that are required for
  *			a single memory access or all of the memory sticks
  *			spanned by a chip-select row.  A single socket set
  *			has two chip-select rows and if double-sided sticks
@@ -335,12 +326,30 @@ struct csrow_info {
 	struct channel_info *channels;
 };
 
+struct mcidev_sysfs_group {
+	const char *name;				/* group name */
+	struct mcidev_sysfs_attribute *mcidev_attr;	/* group attributes */
+};
+
+struct mcidev_sysfs_group_kobj {
+	struct list_head list;		/* list for all instances within a mc */
+
+	struct kobject kobj;		/* kobj for the group */
+
+	struct mcidev_sysfs_group *grp;	/* group description table */
+	struct mem_ctl_info *mci;	/* the parent */
+};
+
 /* mcidev_sysfs_attribute structure
  *	used for driver sysfs attributes and in mem_ctl_info
  * 	sysfs top level entries
  */
 struct mcidev_sysfs_attribute {
-        struct attribute attr;
+	/* It should use either attr or grp */
+	struct attribute attr;
+	struct mcidev_sysfs_group *grp;	/* Points to a group of attributes */
+
+	/* Ops for show/store values at the attribute - not used on group */
         ssize_t (*show)(struct mem_ctl_info *,char *);
         ssize_t (*store)(struct mem_ctl_info *, const char *,size_t);
 };
@@ -369,7 +378,7 @@ struct mem_ctl_info {
 	   internal representation and configures whatever else needs
 	   to be configured.
 	 */
-	int (*set_sdram_scrub_rate) (struct mem_ctl_info * mci, u32 * bw);
+	int (*set_sdram_scrub_rate) (struct mem_ctl_info * mci, u32 bw);
 
 	/* Get the current sdram memory scrub rate from the internal
 	   representation and converts it to the closest matching
@@ -417,6 +426,9 @@ struct mem_ctl_info {
 
 	/* edac sysfs device control */
 	struct kobject edac_mci_kobj;
+
+	/* list for all grp instances within a mc */
+	struct list_head grp_kobj_list;
 
 	/* Additional top controller level attributes, but specified
 	 * by the low level driver.
@@ -840,6 +852,7 @@ extern void edac_device_handle_ue(struct edac_device_ctl_info *edac_dev,
 				int inst_nr, int block_nr, const char *msg);
 extern void edac_device_handle_ce(struct edac_device_ctl_info *edac_dev,
 				int inst_nr, int block_nr, const char *msg);
+extern int edac_device_alloc_index(void);
 
 /*
  * edac_pci APIs

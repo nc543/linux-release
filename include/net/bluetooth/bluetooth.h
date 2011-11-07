@@ -81,16 +81,10 @@ enum {
 	BT_CLOSED
 };
 
-/* Endianness conversions */
-#define htobs(a)	__cpu_to_le16(a)
-#define htobl(a)	__cpu_to_le32(a)
-#define btohs(a)	__le16_to_cpu(a)
-#define btohl(a)	__le32_to_cpu(a)
-
 /* BD Address */
 typedef struct {
 	__u8 b[6];
-} __attribute__((packed)) bdaddr_t;
+} __packed bdaddr_t;
 
 #define BDADDR_ANY   (&(bdaddr_t) {{0, 0, 0, 0, 0, 0}})
 #define BDADDR_LOCAL (&(bdaddr_t) {{0, 0, 0, 0xff, 0xff, 0xff}})
@@ -127,7 +121,7 @@ struct bt_sock_list {
 	rwlock_t          lock;
 };
 
-int  bt_sock_register(int proto, struct net_proto_family *ops);
+int  bt_sock_register(int proto, const struct net_proto_family *ops);
 int  bt_sock_unregister(int proto);
 void bt_sock_link(struct bt_sock_list *l, struct sock *s);
 void bt_sock_unlink(struct bt_sock_list *l, struct sock *s);
@@ -144,8 +138,12 @@ struct sock *bt_accept_dequeue(struct sock *parent, struct socket *newsock);
 struct bt_skb_cb {
 	__u8 pkt_type;
 	__u8 incoming;
+	__u16 expect;
+	__u8 tx_seq;
+	__u8 retries;
+	__u8 sar;
 };
-#define bt_cb(skb) ((struct bt_skb_cb *)(skb->cb)) 
+#define bt_cb(skb) ((struct bt_skb_cb *)((skb)->cb))
 
 static inline struct sk_buff *bt_skb_alloc(unsigned int len, gfp_t how)
 {
@@ -163,21 +161,30 @@ static inline struct sk_buff *bt_skb_send_alloc(struct sock *sk, unsigned long l
 {
 	struct sk_buff *skb;
 
+	release_sock(sk);
 	if ((skb = sock_alloc_send_skb(sk, len + BT_SKB_RESERVE, nb, err))) {
 		skb_reserve(skb, BT_SKB_RESERVE);
 		bt_cb(skb)->incoming  = 0;
 	}
+	lock_sock(sk);
+
+	if (!skb && *err)
+		return NULL;
+
+	*err = sock_error(sk);
+	if (*err)
+		goto out;
+
+	if (sk->sk_shutdown) {
+		*err = -ECONNRESET;
+		goto out;
+	}
 
 	return skb;
-}
 
-static inline int skb_frags_no(struct sk_buff *skb)
-{
-	register struct sk_buff *frag = skb_shinfo(skb)->frag_list;
-	register int n = 1;
-
-	for (; frag; frag=frag->next, n++);
-	return n;
+out:
+	kfree_skb(skb);
+	return NULL;
 }
 
 int bt_err(__u16 code);
@@ -188,6 +195,6 @@ extern void hci_sock_cleanup(void);
 extern int bt_sysfs_init(void);
 extern void bt_sysfs_cleanup(void);
 
-extern struct class *bt_class;
+extern struct dentry *bt_debugfs;
 
 #endif /* __BLUETOOTH_H */

@@ -62,6 +62,7 @@ Audio DAPM widgets fall into a number of types:-
  o Mic        - Mic (and optional Jack)
  o Line       - Line Input/Output (and optional Jack)
  o Speaker    - Speaker
+ o Supply     - Power or clock supply widget used by other widgets.
  o Pre        - Special PRE widget (exec before all others)
  o Post       - Special POST widget (exec after all others)
 
@@ -187,8 +188,8 @@ The WM8731 output mixer has 3 inputs (sources)
  3. Mic Sidetone Input
 
 Each input in this example has a kcontrol associated with it (defined in example
-above) and is connected to the output mixer via it's kcontrol name. We can now
-connect the destination widget (wrt audio signal) with it's source widgets.
+above) and is connected to the output mixer via its kcontrol name. We can now
+connect the destination widget (wrt audio signal) with its source widgets.
 
 	/* output mixer */
 	{"Output Mixer", "Line Bypass Switch", "Line Input"},

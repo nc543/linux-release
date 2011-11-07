@@ -6,7 +6,7 @@ klibcdirs:;
 PHONY += klibcdirs
 
 
-# Gzip, but no bzip2
+# Gzip
 suffix_$(CONFIG_INITRAMFS_COMPRESSION_GZIP)   = .gz
 
 # Bzip2
@@ -14,6 +14,9 @@ suffix_$(CONFIG_INITRAMFS_COMPRESSION_BZIP2)  = .bz2
 
 # Lzma
 suffix_$(CONFIG_INITRAMFS_COMPRESSION_LZMA)   = .lzma
+
+# Lzo
+suffix_$(CONFIG_INITRAMFS_COMPRESSION_LZO)   = .lzo
 
 # Generate builtin.o based on initramfs_data.o
 obj-$(CONFIG_BLK_DEV_INITRD) := initramfs_data$(suffix_y).o
@@ -45,7 +48,7 @@ endif
 quiet_cmd_initfs = GEN     $@
       cmd_initfs = $(initramfs) -o $@ $(ramfs-args) $(ramfs-input)
 
-targets := initramfs_data.cpio.gz initramfs_data.cpio.bz2 initramfs_data.cpio.lzma initramfs_data.cpio
+targets := initramfs_data.cpio.gz initramfs_data.cpio.bz2 initramfs_data.cpio.lzma initramfs_data.cpio.lzo initramfs_data.cpio
 # do not try to update files included in initramfs
 $(deps_initramfs): ;
 

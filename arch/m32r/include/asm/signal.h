@@ -107,7 +107,7 @@ typedef unsigned long sigset_t;
 #define MINSIGSTKSZ	2048
 #define SIGSTKSZ	8192
 
-#include <asm-generic/signal.h>
+#include <asm-generic/signal-defs.h>
 
 #ifdef __KERNEL__
 struct old_sigaction {
@@ -157,7 +157,6 @@ typedef struct sigaltstack {
 #undef __HAVE_ARCH_SIG_BITOPS
 
 struct pt_regs;
-extern int do_signal(struct pt_regs *regs, sigset_t *oldset);
 
 #define ptrace_signal_deliver(regs, cookie)	do { } while (0)
 

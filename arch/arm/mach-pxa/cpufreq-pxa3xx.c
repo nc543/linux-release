@@ -14,6 +14,7 @@
 #include <linux/sched.h>
 #include <linux/init.h>
 #include <linux/cpufreq.h>
+#include <linux/slab.h>
 
 #include <mach/pxa3xx-regs.h>
 
@@ -102,7 +103,7 @@ static int setup_freqs_table(struct cpufreq_policy *policy,
 		table[i].index = i;
 		table[i].frequency = freqs[i].cpufreq_mhz * 1000;
 	}
-	table[num].frequency = i;
+	table[num].index = i;
 	table[num].frequency = CPUFREQ_TABLE_END;
 
 	pxa3xx_freqs = freqs;
@@ -203,7 +204,7 @@ static int pxa3xx_cpufreq_set(struct cpufreq_policy *policy,
 	return 0;
 }
 
-static __init int pxa3xx_cpufreq_init(struct cpufreq_policy *policy)
+static int pxa3xx_cpufreq_init(struct cpufreq_policy *policy)
 {
 	int ret = -EINVAL;
 

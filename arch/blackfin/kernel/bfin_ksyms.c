@@ -10,13 +10,13 @@
 #include <linux/uaccess.h>
 
 #include <asm/cacheflush.h>
+#include <asm/io.h>
 
 /* Allow people to have their own Blackfin exception handler in a module */
 EXPORT_SYMBOL(bfin_return_from_exception);
 
 /* All the Blackfin cache functions: mach-common/cache.S */
 EXPORT_SYMBOL(blackfin_dcache_invalidate_range);
-EXPORT_SYMBOL(blackfin_icache_dcache_flush_range);
 EXPORT_SYMBOL(blackfin_icache_flush_range);
 EXPORT_SYMBOL(blackfin_dcache_flush_range);
 EXPORT_SYMBOL(blackfin_dflush_page);
@@ -31,6 +31,18 @@ EXPORT_SYMBOL(memset);
 EXPORT_SYMBOL(memcmp);
 EXPORT_SYMBOL(memmove);
 EXPORT_SYMBOL(memchr);
+
+/*
+ * Because string functions are both inline and exported functions and
+ * folder arch/blackfin/lib is configured as a library path in Makefile,
+ * symbols exported in folder lib  is not linked into built-in.o but
+ * inlined only. In order to export string symbols to kernel module
+ * properly, they should be exported here.
+ */
+EXPORT_SYMBOL(strcpy);
+EXPORT_SYMBOL(strncpy);
+EXPORT_SYMBOL(strcmp);
+EXPORT_SYMBOL(strncmp);
 
 /*
  * libgcc functions - functions that are used internally by the
@@ -103,4 +115,9 @@ EXPORT_SYMBOL(__raw_uncached_fetch_asm);
 EXPORT_SYMBOL(__raw_smp_mark_barrier_asm);
 EXPORT_SYMBOL(__raw_smp_check_barrier_asm);
 #endif
+#endif
+
+#ifdef CONFIG_FUNCTION_TRACER
+extern void _mcount(void);
+EXPORT_SYMBOL(_mcount);
 #endif

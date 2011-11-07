@@ -28,20 +28,6 @@
 #include "bmap.h"
 
 
-struct nilfs_direct;
-
-/**
- * struct nilfs_direct_operations - direct mapping operation table
- */
-struct nilfs_direct_operations {
-	__u64 (*dop_find_target)(const struct nilfs_direct *, __u64);
-	void (*dop_set_target)(struct nilfs_direct *, __u64, __u64);
-	int (*dop_propagate)(struct nilfs_direct *, struct buffer_head *);
-	int (*dop_assign)(struct nilfs_direct *, __u64, __u64,
-			  struct buffer_head **, sector_t,
-			  union nilfs_binfo *);
-};
-
 /**
  * struct nilfs_direct_node - direct node
  * @dn_flags: flags
@@ -52,27 +38,14 @@ struct nilfs_direct_node {
 	__u8 pad[7];
 };
 
-/**
- * struct nilfs_direct - direct mapping
- * @d_bmap: bmap structure
- * @d_ops: direct mapping operation table
- */
-struct nilfs_direct {
-	struct nilfs_bmap d_bmap;
-
-	/* direct-mapping-specific members */
-	const struct nilfs_direct_operations *d_ops;
-};
-
-
 #define NILFS_DIRECT_NBLOCKS	(NILFS_BMAP_SIZE / sizeof(__le64) - 1)
 #define NILFS_DIRECT_KEY_MIN	0
 #define NILFS_DIRECT_KEY_MAX	(NILFS_DIRECT_NBLOCKS - 1)
 
 
-int nilfs_direct_init(struct nilfs_bmap *, __u64, __u64);
+int nilfs_direct_init(struct nilfs_bmap *);
 int nilfs_direct_delete_and_convert(struct nilfs_bmap *, __u64, __u64 *,
-				    __u64 *, int, __u64, __u64);
+				    __u64 *, int);
 
 
 #endif	/* _NILFS_DIRECT_H */

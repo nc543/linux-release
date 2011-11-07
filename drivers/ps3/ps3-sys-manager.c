@@ -46,7 +46,7 @@
 /**
  * struct ps3_sys_manager_header - System manager message header.
  * @version: Header version, currently 1.
- * @size: Header size in bytes, curently 16.
+ * @size: Header size in bytes, currently 16.
  * @payload_size: Message payload size in bytes.
  * @service_id: Message type, one of enum ps3_sys_manager_service_id.
  * @request_tag: Unique number to identify reply.
@@ -119,7 +119,7 @@ enum ps3_sys_manager_service_id {
  * enum ps3_sys_manager_attr - Notification attribute (bit position mask).
  * @PS3_SM_ATTR_POWER: Power button.
  * @PS3_SM_ATTR_RESET: Reset button, not available on retail console.
- * @PS3_SM_ATTR_THERMAL: Sytem thermal alert.
+ * @PS3_SM_ATTR_THERMAL: System thermal alert.
  * @PS3_SM_ATTR_CONTROLLER: Remote controller event.
  * @PS3_SM_ATTR_ALL: Logical OR of all.
  *
@@ -706,7 +706,7 @@ static void ps3_sys_manager_work(struct ps3_system_bus_device *dev)
 	ps3_vuart_read_async(dev, PS3_SM_RX_MSG_LEN_MIN);
 }
 
-static int ps3_sys_manager_probe(struct ps3_system_bus_device *dev)
+static int __devinit ps3_sys_manager_probe(struct ps3_system_bus_device *dev)
 {
 	int result;
 	struct ps3_sys_manager_ops ops;

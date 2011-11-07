@@ -12,7 +12,6 @@
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/string.h>
-#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/fb.h>
@@ -111,9 +110,7 @@ struct bw2_par {
 	u32			flags;
 #define BW2_FLAG_BLANKED	0x00000001
 
-	unsigned long		physbase;
 	unsigned long		which_io;
-	unsigned long		fbsize;
 };
 
 /**
@@ -167,17 +164,15 @@ static int bw2_mmap(struct fb_info *info, struct vm_area_struct *vma)
 	struct bw2_par *par = (struct bw2_par *)info->par;
 
 	return sbusfb_mmap_helper(bw2_mmap_map,
-				  par->physbase, par->fbsize,
+				  info->fix.smem_start, info->fix.smem_len,
 				  par->which_io,
 				  vma);
 }
 
 static int bw2_ioctl(struct fb_info *info, unsigned int cmd, unsigned long arg)
 {
-	struct bw2_par *par = (struct bw2_par *) info->par;
-
 	return sbusfb_ioctl_helper(cmd, arg, info,
-				   FBTYPE_SUN2BW, 1, par->fbsize);
+				   FBTYPE_SUN2BW, 1, info->fix.smem_len);
 }
 
 /*
@@ -278,9 +273,9 @@ static int __devinit bw2_do_default_mode(struct bw2_par *par,
 	return 0;
 }
 
-static int __devinit bw2_probe(struct of_device *op, const struct of_device_id *match)
+static int __devinit bw2_probe(struct platform_device *op, const struct of_device_id *match)
 {
-	struct device_node *dp = op->node;
+	struct device_node *dp = op->dev.of_node;
 	struct fb_info *info;
 	struct bw2_par *par;
 	int linebytes, err;
@@ -294,7 +289,7 @@ static int __devinit bw2_probe(struct of_device *op, const struct of_device_id *
 
 	spin_lock_init(&par->lock);
 
-	par->physbase = op->resource[0].start;
+	info->fix.smem_start = op->resource[0].start;
 	par->which_io = op->resource[0].flags & IORESOURCE_BITS;
 
 	sbusfb_fill_var(&info->var, dp, 1);
@@ -317,13 +312,13 @@ static int __devinit bw2_probe(struct of_device *op, const struct of_device_id *
 			goto out_unmap_regs;
 	}
 
-	par->fbsize = PAGE_ALIGN(linebytes * info->var.yres);
+	info->fix.smem_len = PAGE_ALIGN(linebytes * info->var.yres);
 
 	info->flags = FBINFO_DEFAULT;
 	info->fbops = &bw2_ops;
 
 	info->screen_base = of_ioremap(&op->resource[0], 0,
-				       par->fbsize, "bw2 ram");
+				       info->fix.smem_len, "bw2 ram");
 	if (!info->screen_base)
 		goto out_unmap_regs;
 
@@ -338,12 +333,12 @@ static int __devinit bw2_probe(struct of_device *op, const struct of_device_id *
 	dev_set_drvdata(&op->dev, info);
 
 	printk(KERN_INFO "%s: bwtwo at %lx:%lx\n",
-	       dp->full_name, par->which_io, par->physbase);
+	       dp->full_name, par->which_io, info->fix.smem_start);
 
 	return 0;
 
 out_unmap_screen:
-	of_iounmap(&op->resource[0], info->screen_base, par->fbsize);
+	of_iounmap(&op->resource[0], info->screen_base, info->fix.smem_len);
 
 out_unmap_regs:
 	of_iounmap(&op->resource[0], par->regs, sizeof(struct bw2_regs));
@@ -355,7 +350,7 @@ out_err:
 	return err;
 }
 
-static int __devexit bw2_remove(struct of_device *op)
+static int __devexit bw2_remove(struct platform_device *op)
 {
 	struct fb_info *info = dev_get_drvdata(&op->dev);
 	struct bw2_par *par = info->par;
@@ -363,7 +358,7 @@ static int __devexit bw2_remove(struct of_device *op)
 	unregister_framebuffer(info);
 
 	of_iounmap(&op->resource[0], par->regs, sizeof(struct bw2_regs));
-	of_iounmap(&op->resource[0], info->screen_base, par->fbsize);
+	of_iounmap(&op->resource[0], info->screen_base, info->fix.smem_len);
 
 	framebuffer_release(info);
 
@@ -381,8 +376,11 @@ static const struct of_device_id bw2_match[] = {
 MODULE_DEVICE_TABLE(of, bw2_match);
 
 static struct of_platform_driver bw2_driver = {
-	.name		= "bw2",
-	.match_table	= bw2_match,
+	.driver = {
+		.name = "bw2",
+		.owner = THIS_MODULE,
+		.of_match_table = bw2_match,
+	},
 	.probe		= bw2_probe,
 	.remove		= __devexit_p(bw2_remove),
 };
@@ -392,12 +390,12 @@ static int __init bw2_init(void)
 	if (fb_get_options("bw2fb", NULL))
 		return -ENODEV;
 
-	return of_register_driver(&bw2_driver, &of_bus_type);
+	return of_register_platform_driver(&bw2_driver);
 }
 
 static void __exit bw2_exit(void)
 {
-	of_unregister_driver(&bw2_driver);
+	of_unregister_platform_driver(&bw2_driver);
 }
 
 module_init(bw2_init);

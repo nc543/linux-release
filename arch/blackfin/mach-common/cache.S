@@ -3,8 +3,6 @@
  *
  * Copyright 2004-2008 Analog Devices Inc.
  *
- * Enter bugs at http://blackfin.uclinux.org/
- *
  * Licensed under the GPL-2 or later.
  */
 
@@ -13,7 +11,18 @@
 #include <asm/cache.h>
 #include <asm/page.h>
 
+#ifdef CONFIG_CACHE_FLUSH_L1
+.section .l1.text
+#else
 .text
+#endif
+
+/* 05000443 - IFLUSH cannot be last instruction in hardware loop */
+#if ANOMALY_05000443
+# define BROK_FLUSH_INST "IFLUSH"
+#else
+# define BROK_FLUSH_INST "no anomaly! yeah!"
+#endif
 
 /* Since all L1 caches work the same way, we use the same method for flushing
  * them.  Only the actual flush instruction differs.  We write this in asm as
@@ -23,7 +32,7 @@
  * R0 = start address
  * R1 = end address
  */
-.macro do_flush flushins:req optflushins optnopins label
+.macro do_flush flushins:req label
 
 	R2 = -L1_CACHE_BYTES;
 
@@ -44,57 +53,23 @@
 \label :
 .endif
 	P0 = R0;
+
 	LSETUP (1f, 2f) LC1 = P1;
 1:
-.ifnb \optflushins
-	\optflushins [P0];
-.endif
-#if ANOMALY_05000443
-.ifb \optnopins
-2:
-.endif
+.ifeqs "\flushins", BROK_FLUSH_INST
 	\flushins [P0++];
-.ifnb \optnopins
-2:	\optnopins;
-.endif
-#else
+2:	nop;
+.else
 2:	\flushins [P0++];
-#endif
+.endif
 
 	RTS;
 .endm
 
 /* Invalidate all instruction cache lines assocoiated with this memory area */
 ENTRY(_blackfin_icache_flush_range)
-/*
- * Walkaround to avoid loading wrong instruction after invalidating icache
- * and following sequence is met.
- *
- * 1) One instruction address is cached in the instruction cache.
- * 2) This instruction in SDRAM is changed.
- * 3) IFLASH[P0] is executed only once in blackfin_icache_flush_range().
- * 4) This instruction is executed again, but the old one is loaded.
- */
-	P0 = R0;
-	IFLUSH[P0];
-	do_flush IFLUSH, , nop
+	do_flush IFLUSH
 ENDPROC(_blackfin_icache_flush_range)
-
-/* Flush all cache lines assocoiated with this area of memory. */
-ENTRY(_blackfin_icache_dcache_flush_range)
-/*
- * Walkaround to avoid loading wrong instruction after invalidating icache
- * and following sequence is met.
- *
- * 1) One instruction address is cached in the instruction cache.
- * 2) This instruction in SDRAM is changed.
- * 3) IFLASH[P0] is executed only once in blackfin_icache_flush_range().
- * 4) This instruction is executed again, but the old one is loaded.
- */
-	P0 = R0;
-	IFLUSH[P0];
-	do_flush FLUSH, IFLUSH
-ENDPROC(_blackfin_icache_dcache_flush_range)
 
 /* Throw away all D-cached data in specified region without any obligation to
  * write them back.  Since the Blackfin ISA does not have an "invalidate"
@@ -107,7 +82,7 @@ ENDPROC(_blackfin_dcache_invalidate_range)
 
 /* Flush all data cache lines assocoiated with this memory area */
 ENTRY(_blackfin_dcache_flush_range)
-	do_flush FLUSH, , , .Ldfr
+	do_flush FLUSH, .Ldfr
 ENDPROC(_blackfin_dcache_flush_range)
 
 /* Our headers convert the page structure to an address, so just need to flush

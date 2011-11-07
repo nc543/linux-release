@@ -23,49 +23,47 @@
 /*     Platform dependent.                                              */
 /*                                                                      */
 /************************************************************************/
+#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/if_arp.h>
 #include <linux/uaccess.h>
 
 #include "usbdrv.h"
 
-#define ZD_IOCTL_WPA			    (SIOCDEVPRIVATE + 1)
-#define ZD_IOCTL_PARAM			    (SIOCDEVPRIVATE + 2)
-#define ZD_IOCTL_GETWPAIE		    (SIOCDEVPRIVATE + 3)
+#define ZD_IOCTL_WPA			(SIOCDEVPRIVATE + 1)
+#define ZD_IOCTL_PARAM			(SIOCDEVPRIVATE + 2)
+#define ZD_IOCTL_GETWPAIE		(SIOCDEVPRIVATE + 3)
 #ifdef ZM_ENABLE_CENC
-#define ZM_IOCTL_CENC               (SIOCDEVPRIVATE + 4)
+#define ZM_IOCTL_CENC			(SIOCDEVPRIVATE + 4)
 #endif  /* ZM_ENABLE_CENC */
-#define ZD_PARAM_ROAMING		    0x0001
-#define ZD_PARAM_PRIVACY		    0x0002
-#define ZD_PARAM_WPA			    0x0003
+#define ZD_PARAM_ROAMING		0x0001
+#define ZD_PARAM_PRIVACY		0x0002
+#define ZD_PARAM_WPA			0x0003
 #define ZD_PARAM_COUNTERMEASURES	0x0004
 #define ZD_PARAM_DROPUNENCRYPTED	0x0005
-#define ZD_PARAM_AUTH_ALGS		    0x0006
-#define ZD_PARAM_WPS_FILTER		    0x0007
+#define ZD_PARAM_AUTH_ALGS		0x0006
+#define ZD_PARAM_WPS_FILTER		0x0007
 
 #ifdef ZM_ENABLE_CENC
 #define P80211_PACKET_CENCFLAG		0x0001
 #endif  /* ZM_ENABLE_CENC */
-#define P80211_PACKET_SETKEY     	0x0003
+#define P80211_PACKET_SETKEY		0x0003
 
 #define ZD_CMD_SET_ENCRYPT_KEY		0x0001
-#define ZD_CMD_SET_MLME			    0x0002
-#define ZD_CMD_SCAN_REQ			    0x0003
+#define ZD_CMD_SET_MLME			0x0002
+#define ZD_CMD_SCAN_REQ			0x0003
 #define ZD_CMD_SET_GENERIC_ELEMENT	0x0004
-#define ZD_CMD_GET_TSC			    0x0005
+#define ZD_CMD_GET_TSC			0x0005
 
 #define ZD_CRYPT_ALG_NAME_LEN		16
-#define ZD_MAX_KEY_SIZE			    32
-#define ZD_MAX_GENERIC_SIZE		    64
+#define ZD_MAX_KEY_SIZE			32
+#define ZD_MAX_GENERIC_SIZE		64
 
-#if WIRELESS_EXT > 12
 #include <net/iw_handler.h>
-#endif
 
 extern u16_t zfLnxGetVapId(zdev_t *dev);
 
-static const u32_t channel_frequency_11A[] =
-{
+static const u32_t channel_frequency_11A[] = {
 	/* Even element for Channel Number, Odd for Frequency */
 	36, 5180,
 	40, 5200,
@@ -248,7 +246,6 @@ int usbdrv_ioctl_setrts(struct net_device *dev, struct iw_param *rrq)
 	return 0;
 }
 
-#if WIRELESS_EXT > 14
 /*
  * Encode a WPA or RSN information element as a custom
  * element using the hostap format.
@@ -269,7 +266,6 @@ u32 encode_ie(void *buf, u32 bufsize, const u8 *ie, u32 ielen,
 		p += sprintf(p, "%02x", ie[i]);
 	return (i == ielen ? p - (u8 *)buf:0);
 }
-#endif  /* WIRELESS_EXT > 14 */
 
 /*
  * Translate scan data returned from the card to a card independent
@@ -284,9 +280,7 @@ char *usbdrv_translate_scan(struct net_device *dev,
 	char *current_val;     /* For rates */
 	char *last_ev;
 	int i;
-	#if WIRELESS_EXT > 14
-		char    buf[64*2 + 30];
-	#endif
+	char    buf[64*2 + 30];
 
 	last_ev = current_ev;
 
@@ -365,10 +359,8 @@ char *usbdrv_translate_scan(struct net_device *dev,
 
 	/* Add quality statistics */
 	iwe.cmd = IWEVQUAL;
-	#if WIRELESS_EXT > 18
 	iwe.u.qual.updated = IW_QUAL_QUAL_UPDATED | IW_QUAL_LEVEL_UPDATED
 				| IW_QUAL_NOISE_UPDATED;
-	#endif
 	iwe.u.qual.level = list->signalStrength;
 	iwe.u.qual.noise = 0;
 	iwe.u.qual.qual = list->signalQuality;
@@ -441,7 +433,6 @@ char *usbdrv_translate_scan(struct net_device *dev,
 	/* Check if we added any event */
 	if ((current_val - current_ev) > IW_EV_LCP_LEN)
 		current_ev = current_val;
-	#if WIRELESS_EXT > 14
 		#define IEEE80211_ELEMID_RSN 0x30
 	memset(&iwe, 0, sizeof(iwe));
 	iwe.cmd = IWEVCUSTOM;
@@ -503,7 +494,6 @@ char *usbdrv_translate_scan(struct net_device *dev,
 			last_ev = current_ev;
 		}
 	}
-	#endif
 	/* The other data in the scan result are not really
 	* interesting, so for now drop it
 	*/
@@ -516,7 +506,7 @@ int usbdrvwext_giwname(struct net_device *dev,
 {
 	/* struct usbdrv_private *macp = dev->ml_priv; */
 
-	strcpy(wrq->name, "IEEE 802.11-MIMO");
+	strcpy(wrq->name, "IEEE 802.11abgn");
 
 	return 0;
 }
@@ -697,12 +687,9 @@ int usbdrvwext_giwrange(struct net_device *dev,
 	if (!netif_running(dev))
 		return -EINVAL;
 
-	#if WIRELESS_EXT > 9
 	range->txpower_capa = IW_TXPOW_DBM;
 	/* XXX what about min/max_pmp, min/max_pmt, etc. */
-	#endif
 
-	#if WIRELESS_EXT > 10
 	range->we_version_compiled = WIRELESS_EXT;
 	range->we_version_source = 13;
 
@@ -710,7 +697,6 @@ int usbdrvwext_giwrange(struct net_device *dev,
 	range->retry_flags = IW_RETRY_LIMIT;
 	range->min_retry = 0;
 	range->max_retry = 255;
-	#endif  /* WIRELESS_EXT > 10 */
 
 	channel_num = zfiWlanQueryAllowChannels(dev, channels);
 
@@ -880,14 +866,17 @@ int usbdrvwext_giwscan(struct net_device *dev,
 	char *current_ev = extra;
 	char *end_buf;
 	int i;
-	/* struct zsBssList BssList; */
-	struct zsBssListV1 *pBssList = kmalloc(sizeof(struct zsBssListV1),
-								GFP_KERNEL);
+	struct zsBssListV1 *pBssList;
 	/* BssList = wd->sta.pBssList; */
 	/* zmw_get_wlan_dev(dev); */
 
 	if (macp->DeviceOpened != 1)
 		return 0;
+
+	/* struct zsBssList BssList; */
+	pBssList = kmalloc(sizeof(struct zsBssListV1), GFP_KERNEL);
+	if (pBssList == NULL)
+		return -ENOMEM;
 
 	if (data->length == 0)
 		end_buf = extra + IW_SCAN_MAX_DATA;
@@ -917,13 +906,11 @@ int usbdrvwext_giwscan(struct net_device *dev,
 		current_ev = usbdrv_translate_scan(dev, info, current_ev,
 					end_buf, &pBssList->bssInfo[i]);
 
-		#if WIRELESS_EXT > 16
 		if (current_ev == end_buf) {
 			kfree(pBssList);
 			data->length = current_ev - extra;
 			return -E2BIG;
 		}
-		#endif
 	}
 
 	/* Length of data */
@@ -946,7 +933,7 @@ int usbdrvwext_siwessid(struct net_device *dev,
 		return -EINVAL;
 
 	if (essid->flags == 1) {
-		if (essid->length > (IW_ESSID_MAX_SIZE + 1))
+		if (essid->length > IW_ESSID_MAX_SIZE)
 			return -E2BIG;
 
 		if (copy_from_user(&EssidBuf, essid->pointer, essid->length))
@@ -1373,7 +1360,7 @@ int usbdrvwext_giwpower(struct net_device *dev,
 }
 
 /*int usbdrvwext_setparam(struct net_device *dev, struct iw_request_info *info,
-*		   	 void *w, char *extra)
+*				void *w, char *extra)
 *{
 *	struct ieee80211vap *vap = dev->ml_priv;
 *	struct ieee80211com *ic = vap->iv_ic;
@@ -2045,6 +2032,7 @@ int usbdrv_wpa_ioctl(struct net_device *dev, struct athr_wlan_param *zdparm)
 	struct zsKeyInfo keyInfo;
 	struct usbdrv_private *macp = dev->ml_priv;
 	u16_t vapId = 0;
+	int ii;
 
 	/* zmw_get_wlan_dev(dev); */
 
@@ -2168,7 +2156,6 @@ int usbdrv_wpa_ioctl(struct net_device *dev, struct athr_wlan_param *zdparm)
 		/* DUMP key context */
 		/* #ifdef WPA_DEBUG */
 		if (keyInfo.keyLength > 0) {
-			int ii;
 			printk(KERN_WARNING
 						"Otus: Key Context:\n");
 			for (ii = 0; ii < keyInfo.keyLength; ) {
@@ -2243,7 +2230,8 @@ int usbdrv_wpa_ioctl(struct net_device *dev, struct athr_wlan_param *zdparm)
 	case ZD_CMD_SCAN_REQ:
 		printk(KERN_ERR "usbdrv_wpa_ioctl: ZD_CMD_SCAN_REQ\n");
 		break;
-	case ZD_CMD_SET_GENERIC_ELEMENT:
+	case ZD_CMD_SET_GENERIC_ELEMENT: {
+		u8_t len, *wpaie;
 		printk(KERN_ERR "usbdrv_wpa_ioctl:"
 					" ZD_CMD_SET_GENERIC_ELEMENT\n");
 
@@ -2266,17 +2254,16 @@ int usbdrv_wpa_ioctl(struct net_device *dev, struct athr_wlan_param *zdparm)
 		/* zfiWlanSetWpaIe(dev, zdparm->u.generic_elem.data,
 		* zdparm->u.generic_elem.len);
 		*/
-		int ii;
-		u8_t len = zdparm->u.generic_elem.len;
-		u8_t *wpaie = (u8_t *)zdparm->u.generic_elem.data;
+		len = zdparm->u.generic_elem.len;
+		wpaie = zdparm->u.generic_elem.data;
 
 		printk(KERN_ERR "wd->ap.wpaLen : % d\n", len);
 
 		/* DUMP WPA IE */
-		for(ii = 0; ii < len;) {
+		for (ii = 0; ii < len;) {
 			printk(KERN_ERR "0x%02x ", wpaie[ii]);
 
-			if((++ii % 16) == 0)
+			if ((++ii % 16) == 0)
 				printk(KERN_ERR "\n");
 		}
 		printk(KERN_ERR "\n");
@@ -2290,6 +2277,7 @@ int usbdrv_wpa_ioctl(struct net_device *dev, struct athr_wlan_param *zdparm)
 		* #endif
 		*/
 		break;
+	}
 
 	/* #ifdef ZM_HOSTAPD_SUPPORT */
 	case ZD_CMD_GET_TSC:
@@ -2320,11 +2308,10 @@ int usbdrv_cenc_ioctl(struct net_device *dev, struct zydas_cenc_param *zdparm)
 	/* Get the AP Id */
 	apId = zfLnxGetVapId(dev);
 
-	if (apId == 0xffff) {
+	if (apId == 0xffff)
 		apId = 0;
-	} else {
+	else
 		apId = apId + 1;
-	}
 
 	switch (zdparm->cmd) {
 	case ZM_CMD_CENC_SETCENC:
@@ -2345,15 +2332,15 @@ int usbdrv_cenc_ioctl(struct net_device *dev, struct zydas_cenc_param *zdparm)
 
 		printk(KERN_ERR "Key Index : % d\n", zdparm->u.crypt.keyid);
 		printk(KERN_ERR "Encryption key = ");
-		for (ii = 0; ii < 16; ii++) {
+		for (ii = 0; ii < 16; ii++)
 			printk(KERN_ERR "0x%02x ", zdparm->u.crypt.key[ii]);
-		}
+
 		printk(KERN_ERR "\n");
 
 		printk(KERN_ERR "MIC key = ");
-		for(ii = 16; ii < ZM_CENC_KEY_SIZE; ii++) {
+		for (ii = 16; ii < ZM_CENC_KEY_SIZE; ii++)
 			printk(KERN_ERR "0x%02x ", zdparm->u.crypt.key[ii]);
-		}
+
 		printk(KERN_ERR "\n");
 
 		/* Set up key information */
@@ -2401,7 +2388,7 @@ int usbdrv_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 	struct athr_wlan_param zdparm;
 	struct usbdrv_private *macp = dev->ml_priv;
 
-	int err = 0;
+	int err = 0, val = 0;
 	int changed = 0;
 
 	/* regp = macp->regp; */
@@ -2435,7 +2422,7 @@ int usbdrv_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 		break;
 	case SIOCSIWRTS:
 		err = usbdrv_ioctl_setrts(dev, &wrq->u.rts);
-		if (! err)
+		if (!err)
 			changed = 1;
 		break;
 	/* set_auth */
@@ -2445,7 +2432,7 @@ int usbdrv_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 			err = -EPERM;
 			break;
 		}
-		int val = *((int *) wrq->u.name);
+		val = *((int *) wrq->u.name);
 		if ((val < 0) || (val > 2)) {
 			err = -EINVAL;
 			break;
@@ -2593,8 +2580,7 @@ int usbdrv_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 							ZM_AUTH_MODE_WPA);
 					} else if ((macp->supIe[17] == 0xf) &&
 						(macp->supIe[18] == 0xac) &&
-						(macp->supIe[19] == 0x2))
-					{
+						(macp->supIe[19] == 0x2)) {
 						printk(KERN_ERR
 				"wd->sta.authMode = ZM_AUTH_MODE_WPA2PSK\n");
 				/* wd->sta.authMode = ZM_AUTH_MODE_WPA2PSK; */
@@ -2603,8 +2589,7 @@ int usbdrv_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 				ZM_AUTH_MODE_WPA2PSK);
 			} else if ((macp->supIe[17] == 0xf) &&
 				(macp->supIe[18] == 0xac) &&
-				(macp->supIe[19] == 0x1))
-				{
+				(macp->supIe[19] == 0x1)) {
 					printk(KERN_ERR
 				"wd->sta.authMode = ZM_AUTH_MODE_WPA2\n");
 				/* wd->sta.authMode = ZM_AUTH_MODE_WPA2; */
@@ -2629,7 +2614,7 @@ int usbdrv_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 				zfiWlanSetWepStatus(dev, ZM_ENCRYPTION_AES);
 				}
 			}
-			//WPA2 or WPA2PSK
+			/*WPA2 or WPA2PSK*/
 			if ((macp->supIe[17] == 0xf) ||
 				(macp->supIe[18] == 0xac)) {
 				if (macp->supIe[13] == 0x2) {
@@ -2667,7 +2652,7 @@ int usbdrv_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 			printk(KERN_ERR
 				"****************ZD_PARAM_COUNTERMEASURES : ");
 
-			if(arg) {
+			if (arg) {
 				/*    mCounterMeasureState=1; */
 				printk(KERN_ERR "enable\n");
 			} else {
@@ -2678,20 +2663,18 @@ int usbdrv_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 		if (op == ZD_PARAM_DROPUNENCRYPTED) {
 			printk(KERN_ERR "ZD_PARAM_DROPUNENCRYPTED : ");
 
-			if(arg) {
+			if (arg)
 				printk(KERN_ERR "enable\n");
-			} else {
+			else
 				printk(KERN_ERR "disable\n");
-			}
 		}
 		if (op == ZD_PARAM_AUTH_ALGS) {
 			printk(KERN_ERR "ZD_PARAM_AUTH_ALGS : ");
 
-			if (arg == 0) {
+			if (arg == 0)
 				printk(KERN_ERR "OPEN_SYSTEM\n");
-			} else {
+			else
 				printk(KERN_ERR "SHARED_KEY\n");
-			}
 		}
 		if (op == ZD_PARAM_WPS_FILTER) {
 			printk(KERN_ERR "ZD_PARAM_WPS_FILTER : ");
@@ -2716,11 +2699,10 @@ int usbdrv_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 		/* Get the AP Id */
 		apId = zfLnxGetVapId(dev);
 
-		if (apId == 0xffff) {
+		if (apId == 0xffff)
 			apId = 0;
-		} else {
+		else
 			apId = apId + 1;
-		}
 
 		if (copy_from_user(&req_wpaie, ifr->ifr_data,
 					sizeof(struct ieee80211req_wpaie))) {
@@ -2732,10 +2714,10 @@ int usbdrv_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 			for (j = 0; j < IEEE80211_ADDR_LEN; j++) {
 				if (macp->stawpaie[i].wpa_macaddr[j] !=
 						req_wpaie.wpa_macaddr[j])
-				break;
+					break;
 			}
 			if (j == 6)
-			break;
+				break;
 		}
 
 		if (i < ZM_OAL_MAX_STA_SUPPORT) {

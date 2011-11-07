@@ -50,8 +50,7 @@ static inline struct mmu_gather *tlb_gather_mmu(struct mm_struct *mm,
 	struct mmu_gather *tlb = &get_cpu_var(mmu_gathers);
 
 	tlb->mm = mm;
-	tlb->fullmm = full_mm_flush || (num_online_cpus() == 1) ||
-		(atomic_read(&mm->mm_users) <= 1 && mm == current->active_mm);
+	tlb->fullmm = full_mm_flush;
 	tlb->nr_ptes = 0;
 	tlb->nr_pxds = TLB_NR_PTRS;
 	if (tlb->fullmm)
@@ -96,7 +95,8 @@ static inline void tlb_remove_page(struct mmu_gather *tlb, struct page *page)
  * pte_free_tlb frees a pte table and clears the CRSTE for the
  * page table from the tlb.
  */
-static inline void pte_free_tlb(struct mmu_gather *tlb, pgtable_t pte)
+static inline void pte_free_tlb(struct mmu_gather *tlb, pgtable_t pte,
+				unsigned long address)
 {
 	if (!tlb->fullmm) {
 		tlb->array[tlb->nr_ptes++] = pte;
@@ -113,7 +113,8 @@ static inline void pte_free_tlb(struct mmu_gather *tlb, pgtable_t pte)
  * as the pgd. pmd_free_tlb checks the asce_limit against 2GB
  * to avoid the double free of the pmd in this case.
  */
-static inline void pmd_free_tlb(struct mmu_gather *tlb, pmd_t *pmd)
+static inline void pmd_free_tlb(struct mmu_gather *tlb, pmd_t *pmd,
+				unsigned long address)
 {
 #ifdef __s390x__
 	if (tlb->mm->context.asce_limit <= (1UL << 31))
@@ -134,7 +135,8 @@ static inline void pmd_free_tlb(struct mmu_gather *tlb, pmd_t *pmd)
  * as the pgd. pud_free_tlb checks the asce_limit against 4TB
  * to avoid the double free of the pud in this case.
  */
-static inline void pud_free_tlb(struct mmu_gather *tlb, pud_t *pud)
+static inline void pud_free_tlb(struct mmu_gather *tlb, pud_t *pud,
+				unsigned long address)
 {
 #ifdef __s390x__
 	if (tlb->mm->context.asce_limit <= (1UL << 42))

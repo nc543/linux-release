@@ -54,13 +54,10 @@ config ACPI_PROCFS
 	  they have been replaced by functions in /sys.
 	  The deprecated files (and their replacements) include:
 
-	  /proc/acpi/sleep (/sys/power/state)
-	  /proc/acpi/info (/sys/module/acpi/parameters/acpica_version)
-	  /proc/acpi/dsdt (/sys/firmware/acpi/tables/DSDT)
-	  /proc/acpi/fadt (/sys/firmware/acpi/tables/FACP)
-	  /proc/acpi/debug_layer (/sys/module/acpi/parameters/debug_layer)
-	  /proc/acpi/debug_level (/sys/module/acpi/parameters/debug_level)
-
+	  /proc/acpi/processor/*/throttling (/sys/class/thermal/
+		cooling_device*/*)
+	  /proc/acpi/video/*/brightness (/sys/class/backlight/)
+	  /proc/acpi/thermal_zone/*/* (/sys/class/thermal/)
 	  This option has no effect on /proc/acpi/ files
 	  and functions which do not yet exist in /sys.
 
@@ -82,12 +79,41 @@ config ACPI_PROCFS_POWER
 
 	  Say N to delete power /proc/acpi/ directories that have moved to /sys/
 
+config ACPI_POWER_METER
+	tristate "ACPI 4.0 power meter"
+	depends on HWMON
+	help
+	  This driver exposes ACPI 4.0 power meters as hardware monitoring
+	  devices.  Say Y (or M) if you have a computer with ACPI 4.0 firmware
+	  and a power meter.
+
+	  To compile this driver as a module, choose M here:
+	  the module will be called power-meter.
+
 config ACPI_SYSFS_POWER
 	bool "Future power /sys interface"
 	select POWER_SUPPLY
 	default y
 	help
 	  Say N to disable power /sys interface
+
+config ACPI_EC_DEBUGFS
+	tristate "EC read/write access through /sys/kernel/debug/ec"
+	default n
+	help
+	  Say N to disable Embedded Controller /sys/kernel/debug interface
+
+	  Be aware that using this interface can confuse your Embedded
+	  Controller in a way that a normal reboot is not enough. You then
+	  have to power off your system, and remove the laptop battery for
+	  some seconds.
+	  An Embedded Controller typically is available on laptops and reads
+	  sensor values like battery state and temperature.
+	  The kernel accesses the EC through ACPI parsed code provided by BIOS
+	  tables. This option allows to access the EC directly without ACPI
+	  code being involved.
+	  Thus this option is a debug option that helps to write ACPI drivers
+	  and can be used to identify ACPI code or EC firmware bugs.
 
 config ACPI_PROC_EVENT
 	bool "Deprecated /proc/acpi/event support"
@@ -196,6 +222,18 @@ config ACPI_HOTPLUG_CPU
 	select ACPI_CONTAINER
 	default y
 
+config ACPI_PROCESSOR_AGGREGATOR
+	tristate "Processor Aggregator"
+	depends on ACPI_PROCESSOR
+	depends on EXPERIMENTAL
+	depends on X86
+	help
+	  ACPI 4.0 defines processor Aggregator, which enables OS to perform
+	  specific processor configuration and control that applies to all
+	  processors in the platform. Currently only logical processor idling
+	  is defined, which is to reduce power consumption. This driver
+	  supports the new device.
+
 config ACPI_THERMAL
 	tristate "Thermal Zone"
 	depends on ACPI_PROCESSOR
@@ -266,6 +304,7 @@ config ACPI_DEBUG_FUNC_TRACE
 
 config ACPI_PCI_SLOT
 	tristate "PCI slot detection driver"
+	depends on SYSFS
 	default n
 	help
 	  This driver creates entries in /sys/bus/pci/slots/ for all PCI
@@ -331,5 +370,14 @@ config ACPI_SBS
 
 	  To compile this driver as a module, choose M here:
 	  the modules will be called sbs and sbshc.
+
+config ACPI_HED
+	tristate "Hardware Error Device"
+	help
+	  This driver supports the Hardware Error Device (PNP0C33),
+	  which is used to report some hardware errors notified via
+	  SCI, mainly the corrected errors.
+
+source "drivers/acpi/apei/Kconfig"
 
 endif	# ACPI

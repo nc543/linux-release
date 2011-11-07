@@ -49,6 +49,7 @@
 #include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
+#include <linux/smp_lock.h>
 #include <linux/pci.h>
 #include <linux/vmalloc.h>
 #include <linux/wait.h>
@@ -59,7 +60,7 @@
 
 #include <linux/spinlock.h>
 
-#include <linux/videodev.h>
+#include <linux/videodev2.h>
 #include <media/v4l2-common.h>
 #include <media/v4l2-ioctl.h>
 #include "videocodec.h"
@@ -323,7 +324,7 @@ static int jpg_fbuffer_alloc(struct zoran_fh *fh)
 		/* Allocate fragment table for this buffer */
 
 		mem = (void *)get_zeroed_page(GFP_KERNEL);
-		if (mem == 0) {
+		if (!mem) {
 			dprintk(1,
 				KERN_ERR
 				"%s: %s - get_zeroed_page (frag_tab) failed for buffer %d\n",
@@ -1443,7 +1444,7 @@ zoran_set_norm (struct zoran *zr,
 	}
 
 	if (norm == V4L2_STD_ALL) {
-		int status = 0;
+		unsigned int status = 0;
 		v4l2_std_id std = 0;
 
 		decoder_call(zr, video, querystd, &std);
@@ -1548,11 +1549,11 @@ static long zoran_default(struct file *file, void *__fh, int cmd, void *arg)
 		mutex_lock(&zr->resource_lock);
 
 		if (zr->norm & V4L2_STD_NTSC)
-			bparams->norm = VIDEO_MODE_NTSC;
-		else if (zr->norm & V4L2_STD_PAL)
-			bparams->norm = VIDEO_MODE_PAL;
+			bparams->norm = ZORAN_VIDMODE_NTSC;
+		else if (zr->norm & V4L2_STD_SECAM)
+			bparams->norm = ZORAN_VIDMODE_SECAM;
 		else
-			bparams->norm = VIDEO_MODE_SECAM;
+			bparams->norm = ZORAN_VIDMODE_PAL;
 
 		bparams->input = zr->input;
 
@@ -1788,11 +1789,11 @@ gstat_unlock_and_return:
 			bstat->signal =
 			    (status & V4L2_IN_ST_NO_SIGNAL) ? 0 : 1;
 			if (norm & V4L2_STD_NTSC)
-				bstat->norm = VIDEO_MODE_NTSC;
+				bstat->norm = ZORAN_VIDMODE_NTSC;
 			else if (norm & V4L2_STD_SECAM)
-				bstat->norm = VIDEO_MODE_SECAM;
+				bstat->norm = ZORAN_VIDMODE_SECAM;
 			else
-				bstat->norm = VIDEO_MODE_PAL;
+				bstat->norm = ZORAN_VIDMODE_PAL;
 
 			bstat->color =
 			    (status & V4L2_IN_ST_NO_COLOR) ? 0 : 1;
@@ -2088,16 +2089,10 @@ static int zoran_try_fmt_vid_cap(struct file *file, void *__fh,
 		return -EINVAL;
 	}
 
-	bpp = (zoran_formats[i].depth + 7) / 8;
-	fmt->fmt.pix.width &= ~((bpp == 2) ? 1 : 3);
-	if (fmt->fmt.pix.width > BUZ_MAX_WIDTH)
-		fmt->fmt.pix.width = BUZ_MAX_WIDTH;
-	if (fmt->fmt.pix.width < BUZ_MIN_WIDTH)
-		fmt->fmt.pix.width = BUZ_MIN_WIDTH;
-	if (fmt->fmt.pix.height > BUZ_MAX_HEIGHT)
-		fmt->fmt.pix.height = BUZ_MAX_HEIGHT;
-	if (fmt->fmt.pix.height < BUZ_MIN_HEIGHT)
-		fmt->fmt.pix.height = BUZ_MIN_HEIGHT;
+	bpp = DIV_ROUND_UP(zoran_formats[i].depth, 8);
+	v4l_bound_align_image(
+		&fmt->fmt.pix.width, BUZ_MIN_WIDTH, BUZ_MAX_WIDTH, bpp == 2 ? 1 : 2,
+		&fmt->fmt.pix.height, BUZ_MIN_HEIGHT, BUZ_MAX_HEIGHT, 0, 0);
 	mutex_unlock(&zr->resource_lock);
 
 	return 0;
@@ -2769,7 +2764,7 @@ static int zoran_enum_input(struct file *file, void *__fh,
 	struct zoran_fh *fh = __fh;
 	struct zoran *zr = fh->zr;
 
-	if (inp->index < 0 || inp->index >= zr->card.inputs)
+	if (inp->index >= zr->card.inputs)
 		return -EINVAL;
 	else {
 		int id = inp->index;
@@ -3177,7 +3172,7 @@ zoran_vm_close (struct vm_area_struct *vma)
 	mutex_unlock(&zr->resource_lock);
 }
 
-static struct vm_operations_struct zoran_vm_ops = {
+static const struct vm_operations_struct zoran_vm_ops = {
 	.open = zoran_vm_open,
 	.close = zoran_vm_close,
 };
@@ -3392,6 +3387,5 @@ struct video_device zoran_template __devinitdata = {
 	.ioctl_ops = &zoran_ioctl_ops,
 	.release = &zoran_vdev_release,
 	.tvnorms = V4L2_STD_NTSC | V4L2_STD_PAL | V4L2_STD_SECAM,
-	.minor = -1
 };
 

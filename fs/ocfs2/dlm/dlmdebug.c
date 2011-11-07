@@ -27,7 +27,6 @@
 #include <linux/types.h>
 #include <linux/slab.h>
 #include <linux/highmem.h>
-#include <linux/utsname.h>
 #include <linux/sysctl.h>
 #include <linux/spinlock.h>
 #include <linux/debugfs.h>
@@ -103,7 +102,7 @@ void __dlm_print_one_lock_resource(struct dlm_lock_resource *res)
 	assert_spin_locked(&res->spinlock);
 
 	stringify_lockname(res->lockname.name, res->lockname.len,
-			   buf, sizeof(buf) - 1);
+			   buf, sizeof(buf));
 	printk("lockres: %s, owner=%u, state=%u\n",
 	       buf, res->owner, res->state);
 	printk("  last used: %lu, refcnt: %u, on purge list: %s\n",
@@ -420,7 +419,7 @@ static loff_t debug_buffer_llseek(struct file *file, loff_t off, int whence)
 
 static int debug_buffer_release(struct inode *inode, struct file *file)
 {
-	struct debug_buffer *db = (struct debug_buffer *)file->private_data;
+	struct debug_buffer *db = file->private_data;
 
 	if (db)
 		kfree(db->buf);
@@ -479,7 +478,7 @@ bail:
 	return -ENOMEM;
 }
 
-static struct file_operations debug_purgelist_fops = {
+static const struct file_operations debug_purgelist_fops = {
 	.open =		debug_purgelist_open,
 	.release =	debug_buffer_release,
 	.read =		debug_buffer_read,
@@ -539,7 +538,7 @@ bail:
 	return -ENOMEM;
 }
 
-static struct file_operations debug_mle_fops = {
+static const struct file_operations debug_mle_fops = {
 	.open =		debug_mle_open,
 	.release =	debug_buffer_release,
 	.read =		debug_buffer_read,
@@ -637,8 +636,14 @@ static void *lockres_seq_start(struct seq_file *m, loff_t *pos)
 	spin_lock(&dlm->track_lock);
 	if (oldres)
 		track_list = &oldres->tracking;
-	else
+	else {
 		track_list = &dlm->tracking_list;
+		if (list_empty(track_list)) {
+			dl = NULL;
+			spin_unlock(&dlm->track_lock);
+			goto bail;
+		}
+	}
 
 	list_for_each_entry(res, track_list, tracking) {
 		if (&res->tracking == &dlm->tracking_list)
@@ -661,6 +666,7 @@ static void *lockres_seq_start(struct seq_file *m, loff_t *pos)
 	} else
 		dl = NULL;
 
+bail:
 	/* passed to seq_show */
 	return dl;
 }
@@ -683,7 +689,7 @@ static int lockres_seq_show(struct seq_file *s, void *v)
 	return 0;
 }
 
-static struct seq_operations debug_lockres_ops = {
+static const struct seq_operations debug_lockres_ops = {
 	.start =	lockres_seq_start,
 	.stop =		lockres_seq_stop,
 	.next =		lockres_seq_next,
@@ -716,7 +722,7 @@ static int debug_lockres_open(struct inode *inode, struct file *file)
 		goto bail;
 	}
 
-	seq = (struct seq_file *) file->private_data;
+	seq = file->private_data;
 	seq->private = dl;
 
 	dlm_grab(dlm);
@@ -732,7 +738,7 @@ bail:
 
 static int debug_lockres_release(struct inode *inode, struct file *file)
 {
-	struct seq_file *seq = (struct seq_file *)file->private_data;
+	struct seq_file *seq = file->private_data;
 	struct debug_lockres *dl = (struct debug_lockres *)seq->private;
 
 	if (dl->dl_res)
@@ -742,7 +748,7 @@ static int debug_lockres_release(struct inode *inode, struct file *file)
 	return seq_release_private(inode, file);
 }
 
-static struct file_operations debug_lockres_fops = {
+static const struct file_operations debug_lockres_fops = {
 	.open =		debug_lockres_open,
 	.release =	debug_lockres_release,
 	.read =		seq_read,
@@ -926,7 +932,7 @@ bail:
 	return -ENOMEM;
 }
 
-static struct file_operations debug_state_fops = {
+static const struct file_operations debug_state_fops = {
 	.open =		debug_state_open,
 	.release =	debug_buffer_release,
 	.read =		debug_buffer_read,

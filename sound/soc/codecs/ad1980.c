@@ -11,7 +11,16 @@
  *  option) any later version.
  */
 
+/*
+ * WARNING:
+ *
+ * Because Analog Devices Inc. discontinued the ad1980 sound chip since
+ * Sep. 2009, this ad1980 driver is not maintained, tested and supported
+ * by ADI now.
+ */
+
 #include <linux/init.h>
+#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/device.h>
@@ -137,13 +146,13 @@ struct snd_soc_dai ad1980_dai = {
 		.channels_min = 2,
 		.channels_max = 6,
 		.rates = SNDRV_PCM_RATE_48000,
-		.formats = SNDRV_PCM_FMTBIT_S16_LE, },
+		.formats = SND_SOC_STD_AC97_FMTS, },
 	.capture = {
 		.stream_name = "Capture",
 		.channels_min = 2,
 		.channels_max = 2,
 		.rates = SNDRV_PCM_RATE_48000,
-		.formats = SNDRV_PCM_FMTBIT_S16_LE, },
+		.formats = SND_SOC_STD_AC97_FMTS, },
 };
 EXPORT_SYMBOL_GPL(ad1980_dai);
 
@@ -257,11 +266,6 @@ static int ad1980_soc_probe(struct platform_device *pdev)
 
 	snd_soc_add_controls(codec, ad1980_snd_ac97_controls,
 				ARRAY_SIZE(ad1980_snd_ac97_controls));
-	ret = snd_soc_init_card(socdev);
-	if (ret < 0) {
-		printk(KERN_ERR "ad1980: failed to register card\n");
-		goto reset_err;
-	}
 
 	return 0;
 
@@ -302,6 +306,6 @@ struct snd_soc_codec_device soc_codec_dev_ad1980 = {
 };
 EXPORT_SYMBOL_GPL(soc_codec_dev_ad1980);
 
-MODULE_DESCRIPTION("ASoC ad1980 driver");
+MODULE_DESCRIPTION("ASoC ad1980 driver (Obsolete)");
 MODULE_AUTHOR("Roy Huang, Cliff Cai");
 MODULE_LICENSE("GPL");

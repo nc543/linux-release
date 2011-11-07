@@ -7,13 +7,14 @@
  * system is licensed under the GPL.
  * See the file COPYING in this distribution for more information.
  *
- * vxge-config.h: Driver for Neterion Inc's X3100 Series 10GbE PCIe I/O
+ * vxge-config.h: Driver for Exar Corp's X3100 Series 10GbE PCIe I/O
  *                Virtualized Server Adapter.
- * Copyright(c) 2002-2009 Neterion Inc.
+ * Copyright(c) 2002-2010 Exar Corp.
  ******************************************************************************/
 #ifndef VXGE_CONFIG_H
 #define VXGE_CONFIG_H
 #include <linux/list.h>
+#include <linux/slab.h>
 
 #ifndef VXGE_CACHE_LINE_SIZE
 #define VXGE_CACHE_LINE_SIZE 128
@@ -682,8 +683,6 @@ struct __vxge_hw_vpath_handle{
  * @major_revision: PCI Device major revision
  * @minor_revision: PCI Device minor revision
  * @bar0: BAR0 virtual address.
- * @bar1: BAR1 virtual address.
- * @bar2: BAR2 virtual address.
  * @pdev: Physical device handle
  * @config: Confguration passed by the LL driver at initialization
  * @link_state: Link state
@@ -698,8 +697,6 @@ struct __vxge_hw_device {
 	u8				major_revision;
 	u8				minor_revision;
 	void __iomem			*bar0;
-	void __iomem			*bar1;
-	void __iomem			*bar2;
 	struct pci_dev			*pdev;
 	struct net_device		*ndev;
 	struct vxge_hw_device_config	config;
@@ -768,10 +765,18 @@ struct vxge_hw_device_hw_info {
 #define VXGE_HW_SR_VH_VIRTUAL_FUNCTION				6
 #define VXGE_HW_VH_NORMAL_FUNCTION				7
 	u64		function_mode;
-#define VXGE_HW_FUNCTION_MODE_MULTI_FUNCTION			0
-#define VXGE_HW_FUNCTION_MODE_SINGLE_FUNCTION			1
+#define VXGE_HW_FUNCTION_MODE_SINGLE_FUNCTION			0
+#define VXGE_HW_FUNCTION_MODE_MULTI_FUNCTION			1
 #define VXGE_HW_FUNCTION_MODE_SRIOV				2
 #define VXGE_HW_FUNCTION_MODE_MRIOV				3
+#define VXGE_HW_FUNCTION_MODE_MRIOV_8				4
+#define VXGE_HW_FUNCTION_MODE_MULTI_FUNCTION_17			5
+#define VXGE_HW_FUNCTION_MODE_SRIOV_8				6
+#define VXGE_HW_FUNCTION_MODE_SRIOV_4				7
+#define VXGE_HW_FUNCTION_MODE_MULTI_FUNCTION_2			8
+#define VXGE_HW_FUNCTION_MODE_MULTI_FUNCTION_4			9
+#define VXGE_HW_FUNCTION_MODE_MRIOV_4				10
+
 	u32		func_id;
 	u64		vpath_mask;
 	struct vxge_hw_device_version fw_version;
@@ -788,17 +793,13 @@ struct vxge_hw_device_hw_info {
 /**
  * struct vxge_hw_device_attr - Device memory spaces.
  * @bar0: BAR0 virtual address.
- * @bar1: BAR1 virtual address.
- * @bar2: BAR2 virtual address.
  * @pdev: PCI device object.
  *
- * Device memory spaces. Includes configuration, BAR0, BAR1, etc. per device
+ * Device memory spaces. Includes configuration, BAR0 etc. per device
  * mapped memories. Also, includes a pointer to OS-specific PCI device object.
  */
 struct vxge_hw_device_attr {
 	void __iomem		*bar0;
-	void __iomem		*bar1;
-	void __iomem		*bar2;
 	struct pci_dev 		*pdev;
 	struct vxge_hw_uld_cbs	uld_callbacks;
 };
@@ -986,7 +987,9 @@ struct __vxge_hw_fifo {
 			void *txdlh,
 			enum vxge_hw_fifo_tcode t_code,
 			void *userdata,
-			void **skb_ptr);
+			struct sk_buff ***skb_ptr,
+			int nr_skb,
+			int *more);
 
 	void (*txdl_term)(
 			void *txdlh,
@@ -1547,7 +1550,7 @@ void vxge_hw_ring_rxd_1b_info_get(
 	rxd_info->l4_cksum_valid =
 		(u32)VXGE_HW_RING_RXD_L4_CKSUM_CORRECT_GET(rxdp->control_0);
 	rxd_info->l4_cksum =
-		(u32)VXGE_HW_RING_RXD_L4_CKSUM_GET(rxdp->control_0);;
+		(u32)VXGE_HW_RING_RXD_L4_CKSUM_GET(rxdp->control_0);
 	rxd_info->frame =
 		(u32)VXGE_HW_RING_RXD_ETHER_ENCAP_GET(rxdp->control_0);
 	rxd_info->proto =
@@ -1787,7 +1790,8 @@ struct vxge_hw_fifo_attr {
 			void *txdlh,
 			enum vxge_hw_fifo_tcode t_code,
 			void *userdata,
-			void **skb_ptr);
+			struct sk_buff ***skb_ptr,
+			int nr_skb, int *more);
 
 	void (*txdl_term)(
 			void *txdlh,
@@ -1919,20 +1923,32 @@ static inline void *vxge_os_dma_malloc(struct pci_dev *pdev,
 	gfp_t flags;
 	void *vaddr;
 	unsigned long misaligned = 0;
+	int realloc_flag = 0;
 	*p_dma_acch = *p_dmah = NULL;
 
 	if (in_interrupt())
 		flags = GFP_ATOMIC | GFP_DMA;
 	else
 		flags = GFP_KERNEL | GFP_DMA;
-
-	size += VXGE_CACHE_LINE_SIZE;
-
+realloc:
 	vaddr = kmalloc((size), flags);
 	if (vaddr == NULL)
 		return vaddr;
-	misaligned = (unsigned long)VXGE_ALIGN(*((u64 *)&vaddr),
+	misaligned = (unsigned long)VXGE_ALIGN((unsigned long)vaddr,
 				VXGE_CACHE_LINE_SIZE);
+	if (realloc_flag)
+		goto out;
+
+	if (misaligned) {
+		/* misaligned, free current one and try allocating
+		 * size + VXGE_CACHE_LINE_SIZE memory
+		 */
+		kfree((void *) vaddr);
+		size += VXGE_CACHE_LINE_SIZE;
+		realloc_flag = 1;
+		goto realloc;
+	}
+out:
 	*(unsigned long *)p_dma_acch = misaligned;
 	vaddr = (void *)((u8 *)vaddr + misaligned);
 	return vaddr;
@@ -2206,6 +2222,8 @@ __vxge_hw_vpath_func_id_get(
 enum vxge_hw_status
 __vxge_hw_vpath_reset_check(struct __vxge_hw_virtualpath *vpath);
 
+enum vxge_hw_status
+vxge_hw_vpath_strip_fcs_check(struct __vxge_hw_device *hldev, u64 vpath_mask);
 /**
  * vxge_debug
  * @level: level of debug verbosity.
@@ -2256,4 +2274,6 @@ enum vxge_hw_status vxge_hw_vpath_rts_rth_set(
 	struct vxge_hw_rth_hash_types *hash_type,
 	u16 bucket_size);
 
+enum vxge_hw_status
+__vxge_hw_device_is_privilaged(u32 host_type, u32 func_id);
 #endif

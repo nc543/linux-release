@@ -79,7 +79,6 @@ History:
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
-#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/time.h>
@@ -87,6 +86,7 @@ History:
 #include <linux/module.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
+#include <linux/if_ether.h>
 #include <linux/skbuff.h>
 #include <linux/bitops.h>
 
@@ -384,7 +384,7 @@ static void InitBoard(struct net_device *dev)
 	int camcnt;
 	camentry_t cams[16];
 	u32 cammask;
-	struct dev_mc_list *mcptr;
+	struct netdev_hw_addr *ha;
 	u16 rcrval;
 
 	/* reset the SONIC */
@@ -419,8 +419,8 @@ static void InitBoard(struct net_device *dev)
 	/* start putting the multicast addresses into the CAM list.  Stop if
 	   it is full. */
 
-	for (mcptr = dev->mc_list; mcptr != NULL; mcptr = mcptr->next) {
-		putcam(cams, &camcnt, mcptr->dmi_addr);
+	netdev_for_each_mc_addr(ha, dev) {
+		putcam(cams, &camcnt, ha->addr);
 		if (camcnt == 16)
 			break;
 	}
@@ -478,7 +478,7 @@ static void InitBoard(struct net_device *dev)
 	/* if still multicast addresses left or ALLMULTI is set, set the multicast
 	   enable bit */
 
-	if ((dev->flags & IFF_ALLMULTI) || (mcptr != NULL))
+	if ((dev->flags & IFF_ALLMULTI) || netdev_mc_count(dev) > camcnt)
 		rcrval |= RCREG_AMC;
 
 	/* promiscous mode ? */
@@ -812,10 +812,10 @@ static int ibmlana_close(struct net_device *dev)
 
 /* transmit a block. */
 
-static int ibmlana_tx(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t ibmlana_tx(struct sk_buff *skb, struct net_device *dev)
 {
 	ibmlana_priv *priv = netdev_priv(dev);
-	int retval = 0, tmplen, addr;
+	int tmplen, addr;
 	unsigned long flags;
 	tda_t tda;
 	int baddr;
@@ -824,7 +824,6 @@ static int ibmlana_tx(struct sk_buff *skb, struct net_device *dev)
 	   the upper layer is in deep desperation and we simply ignore the frame. */
 
 	if (priv->txusedcnt >= TXBUFCNT) {
-		retval = -EIO;
 		dev->stats.tx_dropped++;
 		goto tx_done;
 	}
@@ -874,7 +873,7 @@ static int ibmlana_tx(struct sk_buff *skb, struct net_device *dev)
 	spin_unlock_irqrestore(&priv->lock, flags);
 tx_done:
 	dev_kfree_skb(skb);
-	return retval;
+	return NETDEV_TX_OK;
 }
 
 /* switch receiver mode. */
@@ -989,7 +988,7 @@ static int __devinit ibmlana_init_one(struct device *kdev)
 
 	/* copy out MAC address */
 
-	for (z = 0; z < sizeof(dev->dev_addr); z++)
+	for (z = 0; z < ETH_ALEN; z++)
 		dev->dev_addr[z] = inb(dev->base_addr + MACADDRPROM + z);
 
 	/* print config */

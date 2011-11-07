@@ -19,6 +19,7 @@
 #include <linux/notifier.h>
 #include <linux/rtnetlink.h>
 #include <linux/sched.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 
 #include "internal.h"
@@ -68,6 +69,11 @@ static int cryptomgr_probe(void *data)
 		goto err;
 
 	do {
+		if (tmpl->create) {
+			err = tmpl->create(tmpl, param->tb);
+			continue;
+		}
+
 		inst = tmpl->alloc(param->tb);
 		if (IS_ERR(inst))
 			err = PTR_ERR(inst);
@@ -206,6 +212,10 @@ static int cryptomgr_test(void *data)
 	u32 type = param->type;
 	int err = 0;
 
+#ifdef CONFIG_CRYPTO_MANAGER_DISABLE_TESTS
+	goto skiptest;
+#endif
+
 	if (type & CRYPTO_ALG_TESTED)
 		goto skiptest;
 
@@ -280,29 +290,13 @@ static struct notifier_block cryptomgr_notifier = {
 
 static int __init cryptomgr_init(void)
 {
-	int err;
-
-	err = testmgr_init();
-	if (err)
-		return err;
-
-	err = crypto_register_notifier(&cryptomgr_notifier);
-	if (err)
-		goto free_testmgr;
-
-	return 0;
-
-free_testmgr:
-	testmgr_exit();
-	return err;
+	return crypto_register_notifier(&cryptomgr_notifier);
 }
 
 static void __exit cryptomgr_exit(void)
 {
 	int err = crypto_unregister_notifier(&cryptomgr_notifier);
 	BUG_ON(err);
-
-	testmgr_exit();
 }
 
 subsys_initcall(cryptomgr_init);

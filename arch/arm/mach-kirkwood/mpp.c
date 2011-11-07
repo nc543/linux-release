@@ -23,7 +23,8 @@ static unsigned int __init kirkwood_variant(void)
 
 	kirkwood_pcie_id(&dev, &rev);
 
-	if (dev == MV88F6281_DEV_ID && rev >= MV88F6281_REV_A0)
+	if ((dev == MV88F6281_DEV_ID && rev >= MV88F6281_REV_A0) ||
+	    (dev == MV88F6282_DEV_ID))
 		return MPP_F6281_MASK;
 	if (dev == MV88F6192_DEV_ID && rev >= MV88F6192_REV_A0)
 		return MPP_F6192_MASK;
@@ -47,6 +48,9 @@ void __init kirkwood_mpp_conf(unsigned int *mpp_list)
 	variant_mask = kirkwood_variant();
 	if (!variant_mask)
 		return;
+
+	/* Initialize gpiolib. */
+	orion_gpio_init();
 
 	printk(KERN_DEBUG "initial MPP regs:");
 	for (i = 0; i < MPP_NR_REGS; i++) {

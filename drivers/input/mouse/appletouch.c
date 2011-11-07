@@ -361,7 +361,7 @@ static int atp_calculate_abs(int *xy_sensors, int nb_sensors, int fact,
 		    (!is_increasing && xy_sensors[i - 1] < xy_sensors[i])) {
 			(*fingers)++;
 			is_increasing = 1;
-		} else if (i > 0 && xy_sensors[i - 1] >= xy_sensors[i]) {
+		} else if (i > 0 && (xy_sensors[i - 1] - xy_sensors[i] > threshold)) {
 			is_increasing = 0;
 		}
 
@@ -806,8 +806,8 @@ static int atp_probe(struct usb_interface *iface,
 	if (!dev->urb)
 		goto err_free_devs;
 
-	dev->data = usb_buffer_alloc(dev->udev, dev->info->datalen, GFP_KERNEL,
-				     &dev->urb->transfer_dma);
+	dev->data = usb_alloc_coherent(dev->udev, dev->info->datalen, GFP_KERNEL,
+				       &dev->urb->transfer_dma);
 	if (!dev->data)
 		goto err_free_urb;
 
@@ -862,8 +862,8 @@ static int atp_probe(struct usb_interface *iface,
 	return 0;
 
  err_free_buffer:
-	usb_buffer_free(dev->udev, dev->info->datalen,
-			dev->data, dev->urb->transfer_dma);
+	usb_free_coherent(dev->udev, dev->info->datalen,
+			  dev->data, dev->urb->transfer_dma);
  err_free_urb:
 	usb_free_urb(dev->urb);
  err_free_devs:
@@ -881,8 +881,8 @@ static void atp_disconnect(struct usb_interface *iface)
 	if (dev) {
 		usb_kill_urb(dev->urb);
 		input_unregister_device(dev->input);
-		usb_buffer_free(dev->udev, dev->info->datalen,
-				dev->data, dev->urb->transfer_dma);
+		usb_free_coherent(dev->udev, dev->info->datalen,
+				  dev->data, dev->urb->transfer_dma);
 		usb_free_urb(dev->urb);
 		kfree(dev);
 	}

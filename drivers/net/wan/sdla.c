@@ -330,7 +330,7 @@ struct _dlci_stat
 {
 	short dlci;
 	char  flags;
-} __attribute__((packed));
+} __packed;
 
 struct _frad_stat 
 {
@@ -651,7 +651,8 @@ static int sdla_dlci_conf(struct net_device *slave, struct net_device *master, i
  **************************/
 
 /* NOTE: the DLCI driver deals with freeing the SKB!! */
-static int sdla_transmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t sdla_transmit(struct sk_buff *skb,
+				 struct net_device *dev)
 {
 	struct frad_local *flp;
 	int               ret, addr, accept, i;
@@ -711,23 +712,21 @@ static int sdla_transmit(struct sk_buff *skb, struct net_device *dev)
 				}
 				break;
 		}
+
 		switch (ret)
 		{
 			case SDLA_RET_OK:
 				dev->stats.tx_packets++;
-				ret = DLCI_RET_OK;
 				break;
 
 			case SDLA_RET_CIR_OVERFLOW:
 			case SDLA_RET_BUF_OVERSIZE:
 			case SDLA_RET_NO_BUFS:
 				dev->stats.tx_dropped++;
-				ret = DLCI_RET_DROP;
 				break;
 
 			default:
 				dev->stats.tx_errors++;
-				ret = DLCI_RET_ERR;
 				break;
 		}
 	}
@@ -737,7 +736,9 @@ static int sdla_transmit(struct sk_buff *skb, struct net_device *dev)
 		if(flp->master[i]!=NULL)
 			netif_wake_queue(flp->master[i]);
 	}		
-	return(ret);
+
+	dev_kfree_skb(skb);
+	return NETDEV_TX_OK;
 }
 
 static void sdla_receive(struct net_device *dev)
@@ -1210,14 +1211,9 @@ static int sdla_xfer(struct net_device *dev, struct sdla_mem __user *info, int r
 	}
 	else
 	{
-		temp = kmalloc(mem.len, GFP_KERNEL);
-		if (!temp)
-			return(-ENOMEM);
-		if(copy_from_user(temp, mem.data, mem.len))
-		{
-			kfree(temp);
-			return -EFAULT;
-		}
+		temp = memdup_user(mem.data, mem.len);
+		if (IS_ERR(temp))
+			return PTR_ERR(temp);
 		sdla_write(dev, mem.addr, temp, mem.len);
 		kfree(temp);
 	}
@@ -1351,7 +1347,7 @@ static int sdla_set_config(struct net_device *dev, struct ifmap *map)
 		return(-EINVAL);
 
 	if (!request_region(map->base_addr, SDLA_IO_EXTENTS, dev->name)){
-		printk(KERN_WARNING "SDLA: io-port 0x%04lx in use \n", dev->base_addr);
+		printk(KERN_WARNING "SDLA: io-port 0x%04lx in use\n", dev->base_addr);
 		return(-EINVAL);
 	}
 	base = map->base_addr;
@@ -1456,7 +1452,7 @@ got_type:
 	}
 
 	err = -EAGAIN;
-	if (request_irq(dev->irq, &sdla_isr, 0, dev->name, dev)) 
+	if (request_irq(dev->irq, sdla_isr, 0, dev->name, dev)) 
 		goto fail;
 
 	if (flp->type == SDLA_S507) {

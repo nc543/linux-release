@@ -24,7 +24,12 @@
 #include <linux/platform_device.h>
 #include <linux/spi/spi.h>
 #include <linux/spi/at73c213.h>
+#include <linux/gpio_keys.h>
+#include <linux/input.h>
 #include <linux/clk.h>
+#include <linux/regulator/machine.h>
+#include <linux/regulator/fixed.h>
+#include <linux/regulator/consumer.h>
 
 #include <mach/hardware.h>
 #include <asm/setup.h>
@@ -48,7 +53,7 @@ static void __init ek_map_io(void)
 	/* Initialize processor: 18.432 MHz crystal */
 	at91sam9260_initialize(18432000);
 
-	/* DGBU on ttyS0. (Rx & Tx only) */
+	/* DBGU on ttyS0. (Rx & Tx only) */
 	at91_register_uart(0, 0, 0);
 
 	/* USART0 on ttyS1. (Rx, Tx, CTS, RTS, DTR, DSR, DCD, RI) */
@@ -218,6 +223,106 @@ static struct gpio_led ek_leds[] = {
 	}
 };
 
+
+/*
+ * GPIO Buttons
+ */
+#if defined(CONFIG_KEYBOARD_GPIO) || defined(CONFIG_KEYBOARD_GPIO_MODULE)
+static struct gpio_keys_button ek_buttons[] = {
+	{
+		.gpio		= AT91_PIN_PA30,
+		.code		= BTN_3,
+		.desc		= "Button 3",
+		.active_low	= 1,
+		.wakeup		= 1,
+	},
+	{
+		.gpio		= AT91_PIN_PA31,
+		.code		= BTN_4,
+		.desc		= "Button 4",
+		.active_low	= 1,
+		.wakeup		= 1,
+	}
+};
+
+static struct gpio_keys_platform_data ek_button_data = {
+	.buttons	= ek_buttons,
+	.nbuttons	= ARRAY_SIZE(ek_buttons),
+};
+
+static struct platform_device ek_button_device = {
+	.name		= "gpio-keys",
+	.id		= -1,
+	.num_resources	= 0,
+	.dev		= {
+		.platform_data	= &ek_button_data,
+	}
+};
+
+static void __init ek_add_device_buttons(void)
+{
+	at91_set_gpio_input(AT91_PIN_PA30, 1);	/* btn3 */
+	at91_set_deglitch(AT91_PIN_PA30, 1);
+	at91_set_gpio_input(AT91_PIN_PA31, 1);	/* btn4 */
+	at91_set_deglitch(AT91_PIN_PA31, 1);
+
+	platform_device_register(&ek_button_device);
+}
+#else
+static void __init ek_add_device_buttons(void) {}
+#endif
+
+#if defined(CONFIG_REGULATOR_FIXED_VOLTAGE) || defined(CONFIG_REGULATOR_FIXED_VOLTAGE_MODULE)
+static struct regulator_consumer_supply ek_audio_consumer_supplies[] = {
+	REGULATOR_SUPPLY("AVDD", "0-001b"),
+	REGULATOR_SUPPLY("HPVDD", "0-001b"),
+	REGULATOR_SUPPLY("DBVDD", "0-001b"),
+	REGULATOR_SUPPLY("DCVDD", "0-001b"),
+};
+
+static struct regulator_init_data ek_avdd_reg_init_data = {
+	.constraints	= {
+		.name	= "3V3",
+		.valid_ops_mask = REGULATOR_CHANGE_STATUS,
+	},
+	.consumer_supplies = ek_audio_consumer_supplies,
+	.num_consumer_supplies = ARRAY_SIZE(ek_audio_consumer_supplies),
+};
+
+static struct fixed_voltage_config ek_vdd_pdata = {
+	.supply_name	= "board-3V3",
+	.microvolts	= 3300000,
+	.gpio		= -EINVAL,
+	.enabled_at_boot = 0,
+	.init_data	= &ek_avdd_reg_init_data,
+};
+static struct platform_device ek_voltage_regulator = {
+	.name		= "reg-fixed-voltage",
+	.id		= -1,
+	.num_resources	= 0,
+	.dev		= {
+		.platform_data	= &ek_vdd_pdata,
+	},
+};
+static void __init ek_add_regulators(void)
+{
+	platform_device_register(&ek_voltage_regulator);
+}
+#else
+static void __init ek_add_regulators(void) {}
+#endif
+
+
+static struct i2c_board_info __initdata ek_i2c_devices[] = {
+        {
+                I2C_BOARD_INFO("24c512", 0x50)
+        },
+        {
+                I2C_BOARD_INFO("wm8731", 0x1b)
+        },
+};
+
+
 static void __init ek_board_init(void)
 {
 	/* Serial */
@@ -232,12 +337,16 @@ static void __init ek_board_init(void)
 	ek_add_device_nand();
 	/* Ethernet */
 	at91_add_device_eth(&ek_macb_data);
+	/* Regulators */
+	ek_add_regulators();
 	/* MMC */
 	at91_add_device_mmc(0, &ek_mmc_data);
 	/* I2C */
-	at91_add_device_i2c(NULL, 0);
+	at91_add_device_i2c(ek_i2c_devices, ARRAY_SIZE(ek_i2c_devices));
 	/* LEDs */
 	at91_gpio_leds(ek_leds, ARRAY_SIZE(ek_leds));
+	/* Push Buttons */
+	ek_add_device_buttons();
 	/* PCK0 provides MCLK to the WM8731 */
 	at91_set_B_periph(AT91_PIN_PC1, 0);
 	/* SSC (for WM8731) */

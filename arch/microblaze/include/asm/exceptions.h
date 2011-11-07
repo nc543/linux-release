@@ -1,8 +1,8 @@
 /*
  * Preliminary support for HW exception handing for Microblaze
  *
- * Copyright (C) 2008 Michal Simek
- * Copyright (C) 2008 PetaLogix
+ * Copyright (C) 2008-2009 Michal Simek <monstr@monstr.eu>
+ * Copyright (C) 2008-2009 PetaLogix
  * Copyright (C) 2005 John Williams <jwilliams@itee.uq.edu.au>
  *
  * This file is subject to the terms and conditions of the GNU General
@@ -14,6 +14,11 @@
 #define _ASM_MICROBLAZE_EXCEPTIONS_H
 
 #ifdef __KERNEL__
+
+#ifndef CONFIG_MMU
+#define EX_HANDLER_STACK_SIZ	(4*19)
+#endif
+
 #ifndef __ASSEMBLY__
 
 /* Macros to enable and disable HW exceptions in the MSR */
@@ -63,36 +68,6 @@ asmlinkage void full_exception(struct pt_regs *regs, unsigned int type,
 
 void die(const char *str, struct pt_regs *fp, long err);
 void _exception(int signr, struct pt_regs *regs, int code, unsigned long addr);
-
-#if defined(CONFIG_XMON)
-extern void xmon(struct pt_regs *regs);
-extern int xmon_bpt(struct pt_regs *regs);
-extern int xmon_sstep(struct pt_regs *regs);
-extern int xmon_iabr_match(struct pt_regs *regs);
-extern int xmon_dabr_match(struct pt_regs *regs);
-extern void (*xmon_fault_handler)(struct pt_regs *regs);
-
-void (*debugger)(struct pt_regs *regs) = xmon;
-int (*debugger_bpt)(struct pt_regs *regs) = xmon_bpt;
-int (*debugger_sstep)(struct pt_regs *regs) = xmon_sstep;
-int (*debugger_iabr_match)(struct pt_regs *regs) = xmon_iabr_match;
-int (*debugger_dabr_match)(struct pt_regs *regs) = xmon_dabr_match;
-void (*debugger_fault_handler)(struct pt_regs *regs);
-#elif defined(CONFIG_KGDB)
-void (*debugger)(struct pt_regs *regs);
-int (*debugger_bpt)(struct pt_regs *regs);
-int (*debugger_sstep)(struct pt_regs *regs);
-int (*debugger_iabr_match)(struct pt_regs *regs);
-int (*debugger_dabr_match)(struct pt_regs *regs);
-void (*debugger_fault_handler)(struct pt_regs *regs);
-#else
-#define debugger(regs)			do { } while (0)
-#define debugger_bpt(regs)		0
-#define debugger_sstep(regs)		0
-#define debugger_iabr_match(regs)	0
-#define debugger_dabr_match(regs)	0
-#define debugger_fault_handler		((void (*)(struct pt_regs *))0)
-#endif
 
 #endif /*__ASSEMBLY__ */
 #endif /* __KERNEL__ */

@@ -48,6 +48,7 @@
 #include <linux/pci.h>
 #include <linux/delay.h>
 #include <linux/mISDNhw.h>
+#include <linux/slab.h>
 
 #include "hfc_pci.h"
 
@@ -257,7 +258,7 @@ reset_hfcpci(struct hfc_pci *hc)
 	Write_hfc(hc, HFCPCI_INT_M1, hc->hw.int_m1);
 
 	/* Clear already pending ints */
-	if (Read_hfc(hc, HFCPCI_INT_S1));
+	val = Read_hfc(hc, HFCPCI_INT_S1);
 
 	/* set NT/TE mode */
 	hfcpci_setmode(hc);
@@ -452,7 +453,7 @@ hfcpci_empty_bfifo(struct bchannel *bch, struct bzfifo *bz,
 		}
 		bz->za[new_f2].z2 = cpu_to_le16(new_z2);
 		bz->f2 = new_f2;	/* next buffer */
-		recv_Bchannel(bch);
+		recv_Bchannel(bch, MISDN_ID_ANY);
 	}
 }
 
@@ -499,7 +500,8 @@ receive_dmsg(struct hfc_pci *hc)
 			df->f2 = ((df->f2 + 1) & MAX_D_FRAMES) |
 			    (MAX_D_FRAMES + 1);	/* next buffer */
 			df->za[df->f2 & D_FREG_MASK].z2 =
-			    cpu_to_le16((le16_to_cpu(zp->z2) + rcnt) & (D_FIFO_SIZE - 1));
+			    cpu_to_le16((le16_to_cpu(zp->z2) + rcnt) &
+			    (D_FIFO_SIZE - 1));
 		} else {
 			dch->rx_skb = mI_alloc_skb(rcnt - 3, GFP_ATOMIC);
 			if (!dch->rx_skb) {
@@ -541,35 +543,45 @@ receive_dmsg(struct hfc_pci *hc)
  * check for transparent receive data and read max one 'poll' size if avail
  */
 static void
-hfcpci_empty_fifo_trans(struct bchannel *bch, struct bzfifo *bz, u_char *bdata)
+hfcpci_empty_fifo_trans(struct bchannel *bch, struct bzfifo *rxbz,
+	struct bzfifo *txbz, u_char *bdata)
 {
-	 __le16 *z1r, *z2r;
-	int		new_z2, fcnt, maxlen;
-	u_char		*ptr, *ptr1;
+	 __le16	*z1r, *z2r, *z1t, *z2t;
+	int	new_z2, fcnt_rx, fcnt_tx, maxlen;
+	u_char	*ptr, *ptr1;
 
-	z1r = &bz->za[MAX_B_FRAMES].z1;		/* pointer to z reg */
+	z1r = &rxbz->za[MAX_B_FRAMES].z1;	/* pointer to z reg */
 	z2r = z1r + 1;
+	z1t = &txbz->za[MAX_B_FRAMES].z1;
+	z2t = z1t + 1;
 
-	fcnt = le16_to_cpu(*z1r) - le16_to_cpu(*z2r);
-	if (!fcnt)
+	fcnt_rx = le16_to_cpu(*z1r) - le16_to_cpu(*z2r);
+	if (!fcnt_rx)
 		return;	/* no data avail */
 
-	if (fcnt <= 0)
-		fcnt += B_FIFO_SIZE;	/* bytes actually buffered */
-	new_z2 = le16_to_cpu(*z2r) + fcnt;	/* new position in fifo */
+	if (fcnt_rx <= 0)
+		fcnt_rx += B_FIFO_SIZE;	/* bytes actually buffered */
+	new_z2 = le16_to_cpu(*z2r) + fcnt_rx;	/* new position in fifo */
 	if (new_z2 >= (B_FIFO_SIZE + B_SUB_VAL))
 		new_z2 -= B_FIFO_SIZE;	/* buffer wrap */
 
-	if (fcnt > MAX_DATA_SIZE) {	/* flush, if oversized */
+	if (fcnt_rx > MAX_DATA_SIZE) {	/* flush, if oversized */
 		*z2r = cpu_to_le16(new_z2);		/* new position */
 		return;
 	}
 
-	bch->rx_skb = mI_alloc_skb(fcnt, GFP_ATOMIC);
+	fcnt_tx = le16_to_cpu(*z2t) - le16_to_cpu(*z1t);
+	if (fcnt_tx <= 0)
+		fcnt_tx += B_FIFO_SIZE;
+		    /* fcnt_tx contains available bytes in tx-fifo */
+	fcnt_tx = B_FIFO_SIZE - fcnt_tx;
+		    /* remaining bytes to send (bytes in tx-fifo) */
+
+	bch->rx_skb = mI_alloc_skb(fcnt_rx, GFP_ATOMIC);
 	if (bch->rx_skb) {
-		ptr = skb_put(bch->rx_skb, fcnt);
-		if (le16_to_cpu(*z2r) + fcnt <= B_FIFO_SIZE + B_SUB_VAL)
-			maxlen = fcnt;	/* complete transfer */
+		ptr = skb_put(bch->rx_skb, fcnt_rx);
+		if (le16_to_cpu(*z2r) + fcnt_rx <= B_FIFO_SIZE + B_SUB_VAL)
+			maxlen = fcnt_rx;	/* complete transfer */
 		else
 			maxlen = B_FIFO_SIZE + B_SUB_VAL - le16_to_cpu(*z2r);
 			    /* maximum */
@@ -577,14 +589,14 @@ hfcpci_empty_fifo_trans(struct bchannel *bch, struct bzfifo *bz, u_char *bdata)
 		ptr1 = bdata + (le16_to_cpu(*z2r) - B_SUB_VAL);
 		    /* start of data */
 		memcpy(ptr, ptr1, maxlen);	/* copy data */
-		fcnt -= maxlen;
+		fcnt_rx -= maxlen;
 
-		if (fcnt) {	/* rest remaining */
+		if (fcnt_rx) {	/* rest remaining */
 			ptr += maxlen;
 			ptr1 = bdata;	/* start of buffer */
-			memcpy(ptr, ptr1, fcnt);	/* rest */
+			memcpy(ptr, ptr1, fcnt_rx);	/* rest */
 		}
-		recv_Bchannel(bch);
+		recv_Bchannel(bch, fcnt_tx); /* bch, id */
 	} else
 		printk(KERN_WARNING "HFCPCI: receive out of memory\n");
 
@@ -600,26 +612,28 @@ main_rec_hfcpci(struct bchannel *bch)
 	struct hfc_pci	*hc = bch->hw;
 	int		rcnt, real_fifo;
 	int		receive = 0, count = 5;
-	struct bzfifo	*bz;
+	struct bzfifo	*txbz, *rxbz;
 	u_char		*bdata;
 	struct zt	*zp;
 
 	if ((bch->nr & 2) && (!hc->hw.bswapped)) {
-		bz = &((union fifo_area *)(hc->hw.fifos))->b_chans.rxbz_b2;
+		rxbz = &((union fifo_area *)(hc->hw.fifos))->b_chans.rxbz_b2;
+		txbz = &((union fifo_area *)(hc->hw.fifos))->b_chans.txbz_b2;
 		bdata = ((union fifo_area *)(hc->hw.fifos))->b_chans.rxdat_b2;
 		real_fifo = 1;
 	} else {
-		bz = &((union fifo_area *)(hc->hw.fifos))->b_chans.rxbz_b1;
+		rxbz = &((union fifo_area *)(hc->hw.fifos))->b_chans.rxbz_b1;
+		txbz = &((union fifo_area *)(hc->hw.fifos))->b_chans.txbz_b1;
 		bdata = ((union fifo_area *)(hc->hw.fifos))->b_chans.rxdat_b1;
 		real_fifo = 0;
 	}
 Begin:
 	count--;
-	if (bz->f1 != bz->f2) {
+	if (rxbz->f1 != rxbz->f2) {
 		if (bch->debug & DEBUG_HW_BCHANNEL)
 			printk(KERN_DEBUG "hfcpci rec ch(%x) f1(%d) f2(%d)\n",
-			    bch->nr, bz->f1, bz->f2);
-		zp = &bz->za[bz->f2];
+			    bch->nr, rxbz->f1, rxbz->f2);
+		zp = &rxbz->za[rxbz->f2];
 
 		rcnt = le16_to_cpu(zp->z1) - le16_to_cpu(zp->z2);
 		if (rcnt < 0)
@@ -630,8 +644,8 @@ Begin:
 			    "hfcpci rec ch(%x) z1(%x) z2(%x) cnt(%d)\n",
 			    bch->nr, le16_to_cpu(zp->z1),
 			    le16_to_cpu(zp->z2), rcnt);
-		hfcpci_empty_bfifo(bch, bz, bdata, rcnt);
-		rcnt = bz->f1 - bz->f2;
+		hfcpci_empty_bfifo(bch, rxbz, bdata, rcnt);
+		rcnt = rxbz->f1 - rxbz->f2;
 		if (rcnt < 0)
 			rcnt += MAX_B_FRAMES + 1;
 		if (hc->hw.last_bfifo_cnt[real_fifo] > rcnt + 1) {
@@ -644,7 +658,7 @@ Begin:
 		else
 			receive = 0;
 	} else if (test_bit(FLG_TRANSPARENT, &bch->Flags)) {
-		hfcpci_empty_fifo_trans(bch, bz, bdata);
+		hfcpci_empty_fifo_trans(bch, rxbz, txbz, bdata);
 		return;
 	} else
 		receive = 0;
@@ -954,6 +968,7 @@ static void
 ph_state_nt(struct dchannel *dch)
 {
 	struct hfc_pci	*hc = dch->hw;
+	u_char	val;
 
 	if (dch->debug)
 		printk(KERN_DEBUG "%s: NT newstate %x\n",
@@ -967,7 +982,7 @@ ph_state_nt(struct dchannel *dch)
 			hc->hw.int_m1 &= ~HFCPCI_INTS_TIMER;
 			Write_hfc(hc, HFCPCI_INT_M1, hc->hw.int_m1);
 			/* Clear already pending ints */
-			if (Read_hfc(hc, HFCPCI_INT_S1));
+			val = Read_hfc(hc, HFCPCI_INT_S1);
 			Write_hfc(hc, HFCPCI_STATES, 4 | HFCPCI_LOAD_STATE);
 			udelay(10);
 			Write_hfc(hc, HFCPCI_STATES, 4);
@@ -1256,8 +1271,7 @@ mode_hfcpci(struct bchannel *bch, int bc, int protocol)
 		rx_slot = (bc>>8) & 0xff;
 		tx_slot = (bc>>16) & 0xff;
 		bc = bc & 0xff;
-	} else if (test_bit(HFC_CFG_PCM, &hc->cfg) &&
-	    (protocol > ISDN_P_NONE))
+	} else if (test_bit(HFC_CFG_PCM, &hc->cfg) && (protocol > ISDN_P_NONE))
 		printk(KERN_WARNING "%s: no pcm channel id but HFC_CFG_PCM\n",
 		    __func__);
 	if (hc->chanlimit > 1) {
@@ -1315,8 +1329,8 @@ mode_hfcpci(struct bchannel *bch, int bc, int protocol)
 	case (ISDN_P_B_RAW):
 		bch->state = protocol;
 		bch->nr = bc;
-		hfcpci_clear_fifo_rx(hc, (fifo2 & 2)?1:0);
-		hfcpci_clear_fifo_tx(hc, (fifo2 & 2)?1:0);
+		hfcpci_clear_fifo_rx(hc, (fifo2 & 2) ? 1 : 0);
+		hfcpci_clear_fifo_tx(hc, (fifo2 & 2) ? 1 : 0);
 		if (bc & 2) {
 			hc->hw.sctrl |= SCTRL_B2_ENA;
 			hc->hw.sctrl_r |= SCTRL_B2_ENA;
@@ -1350,8 +1364,8 @@ mode_hfcpci(struct bchannel *bch, int bc, int protocol)
 	case (ISDN_P_B_HDLC):
 		bch->state = protocol;
 		bch->nr = bc;
-		hfcpci_clear_fifo_rx(hc, (fifo2 & 2)?1:0);
-		hfcpci_clear_fifo_tx(hc, (fifo2 & 2)?1:0);
+		hfcpci_clear_fifo_rx(hc, (fifo2 & 2) ? 1 : 0);
+		hfcpci_clear_fifo_tx(hc, (fifo2 & 2) ? 1 : 0);
 		if (bc & 2) {
 			hc->hw.sctrl |= SCTRL_B2_ENA;
 			hc->hw.sctrl_r |= SCTRL_B2_ENA;
@@ -1445,7 +1459,7 @@ set_hfcpci_rxtest(struct bchannel *bch, int protocol, int chan)
 	switch (protocol) {
 	case (ISDN_P_B_RAW):
 		bch->state = protocol;
-		hfcpci_clear_fifo_rx(hc, (chan & 2)?1:0);
+		hfcpci_clear_fifo_rx(hc, (chan & 2) ? 1 : 0);
 		if (chan & 2) {
 			hc->hw.sctrl_r |= SCTRL_B2_ENA;
 			hc->hw.fifo_en |= HFCPCI_FIFOEN_B2RX;
@@ -1470,7 +1484,7 @@ set_hfcpci_rxtest(struct bchannel *bch, int protocol, int chan)
 		break;
 	case (ISDN_P_B_HDLC):
 		bch->state = protocol;
-		hfcpci_clear_fifo_rx(hc, (chan & 2)?1:0);
+		hfcpci_clear_fifo_rx(hc, (chan & 2) ? 1 : 0);
 		if (chan & 2) {
 			hc->hw.sctrl_r |= SCTRL_B2_ENA;
 			hc->hw.last_bfifo_cnt[1] = 0;
@@ -1509,22 +1523,8 @@ deactivate_bchannel(struct bchannel *bch)
 	u_long		flags;
 
 	spin_lock_irqsave(&hc->lock, flags);
-	if (test_and_clear_bit(FLG_TX_NEXT, &bch->Flags)) {
-		dev_kfree_skb(bch->next_skb);
-		bch->next_skb = NULL;
-	}
-	if (bch->tx_skb) {
-		dev_kfree_skb(bch->tx_skb);
-		bch->tx_skb = NULL;
-	}
-	bch->tx_idx = 0;
-	if (bch->rx_skb) {
-		dev_kfree_skb(bch->rx_skb);
-		bch->rx_skb = NULL;
-	}
+	mISDN_clear_bchannel(bch);
 	mode_hfcpci(bch, bch->nr, ISDN_P_NONE);
-	test_and_clear_bit(FLG_ACTIVE, &bch->Flags);
-	test_and_clear_bit(FLG_TX_BUSY, &bch->Flags);
 	spin_unlock_irqrestore(&hc->lock, flags);
 }
 
@@ -1773,7 +1773,7 @@ init_card(struct hfc_pci *hc)
 		inithfcpci(hc);
 		/*
 		 * Finally enable IRQ output
-		 * this is only allowed, if an IRQ routine is allready
+		 * this is only allowed, if an IRQ routine is already
 		 * established for this HFC, so don't do that earlier
 		 */
 		enable_hwirq(hc);
@@ -1793,10 +1793,9 @@ init_card(struct hfc_pci *hc)
 			printk(KERN_WARNING
 			    "HFC PCI: IRQ(%d) getting no interrupts "
 			    "during init %d\n", hc->irq, 4 - cnt);
-			if (cnt == 1) {
-				spin_unlock_irqrestore(&hc->lock, flags);
-				return -EIO;
-			} else {
+			if (cnt == 1)
+				break;
+			else {
 				reset_hfcpci(hc);
 				cnt--;
 			}
@@ -2035,7 +2034,8 @@ setup_hw(struct hfc_pci *hc)
 		printk(KERN_WARNING "HFC-PCI: No IRQ for PCI card found\n");
 		return 1;
 	}
-	hc->hw.pci_io = (char __iomem *)(unsigned long)hc->pdev->resource[1].start;
+	hc->hw.pci_io =
+		(char __iomem *)(unsigned long)hc->pdev->resource[1].start;
 
 	if (!hc->hw.pci_io) {
 		printk(KERN_WARNING "HFC-PCI: No IO-Mem for PCI card found\n");
@@ -2188,52 +2188,52 @@ static const struct _hfc_map hfc_map[] =
 
 static struct pci_device_id hfc_ids[] =
 {
-	{PCI_VENDOR_ID_CCD, PCI_DEVICE_ID_CCD_2BD0,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &hfc_map[0]},
-	{PCI_VENDOR_ID_CCD, PCI_DEVICE_ID_CCD_B000,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &hfc_map[1]},
-	{PCI_VENDOR_ID_CCD, PCI_DEVICE_ID_CCD_B006,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &hfc_map[2]},
-	{PCI_VENDOR_ID_CCD, PCI_DEVICE_ID_CCD_B007,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &hfc_map[3]},
-	{PCI_VENDOR_ID_CCD, PCI_DEVICE_ID_CCD_B008,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &hfc_map[4]},
-	{PCI_VENDOR_ID_CCD, PCI_DEVICE_ID_CCD_B009,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &hfc_map[5]},
-	{PCI_VENDOR_ID_CCD, PCI_DEVICE_ID_CCD_B00A,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &hfc_map[6]},
-	{PCI_VENDOR_ID_CCD, PCI_DEVICE_ID_CCD_B00B,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &hfc_map[7]},
-	{PCI_VENDOR_ID_CCD, PCI_DEVICE_ID_CCD_B00C,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &hfc_map[8]},
-	{PCI_VENDOR_ID_CCD, PCI_DEVICE_ID_CCD_B100,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &hfc_map[9]},
-	{PCI_VENDOR_ID_CCD, PCI_DEVICE_ID_CCD_B700,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &hfc_map[10]},
-	{PCI_VENDOR_ID_CCD, PCI_DEVICE_ID_CCD_B701,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &hfc_map[11]},
-	{PCI_VENDOR_ID_ABOCOM, PCI_DEVICE_ID_ABOCOM_2BD1,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &hfc_map[12]},
-	{PCI_VENDOR_ID_ASUSTEK, PCI_DEVICE_ID_ASUSTEK_0675,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &hfc_map[13]},
-	{PCI_VENDOR_ID_BERKOM, PCI_DEVICE_ID_BERKOM_T_CONCEPT,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &hfc_map[14]},
-	{PCI_VENDOR_ID_BERKOM, PCI_DEVICE_ID_BERKOM_A1T,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &hfc_map[15]},
-	{PCI_VENDOR_ID_ANIGMA, PCI_DEVICE_ID_ANIGMA_MC145575,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &hfc_map[16]},
-	{PCI_VENDOR_ID_ZOLTRIX, PCI_DEVICE_ID_ZOLTRIX_2BD0,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &hfc_map[17]},
-	{PCI_VENDOR_ID_DIGI, PCI_DEVICE_ID_DIGI_DF_M_IOM2_E,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &hfc_map[18]},
-	{PCI_VENDOR_ID_DIGI, PCI_DEVICE_ID_DIGI_DF_M_E,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &hfc_map[19]},
-	{PCI_VENDOR_ID_DIGI, PCI_DEVICE_ID_DIGI_DF_M_IOM2_A,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &hfc_map[20]},
-	{PCI_VENDOR_ID_DIGI, PCI_DEVICE_ID_DIGI_DF_M_A,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &hfc_map[21]},
-	{PCI_VENDOR_ID_SITECOM, PCI_DEVICE_ID_SITECOM_DC105V2,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &hfc_map[22]},
+	{ PCI_VDEVICE(CCD, PCI_DEVICE_ID_CCD_2BD0),
+		(unsigned long) &hfc_map[0] },
+	{ PCI_VDEVICE(CCD, PCI_DEVICE_ID_CCD_B000),
+		(unsigned long) &hfc_map[1] },
+	{ PCI_VDEVICE(CCD, PCI_DEVICE_ID_CCD_B006),
+		(unsigned long) &hfc_map[2] },
+	{ PCI_VDEVICE(CCD, PCI_DEVICE_ID_CCD_B007),
+		(unsigned long) &hfc_map[3] },
+	{ PCI_VDEVICE(CCD, PCI_DEVICE_ID_CCD_B008),
+		(unsigned long) &hfc_map[4] },
+	{ PCI_VDEVICE(CCD, PCI_DEVICE_ID_CCD_B009),
+		(unsigned long) &hfc_map[5] },
+	{ PCI_VDEVICE(CCD, PCI_DEVICE_ID_CCD_B00A),
+		(unsigned long) &hfc_map[6] },
+	{ PCI_VDEVICE(CCD, PCI_DEVICE_ID_CCD_B00B),
+		(unsigned long) &hfc_map[7] },
+	{ PCI_VDEVICE(CCD, PCI_DEVICE_ID_CCD_B00C),
+		(unsigned long) &hfc_map[8] },
+	{ PCI_VDEVICE(CCD, PCI_DEVICE_ID_CCD_B100),
+		(unsigned long) &hfc_map[9] },
+	{ PCI_VDEVICE(CCD, PCI_DEVICE_ID_CCD_B700),
+		(unsigned long) &hfc_map[10] },
+	{ PCI_VDEVICE(CCD, PCI_DEVICE_ID_CCD_B701),
+		(unsigned long) &hfc_map[11] },
+	{ PCI_VDEVICE(ABOCOM, PCI_DEVICE_ID_ABOCOM_2BD1),
+		(unsigned long) &hfc_map[12] },
+	{ PCI_VDEVICE(ASUSTEK, PCI_DEVICE_ID_ASUSTEK_0675),
+		(unsigned long) &hfc_map[13] },
+	{ PCI_VDEVICE(BERKOM, PCI_DEVICE_ID_BERKOM_T_CONCEPT),
+		(unsigned long) &hfc_map[14] },
+	{ PCI_VDEVICE(BERKOM, PCI_DEVICE_ID_BERKOM_A1T),
+		(unsigned long) &hfc_map[15] },
+	{ PCI_VDEVICE(ANIGMA, PCI_DEVICE_ID_ANIGMA_MC145575),
+		(unsigned long) &hfc_map[16] },
+	{ PCI_VDEVICE(ZOLTRIX, PCI_DEVICE_ID_ZOLTRIX_2BD0),
+		(unsigned long) &hfc_map[17] },
+	{ PCI_VDEVICE(DIGI, PCI_DEVICE_ID_DIGI_DF_M_IOM2_E),
+		(unsigned long) &hfc_map[18] },
+	{ PCI_VDEVICE(DIGI, PCI_DEVICE_ID_DIGI_DF_M_E),
+		(unsigned long) &hfc_map[19] },
+	{ PCI_VDEVICE(DIGI, PCI_DEVICE_ID_DIGI_DF_M_IOM2_A),
+		(unsigned long) &hfc_map[20] },
+	{ PCI_VDEVICE(DIGI, PCI_DEVICE_ID_DIGI_DF_M_A),
+		(unsigned long) &hfc_map[21] },
+	{ PCI_VDEVICE(SITECOM, PCI_DEVICE_ID_SITECOM_DC105V2),
+		(unsigned long) &hfc_map[22] },
 	{},
 };
 
@@ -2277,7 +2277,7 @@ hfc_remove_pci(struct pci_dev *pdev)
 		release_card(card);
 	else
 		if (debug)
-			printk(KERN_WARNING "%s: drvdata already removed\n",
+			printk(KERN_DEBUG "%s: drvdata already removed\n",
 			    __func__);
 }
 

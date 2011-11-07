@@ -19,12 +19,14 @@
 
 #include <linux/gpio_keys.h>
 #include <linux/init.h>
+#include <linux/gpio.h>
 #include <linux/input.h>
 #include <linux/interrupt.h>
 #include <linux/platform_device.h>
 #include <linux/serial_core.h>
 #include <linux/timer.h>
 #include <linux/io.h>
+#include <linux/mmc/host.h>
 
 #include <mach/hardware.h>
 #include <asm/irq.h>
@@ -45,6 +47,7 @@
 #include <plat/clock.h>
 #include <plat/cpu.h>
 #include <plat/devs.h>
+#include <plat/mci.h>
 #include <plat/s3c2410.h>
 #include <plat/udc.h>
 
@@ -85,10 +88,10 @@ static void n30_udc_pullup(enum s3c2410_udc_cmd_e cmd)
 {
 	switch (cmd) {
 	case S3C2410_UDC_P_ENABLE :
-		s3c2410_gpio_setpin(S3C2410_GPB3, 1);
+		gpio_set_value(S3C2410_GPB(3), 1);
 		break;
 	case S3C2410_UDC_P_DISABLE :
-		s3c2410_gpio_setpin(S3C2410_GPB3, 0);
+		gpio_set_value(S3C2410_GPB(3), 0);
 		break;
 	case S3C2410_UDC_P_RESET :
 		break;
@@ -99,55 +102,55 @@ static void n30_udc_pullup(enum s3c2410_udc_cmd_e cmd)
 
 static struct s3c2410_udc_mach_info n30_udc_cfg __initdata = {
 	.udc_command		= n30_udc_pullup,
-	.vbus_pin		= S3C2410_GPG1,
+	.vbus_pin		= S3C2410_GPG(1),
 	.vbus_pin_inverted	= 0,
 };
 
 static struct gpio_keys_button n30_buttons[] = {
 	{
-		.gpio		= S3C2410_GPF0,
+		.gpio		= S3C2410_GPF(0),
 		.code		= KEY_POWER,
 		.desc		= "Power",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPG9,
+		.gpio		= S3C2410_GPG(9),
 		.code		= KEY_UP,
 		.desc		= "Thumbwheel Up",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPG8,
+		.gpio		= S3C2410_GPG(8),
 		.code		= KEY_DOWN,
 		.desc		= "Thumbwheel Down",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPG7,
+		.gpio		= S3C2410_GPG(7),
 		.code		= KEY_ENTER,
 		.desc		= "Thumbwheel Press",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPF7,
+		.gpio		= S3C2410_GPF(7),
 		.code		= KEY_HOMEPAGE,
 		.desc		= "Home",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPF6,
+		.gpio		= S3C2410_GPF(6),
 		.code		= KEY_CALENDAR,
 		.desc		= "Calendar",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPF5,
+		.gpio		= S3C2410_GPF(5),
 		.code		= KEY_ADDRESSBOOK,
 		.desc		= "Contacts",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPF4,
+		.gpio		= S3C2410_GPF(4),
 		.code		= KEY_MAIL,
 		.desc		= "Mail",
 		.active_low	= 0,
@@ -169,73 +172,75 @@ static struct platform_device n30_button_device = {
 
 static struct gpio_keys_button n35_buttons[] = {
 	{
-		.gpio		= S3C2410_GPF0,
+		.gpio		= S3C2410_GPF(0),
 		.code		= KEY_POWER,
+		.type		= EV_PWR,
 		.desc		= "Power",
 		.active_low	= 0,
+		.wakeup		= 1,
 	},
 	{
-		.gpio		= S3C2410_GPG9,
+		.gpio		= S3C2410_GPG(9),
 		.code		= KEY_UP,
 		.desc		= "Joystick Up",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPG8,
+		.gpio		= S3C2410_GPG(8),
 		.code		= KEY_DOWN,
 		.desc		= "Joystick Down",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPG6,
+		.gpio		= S3C2410_GPG(6),
 		.code		= KEY_DOWN,
 		.desc		= "Joystick Left",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPG5,
+		.gpio		= S3C2410_GPG(5),
 		.code		= KEY_DOWN,
 		.desc		= "Joystick Right",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPG7,
+		.gpio		= S3C2410_GPG(7),
 		.code		= KEY_ENTER,
 		.desc		= "Joystick Press",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPF7,
+		.gpio		= S3C2410_GPF(7),
 		.code		= KEY_HOMEPAGE,
 		.desc		= "Home",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPF6,
+		.gpio		= S3C2410_GPF(6),
 		.code		= KEY_CALENDAR,
 		.desc		= "Calendar",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPF5,
+		.gpio		= S3C2410_GPF(5),
 		.code		= KEY_ADDRESSBOOK,
 		.desc		= "Contacts",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPF4,
+		.gpio		= S3C2410_GPF(4),
 		.code		= KEY_MAIL,
 		.desc		= "Mail",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPF3,
+		.gpio		= S3C2410_GPF(3),
 		.code		= SW_RADIO,
 		.desc		= "GPS Antenna",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPG2,
+		.gpio		= S3C2410_GPG(2),
 		.code		= SW_HEADPHONE_INSERT,
 		.desc		= "Headphone",
 		.active_low	= 0,
@@ -259,7 +264,15 @@ static struct platform_device n35_button_device = {
 /* This is the bluetooth LED on the device. */
 static struct s3c24xx_led_platdata n30_blue_led_pdata = {
 	.name		= "blue_led",
-	.gpio		= S3C2410_GPG6,
+	.gpio		= S3C2410_GPG(6),
+	.def_trigger	= "",
+};
+
+/* This is the blue LED on the device. Originaly used to indicate GPS activity
+ * by flashing. */
+static struct s3c24xx_led_platdata n35_blue_led_pdata = {
+	.name		= "blue_led",
+	.gpio		= S3C2410_GPD(8),
 	.def_trigger	= "",
 };
 
@@ -270,7 +283,14 @@ static struct s3c24xx_led_platdata n30_blue_led_pdata = {
 static struct s3c24xx_led_platdata n30_warning_led_pdata = {
 	.name		= "warning_led",
 	.flags          = S3C24XX_LEDF_ACTLOW,
-	.gpio		= S3C2410_GPD9,
+	.gpio		= S3C2410_GPD(9),
+	.def_trigger	= "",
+};
+
+static struct s3c24xx_led_platdata n35_warning_led_pdata = {
+	.name		= "warning_led",
+	.flags          = S3C24XX_LEDF_ACTLOW | S3C24XX_LEDF_TRISTATE,
+	.gpio		= S3C2410_GPD(9),
 	.def_trigger	= "",
 };
 
@@ -282,11 +302,27 @@ static struct platform_device n30_blue_led = {
 	},
 };
 
+static struct platform_device n35_blue_led = {
+	.name		= "s3c24xx_led",
+	.id		= 1,
+	.dev		= {
+		.platform_data	= &n35_blue_led_pdata,
+	},
+};
+
 static struct platform_device n30_warning_led = {
 	.name		= "s3c24xx_led",
 	.id		= 2,
 	.dev		= {
 		.platform_data	= &n30_warning_led_pdata,
+	},
+};
+
+static struct platform_device n35_warning_led = {
+	.name		= "s3c24xx_led",
+	.id		= 2,
+	.dev		= {
+		.platform_data	= &n35_warning_led_pdata,
 	},
 };
 
@@ -316,13 +352,36 @@ static struct s3c2410fb_mach_info n30_fb_info __initdata = {
 	.lpcsel		= 0x06,
 };
 
+static void n30_sdi_set_power(unsigned char power_mode, unsigned short vdd)
+{
+	switch (power_mode) {
+	case MMC_POWER_ON:
+	case MMC_POWER_UP:
+		gpio_set_value(S3C2410_GPG(4), 1);
+		break;
+	case MMC_POWER_OFF:
+	default:
+		gpio_set_value(S3C2410_GPG(4), 0);
+		break;
+	}
+}
+
+static struct s3c24xx_mci_pdata n30_mci_cfg __initdata = {
+	.gpio_detect	= S3C2410_GPF(1),
+	.gpio_wprotect  = S3C2410_GPG(10),
+	.ocr_avail	= MMC_VDD_32_33,
+	.set_power	= n30_sdi_set_power,
+};
+
 static struct platform_device *n30_devices[] __initdata = {
 	&s3c_device_lcd,
 	&s3c_device_wdt,
 	&s3c_device_i2c0,
 	&s3c_device_iis,
-	&s3c_device_usb,
+	&s3c_device_ohci,
+	&s3c_device_rtc,
 	&s3c_device_usbgadget,
+	&s3c_device_sdi,
 	&n30_button_device,
 	&n30_blue_led,
 	&n30_warning_led,
@@ -333,11 +392,15 @@ static struct platform_device *n35_devices[] __initdata = {
 	&s3c_device_wdt,
 	&s3c_device_i2c0,
 	&s3c_device_iis,
+	&s3c_device_rtc,
 	&s3c_device_usbgadget,
+	&s3c_device_sdi,
 	&n35_button_device,
+	&n35_blue_led,
+	&n35_warning_led,
 };
 
-static struct s3c2410_platform_i2c n30_i2ccfg = {
+static struct s3c2410_platform_i2c __initdata n30_i2ccfg = {
 	.flags		= 0,
 	.slave_addr	= 0x10,
 	.frequency	= 10*1000,
@@ -489,18 +552,16 @@ static void __init n30_map_io(void)
 	s3c24xx_init_uarts(n30_uartcfgs, ARRAY_SIZE(n30_uartcfgs));
 }
 
-static void __init n30_init_irq(void)
-{
-	s3c24xx_init_irq();
-}
-
 /* GPB3 is the line that controls the pull-up for the USB D+ line */
 
 static void __init n30_init(void)
 {
+	WARN_ON(gpio_request(S3C2410_GPG(4), "mmc power"));
+
 	s3c24xx_fb_set_platdata(&n30_fb_info);
-	s3c_device_i2c0.dev.platform_data = &n30_i2ccfg;
 	s3c24xx_udc_set_platdata(&n30_udc_cfg);
+	s3c24xx_mci_set_platdata(&n30_mci_cfg);
+	s3c_i2c0_set_platdata(&n30_i2ccfg);
 
 	/* Turn off suspend on both USB ports, and switch the
 	 * selectable USB port to USB device mode. */
@@ -531,10 +592,13 @@ static void __init n30_init(void)
 		s3c2410_modify_misccr(S3C2410_MISCCR_USBHOST |
 				      S3C2410_MISCCR_USBSUSPND0 |
 				      S3C2410_MISCCR_USBSUSPND1,
-				      S3C2410_MISCCR_USBSUSPND1);
+				      S3C2410_MISCCR_USBSUSPND0);
 
 		platform_add_devices(n35_devices, ARRAY_SIZE(n35_devices));
 	}
+
+	WARN_ON(gpio_request(S3C2410_GPB(3), "udc pup"));
+	gpio_direction_output(S3C2410_GPB(3), 0);
 }
 
 MACHINE_START(N30, "Acer-N30")
@@ -546,7 +610,7 @@ MACHINE_START(N30, "Acer-N30")
 	.boot_params	= S3C2410_SDRAM_PA + 0x100,
 	.timer		= &s3c24xx_timer,
 	.init_machine	= n30_init,
-	.init_irq	= n30_init_irq,
+	.init_irq	= s3c24xx_init_irq,
 	.map_io		= n30_map_io,
 MACHINE_END
 
@@ -558,6 +622,6 @@ MACHINE_START(N35, "Acer-N35")
 	.boot_params	= S3C2410_SDRAM_PA + 0x100,
 	.timer		= &s3c24xx_timer,
 	.init_machine	= n30_init,
-	.init_irq	= n30_init_irq,
+	.init_irq	= s3c24xx_init_irq,
 	.map_io		= n30_map_io,
 MACHINE_END

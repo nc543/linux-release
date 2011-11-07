@@ -1,12 +1,24 @@
 /*
  * Simple MTD partitioning layer
  *
- * (C) 2000 Nicolas Pitre <nico@cam.org>
+ * Copyright © 2000 Nicolas Pitre <nico@fluxnic.net>
+ * Copyright © 2002 Thomas Gleixner <gleixner@linutronix.de>
+ * Copyright © 2000-2010 David Woodhouse <dwmw2@infradead.org>
  *
- * This code is GPL
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
- * 	02-21-2002	Thomas Gleixner <gleixner@autronix.de>
- *			added support for read_oob, write_oob
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ *
  */
 
 #include <linux/module.h>
@@ -17,7 +29,6 @@
 #include <linux/kmod.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/partitions.h>
-#include <linux/mtd/compatmac.h>
 
 /* Our partition linked list */
 static LIST_HEAD(mtd_partitions);
@@ -27,9 +38,7 @@ struct mtd_part {
 	struct mtd_info mtd;
 	struct mtd_info *master;
 	uint64_t offset;
-	int index;
 	struct list_head list;
-	int registered;
 };
 
 /*
@@ -266,6 +275,14 @@ static int part_unlock(struct mtd_info *mtd, loff_t ofs, uint64_t len)
 	return part->master->unlock(part->master, ofs + part->offset, len);
 }
 
+static int part_is_locked(struct mtd_info *mtd, loff_t ofs, uint64_t len)
+{
+	struct mtd_part *part = PART(mtd);
+	if ((len + ofs) > mtd->size)
+		return -EINVAL;
+	return part->master->is_locked(part->master, ofs + part->offset, len);
+}
+
 static void part_sync(struct mtd_info *mtd)
 {
 	struct mtd_part *part = PART(mtd);
@@ -321,8 +338,7 @@ int del_mtd_partitions(struct mtd_info *master)
 	list_for_each_entry_safe(slave, next, &mtd_partitions, list)
 		if (slave->master == master) {
 			list_del(&slave->list);
-			if (slave->registered)
-				del_mtd_device(&slave->mtd);
+			del_mtd_device(&slave->mtd);
 			kfree(slave);
 		}
 
@@ -395,7 +411,7 @@ static struct mtd_part *add_one_partition(struct mtd_info *master,
 		slave->mtd.get_fact_prot_info = part_get_fact_prot_info;
 	if (master->sync)
 		slave->mtd.sync = part_sync;
-	if (!partno && master->suspend && master->resume) {
+	if (!partno && !master->dev.class && master->suspend && master->resume) {
 			slave->mtd.suspend = part_suspend;
 			slave->mtd.resume = part_resume;
 	}
@@ -405,6 +421,8 @@ static struct mtd_part *add_one_partition(struct mtd_info *master,
 		slave->mtd.lock = part_lock;
 	if (master->unlock)
 		slave->mtd.unlock = part_unlock;
+	if (master->is_locked)
+		slave->mtd.is_locked = part_is_locked;
 	if (master->block_isbad)
 		slave->mtd.block_isbad = part_block_isbad;
 	if (master->block_markbad)
@@ -412,7 +430,6 @@ static struct mtd_part *add_one_partition(struct mtd_info *master,
 	slave->mtd.erase = part_erase;
 	slave->master = master;
 	slave->offset = part->offset;
-	slave->index = partno;
 
 	if (slave->offset == MTDPART_OFS_APPEND)
 		slave->offset = cur_offset;
@@ -457,7 +474,8 @@ static struct mtd_part *add_one_partition(struct mtd_info *master,
 		for (i = 0; i < max && regions[i].offset <= slave->offset; i++)
 			;
 		/* The loop searched for the region _behind_ the first one */
-		i--;
+		if (i > 0)
+			i--;
 
 		/* Pick biggest erasesize */
 		for (; i < max && regions[i].offset < end; i++) {
@@ -500,15 +518,9 @@ static struct mtd_part *add_one_partition(struct mtd_info *master,
 	}
 
 out_register:
-	if (part->mtdp) {
-		/* store the object pointer (caller may or may not register it*/
-		*part->mtdp = &slave->mtd;
-		slave->registered = 0;
-	} else {
-		/* register our partition */
-		add_mtd_device(&slave->mtd);
-		slave->registered = 1;
-	}
+	/* register our partition */
+	add_mtd_device(&slave->mtd);
+
 	return slave;
 }
 

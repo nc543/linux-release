@@ -1,5 +1,5 @@
 /*
- * DVB USB Linux driver for Afatech AF9015 DVB-T USB2.0 receiver
+ * Afatech AF9013 demodulator driver
  *
  * Copyright (C) 2007 Antti Palosaari <crope@iki.fi>
  *
@@ -527,6 +527,10 @@ static int af9013_set_ofdm_params(struct af9013_state *state,
 	u8 i, buf[3] = {0, 0, 0};
 	*auto_mode = 0; /* set if parameters are requested to auto set */
 
+	/* Try auto-detect transmission parameters in case of AUTO requested or
+	   garbage parameters given by application for compatibility.
+	   MPlayer seems to provide garbage parameters currently. */
+
 	switch (params->transmission_mode) {
 	case TRANSMISSION_MODE_AUTO:
 		*auto_mode = 1;
@@ -536,7 +540,8 @@ static int af9013_set_ofdm_params(struct af9013_state *state,
 		buf[0] |= (1 << 0);
 		break;
 	default:
-		return -EINVAL;
+		deb_info("%s: invalid transmission_mode\n", __func__);
+		*auto_mode = 1;
 	}
 
 	switch (params->guard_interval) {
@@ -554,7 +559,8 @@ static int af9013_set_ofdm_params(struct af9013_state *state,
 		buf[0] |= (3 << 2);
 		break;
 	default:
-		return -EINVAL;
+		deb_info("%s: invalid guard_interval\n", __func__);
+		*auto_mode = 1;
 	}
 
 	switch (params->hierarchy_information) {
@@ -572,7 +578,8 @@ static int af9013_set_ofdm_params(struct af9013_state *state,
 		buf[0] |= (3 << 4);
 		break;
 	default:
-		return -EINVAL;
+		deb_info("%s: invalid hierarchy_information\n", __func__);
+		*auto_mode = 1;
 	};
 
 	switch (params->constellation) {
@@ -587,7 +594,8 @@ static int af9013_set_ofdm_params(struct af9013_state *state,
 		buf[1] |= (2 << 6);
 		break;
 	default:
-		return -EINVAL;
+		deb_info("%s: invalid constellation\n", __func__);
+		*auto_mode = 1;
 	}
 
 	/* Use HP. How and which case we can switch to LP? */
@@ -611,7 +619,8 @@ static int af9013_set_ofdm_params(struct af9013_state *state,
 		buf[2] |= (4 << 0);
 		break;
 	default:
-		return -EINVAL;
+		deb_info("%s: invalid code_rate_HP\n", __func__);
+		*auto_mode = 1;
 	}
 
 	switch (params->code_rate_LP) {
@@ -638,7 +647,8 @@ static int af9013_set_ofdm_params(struct af9013_state *state,
 		if (params->hierarchy_information == HIERARCHY_AUTO)
 			break;
 	default:
-		return -EINVAL;
+		deb_info("%s: invalid code_rate_LP\n", __func__);
+		*auto_mode = 1;
 	}
 
 	switch (params->bandwidth) {
@@ -651,7 +661,8 @@ static int af9013_set_ofdm_params(struct af9013_state *state,
 		buf[1] |= (2 << 2);
 		break;
 	default:
-		return -EINVAL;
+		deb_info("%s: invalid bandwidth\n", __func__);
+		buf[1] |= (2 << 2); /* cannot auto-detect BW, try 8 MHz */
 	}
 
 	/* program */
@@ -750,6 +761,10 @@ static int af9013_set_frontend(struct dvb_frontend *fe,
 
 	state->frequency = params->frequency;
 
+	/* program tuner */
+	if (fe->ops.tuner_ops.set_params)
+		fe->ops.tuner_ops.set_params(fe, params);
+
 	/* program CFOE coefficients */
 	ret = af9013_set_coeff(state, params->u.ofdm.bandwidth);
 	if (ret)
@@ -779,10 +794,6 @@ static int af9013_set_frontend(struct dvb_frontend *fe,
 	ret = af9013_write_reg_bits(state, 0x9bc2, 0, 1, 0);
 	if (ret)
 		goto error;
-
-	/* program tuner */
-	if (fe->ops.tuner_ops.set_params)
-		fe->ops.tuner_ops.set_params(fe, params);
 
 	/* program TPS and bandwidth, check if auto mode needed */
 	ret = af9013_set_ofdm_params(state, &params->u.ofdm, &auto_mode);
@@ -1173,45 +1184,49 @@ static int af9013_read_status(struct dvb_frontend *fe, fe_status_t *status)
 	u8 tmp;
 	*status = 0;
 
-	/* TPS lock */
-	ret = af9013_read_reg_bits(state, 0xd330, 3, 1, &tmp);
-	if (ret)
-		goto error;
-	if (tmp)
-		*status |= FE_HAS_VITERBI | FE_HAS_CARRIER | FE_HAS_SIGNAL;
-
 	/* MPEG2 lock */
 	ret = af9013_read_reg_bits(state, 0xd507, 6, 1, &tmp);
 	if (ret)
 		goto error;
 	if (tmp)
-		*status |= FE_HAS_SYNC | FE_HAS_LOCK;
+		*status |= FE_HAS_SIGNAL | FE_HAS_CARRIER | FE_HAS_VITERBI |
+			FE_HAS_SYNC | FE_HAS_LOCK;
 
-	if (!(*status & FE_HAS_SIGNAL)) {
+	if (!*status) {
+		/* TPS lock */
+		ret = af9013_read_reg_bits(state, 0xd330, 3, 1, &tmp);
+		if (ret)
+			goto error;
+		if (tmp)
+			*status |= FE_HAS_SIGNAL | FE_HAS_CARRIER |
+				FE_HAS_VITERBI;
+	}
+
+	if (!*status) {
+		/* CFO lock */
+		ret = af9013_read_reg_bits(state, 0xd333, 7, 1, &tmp);
+		if (ret)
+			goto error;
+		if (tmp)
+			*status |= FE_HAS_SIGNAL | FE_HAS_CARRIER;
+	}
+
+	if (!*status) {
+		/* SFOE lock */
+		ret = af9013_read_reg_bits(state, 0xd334, 6, 1, &tmp);
+		if (ret)
+			goto error;
+		if (tmp)
+			*status |= FE_HAS_SIGNAL | FE_HAS_CARRIER;
+	}
+
+	if (!*status) {
 		/* AGC lock */
 		ret = af9013_read_reg_bits(state, 0xd1a0, 6, 1, &tmp);
 		if (ret)
 			goto error;
 		if (tmp)
 			*status |= FE_HAS_SIGNAL;
-	}
-
-	if (!(*status & FE_HAS_CARRIER)) {
-		/* CFO lock */
-		ret = af9013_read_reg_bits(state, 0xd333, 7, 1, &tmp);
-		if (ret)
-			goto error;
-		if (tmp)
-			*status |= FE_HAS_CARRIER;
-	}
-
-	if (!(*status & FE_HAS_CARRIER)) {
-		/* SFOE lock */
-		ret = af9013_read_reg_bits(state, 0xd334, 6, 1, &tmp);
-		if (ret)
-			goto error;
-		if (tmp)
-			*status |= FE_HAS_CARRIER;
 	}
 
 	ret = af9013_update_statistics(fe);
@@ -1455,7 +1470,7 @@ static int af9013_download_firmware(struct af9013_state *state)
 		af9013_ops.info.name);
 
 	/* request the firmware, this will block and timeout */
-	ret = request_firmware(&fw, fw_file,  &state->i2c->dev);
+	ret = request_firmware(&fw, fw_file, state->i2c->dev.parent);
 	if (ret) {
 		err("did not find the firmware file. (%s) "
 			"Please see linux/Documentation/dvb/ for more details" \
@@ -1563,7 +1578,7 @@ struct dvb_frontend *af9013_attach(const struct af9013_config *config,
 {
 	int ret;
 	struct af9013_state *state = NULL;
-	u8 buf[3], i;
+	u8 buf[4], i;
 
 	/* allocate memory for the internal state */
 	state = kzalloc(sizeof(struct af9013_state), GFP_KERNEL);
@@ -1596,12 +1611,12 @@ struct dvb_frontend *af9013_attach(const struct af9013_config *config,
 	}
 
 	/* firmware version */
-	for (i = 0; i < 3; i++) {
+	for (i = 0; i < 4; i++) {
 		ret = af9013_read_reg(state, 0x5103 + i, &buf[i]);
 		if (ret)
 			goto error;
 	}
-	info("firmware version:%d.%d.%d", buf[0], buf[1], buf[2]);
+	info("firmware version:%d.%d.%d.%d", buf[0], buf[1], buf[2], buf[3]);
 
 	/* settings for mp2if */
 	if (state->config.output_mode == AF9013_OUTPUT_MODE_USB) {

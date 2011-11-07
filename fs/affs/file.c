@@ -34,7 +34,7 @@ const struct file_operations affs_file_operations = {
 	.mmap		= generic_file_mmap,
 	.open		= affs_file_open,
 	.release	= affs_file_release,
-	.fsync		= file_fsync,
+	.fsync		= affs_file_fsync,
 	.splice_read	= generic_file_splice_read,
 };
 
@@ -406,10 +406,19 @@ static int affs_write_begin(struct file *file, struct address_space *mapping,
 			loff_t pos, unsigned len, unsigned flags,
 			struct page **pagep, void **fsdata)
 {
+	int ret;
+
 	*pagep = NULL;
-	return cont_write_begin(file, mapping, pos, len, flags, pagep, fsdata,
+	ret = cont_write_begin(file, mapping, pos, len, flags, pagep, fsdata,
 				affs_get_block,
 				&AFFS_I(mapping->host)->mmu_private);
+	if (unlikely(ret)) {
+		loff_t isize = mapping->host->i_size;
+		if (pos + len > isize)
+			vmtruncate(mapping->host, isize);
+	}
+
+	return ret;
 }
 
 static sector_t _affs_bmap(struct address_space *mapping, sector_t block)
@@ -914,4 +923,16 @@ affs_truncate(struct inode *inode)
 		affs_brelse(ext_bh);
 	}
 	affs_free_prealloc(inode);
+}
+
+int affs_file_fsync(struct file *filp, int datasync)
+{
+	struct inode *inode = filp->f_mapping->host;
+	int ret, err;
+
+	ret = write_inode_now(inode, 0);
+	err = sync_blockdev(inode->i_sb->s_bdev);
+	if (!ret)
+		ret = err;
+	return ret;
 }
